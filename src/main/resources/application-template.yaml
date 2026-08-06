@@ -1,0 +1,124 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 200MB
+  application:
+    name: SeedanceGenarate
+  task:
+    scheduling:
+      pool:
+        size: ${SCHEDULING_POOL_SIZE:4}
+  sql:
+    init:
+      mode: always
+      continue-on-error: true
+server:
+  port: ${SERVER_PORT:8080}
+seedance:
+  api-key: ${SEEDANCE_API_KEY}
+  model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
+  url: ${SEEDANCE_URL:https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks}
+  models:
+    - id: seedance
+      name: ${SEEDANCE_MODEL_1:doubao-seedance-2-0-260128}
+      label: Seedance 2.0
+    - id: seedance-fast
+      name: ${SEEDANCE_MODEL_FAST:doubao-seedance-2-0-fast-260128}
+      label: Seedance 2.0 Fast
+    - id: seedance-mini
+      name: ${SEEDANCE_MODEL_MINI:doubao-seedance-2-0-mini-260615}
+      label: Seedance 2.0 Mini
+video:
+  default-provider: ${VIDEO_DEFAULT_PROVIDER:seedance}
+  model-access:
+    default-open: ${VIDEO_MODEL_ACCESS_DEFAULT_OPEN:true}
+  poll:
+    enabled: ${VIDEO_POLL_ENABLED:true}
+    interval-ms: ${VIDEO_POLL_INTERVAL_MS:2000}
+    initial-delay-ms: ${VIDEO_POLL_INITIAL_DELAY_MS:5000}
+    max-age-hours: ${VIDEO_POLL_MAX_AGE_HOURS:24}
+    batch-size: ${VIDEO_POLL_BATCH_SIZE:200}
+  comfyui:
+    scheduling: ${VIDEO_COMFYUI_SCHEDULING:least-queue}
+    connect-timeout-ms: ${VIDEO_COMFYUI_CONNECT_TIMEOUT_MS:3000}
+    read-timeout-ms: ${VIDEO_COMFYUI_READ_TIMEOUT_MS:60000}
+    nodes:
+      - id: gpu-0
+        base-url: ${COMFYUI_NODE0_URL}
+        enabled: ${COMFYUI_NODE0_ENABLED:true}
+      - id: gpu-1
+        base-url: ${COMFYUI_NODE1_URL}
+        enabled: ${COMFYUI_NODE1_ENABLED:true}
+      - id: gpu-3
+        base-url: ${COMFYUI_NODE3_URL}
+        enabled: ${COMFYUI_NODE3_ENABLED:true}
+      - id: gpu-6
+        base-url: ${COMFYUI_NODE6_URL}
+        enabled: ${COMFYUI_NODE6_ENABLED:true}
+prompt-optimize:
+  url: ${PROMPT_OPTIMIZE_URL}
+  api-key: ${PROMPT_OPTIMIZE_API_KEY}
+  model: ${PROMPT_OPTIMIZE_MODEL:gemma-4-31b}
+file:
+  upload-path: ${FILE_UPLOAD_PATH:./data/images}
+billing:
+  seedance:
+    currency: ${BILLING_SEEDANCE_CURRENCY:CNY}
+    price-per-second: ${BILLING_SEEDANCE_PRICE_PER_SECOND:1.20}
+  comfyui:
+    currency: ${BILLING_COMFYUI_CURRENCY:CNY}
+    flat-price: ${BILLING_COMFYUI_FLAT_PRICE:0.01}
+rate-limit:
+  generate-user:
+    enabled: ${RATE_LIMIT_GENERATE_USER_ENABLED:true}
+    capacity: ${RATE_LIMIT_GENERATE_USER_CAPACITY:3}
+    refill-tokens: ${RATE_LIMIT_GENERATE_USER_REFILL_TOKENS:1}
+    refill-seconds: ${RATE_LIMIT_GENERATE_USER_REFILL_SECONDS:60}
+  generate-admin:
+    enabled: ${RATE_LIMIT_GENERATE_ADMIN_ENABLED:true}
+    capacity: ${RATE_LIMIT_GENERATE_ADMIN_CAPACITY:30}
+    refill-tokens: ${RATE_LIMIT_GENERATE_ADMIN_REFILL_TOKENS:10}
+    refill-seconds: ${RATE_LIMIT_GENERATE_ADMIN_REFILL_SECONDS:60}
+  generate-ip:
+    enabled: ${RATE_LIMIT_GENERATE_IP_ENABLED:true}
+    capacity: ${RATE_LIMIT_GENERATE_IP_CAPACITY:5}
+    refill-tokens: ${RATE_LIMIT_GENERATE_IP_REFILL_TOKENS:1}
+    refill-seconds: ${RATE_LIMIT_GENERATE_IP_REFILL_SECONDS:60}
+  prompt-optimize-user:
+    enabled: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_ENABLED:true}
+    capacity: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_CAPACITY:20}
+    refill-tokens: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_REFILL_TOKENS:5}
+    refill-seconds: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_REFILL_SECONDS:60}
+  prompt-optimize-ip:
+    enabled: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_ENABLED:true}
+    capacity: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_CAPACITY:30}
+    refill-tokens: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_REFILL_TOKENS:10}
+    refill-seconds: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_REFILL_SECONDS:60}
+  register-ip:
+    enabled: ${RATE_LIMIT_REGISTER_IP_ENABLED:true}
+    capacity: ${RATE_LIMIT_REGISTER_IP_CAPACITY:2}
+    refill-tokens: ${RATE_LIMIT_REGISTER_IP_REFILL_TOKENS:1}
+    refill-seconds: ${RATE_LIMIT_REGISTER_IP_REFILL_SECONDS:3600}
+  api-key:
+    enabled: ${RATE_LIMIT_API_KEY_ENABLED:true}
+    capacity: ${RATE_LIMIT_API_KEY_CAPACITY:10}
+    refill-tokens: ${RATE_LIMIT_API_KEY_REFILL_TOKENS:5}
+    refill-seconds: ${RATE_LIMIT_API_KEY_REFILL_SECONDS:60}
+mybatis-plus:
+  configuration:
+    log-impl: ${MYBATIS_PLUS_LOG_IMPL:org.apache.ibatis.logging.stdout.StdOutImpl}
+  mapper-locations: classpath:/mapper/**/*.xml
+  type-aliases-package: org.example.seedancegenarate.entity
+aliyun:
+  oss:
+    endpoint: ${ALIYUN_OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+    access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID}
+    access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+    bucket-name: ${ALIYUN_OSS_BUCKET_NAME}
+    domain: ${ALIYUN_OSS_DOMAIN}

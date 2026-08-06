@@ -1,0 +1,13 @@
+.idea
+*.iml
+.DS_Store
+.git
+.gitignore
+README.md
+HELP.md
+.mvn
+mvnw
+mvnw.cmd
+src
+pom.xml
+!target/*.jar

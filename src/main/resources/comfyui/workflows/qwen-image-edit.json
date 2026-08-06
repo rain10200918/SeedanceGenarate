@@ -1,0 +1,19 @@
+{
+  "37": {"inputs": {"vae_name": "qwen_image_vae.safetensors"}, "class_type": "VAELoader", "_meta": {"title": "加载VAE"}},
+  "55": {"inputs": {"unet_name": "Qwen-Rapid-NSFW-v23_Q4_K.gguf"}, "class_type": "UnetLoaderGGUF", "_meta": {"title": "Unet Loader (GGUF)"}},
+  "56": {"inputs": {"clip_name": "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf", "type": "qwen_image"}, "class_type": "CLIPLoaderGGUF", "_meta": {"title": "CLIPLoader (GGUF)"}},
+  "66": {"inputs": {"lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "strength_model": 0.8, "model": ["55", 0]}, "class_type": "LoraLoaderModelOnly", "_meta": {"title": "LoRA加载器（仅模型）"}},
+  "41": {"inputs": {"shift": 3.1, "model": ["66", 0]}, "class_type": "ModelSamplingAuraFlow", "_meta": {"title": "采样算法（AuraFlow）"}},
+  "40": {"inputs": {"strength": 1, "pre_cfg": false, "model": ["41", 0]}, "class_type": "CFGNorm", "_meta": {"title": "CFG归一化"}},
+  "48": {"inputs": {"prompt": "", "clip": ["56", 0], "vae": ["37", 0], "image1": ["39", 0]}, "class_type": "TextEncodeQwenImageEditPlus", "_meta": {"title": "文本编码（QwenImageEditPlus）"}},
+  "53": {"inputs": {"prompt": "", "clip": ["56", 0], "vae": ["37", 0]}, "class_type": "TextEncodeQwenImageEditPlus", "_meta": {"title": "文本编码（QwenImageEditPlus）"}},
+  "43": {"inputs": {"reference_latents_method": "index_timestep_zero", "conditioning": ["48", 0]}, "class_type": "FluxKontextMultiReferenceLatentMethod", "_meta": {"title": "Edit Model Reference Method"}},
+  "44": {"inputs": {"reference_latents_method": "index_timestep_zero", "conditioning": ["53", 0]}, "class_type": "FluxKontextMultiReferenceLatentMethod", "_meta": {"title": "Edit Model Reference Method"}},
+  "49": {"inputs": {"width": 960, "height": 960, "batch_size": 1}, "class_type": "EmptySD3LatentImage", "_meta": {"title": "空Latent图像（SD3）"}},
+  "46": {"inputs": {"image": "222.jpg"}, "class_type": "LoadImage", "_meta": {"title": "加载图像1"}},
+  "39": {"inputs": {"upscale_method": "lanczos", "megapixels": 0.8, "resolution_steps": 61, "image": ["46", 0]}, "class_type": "ImageScaleToTotalPixels", "_meta": {"title": "缩放图像（像素）"}},
+  "52": {"inputs": {"pixels": ["39", 0], "vae": ["37", 0]}, "class_type": "VAEEncode", "_meta": {"title": "VAE编码"}},
+  "42": {"inputs": {"seed": 894758404622672, "steps": 4, "cfg": 1, "sampler_name": "euler_ancestral", "scheduler": "beta", "denoise": 1, "model": ["40", 0], "positive": ["43", 0], "negative": ["44", 0], "latent_image": ["49", 0]}, "class_type": "KSampler", "_meta": {"title": "K采样器"}},
+  "34": {"inputs": {"samples": ["42", 0], "vae": ["37", 0]}, "class_type": "VAEDecode", "_meta": {"title": "VAE解码"}},
+  "36": {"inputs": {"filename_prefix": "image/qwen-image-edit", "images": ["34", 0]}, "class_type": "SaveImage", "_meta": {"title": "保存图像"}}
+}

@@ -1,0 +1,5 @@
+-cp
+/Users/a1234/IdeaProjects/SeedanceGenarate/target/classes:/Users/a1234/.m2/repository/org/lionsoul/ip2region/2.7.0/ip2region-2.7.0-sources.jar:/Users/a1234/.m2/repository/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar:/Users/a1234/.m2/repository/org/springframework/spring-core/7.0.8/spring-core-7.0.8-sources.jar:/Users/a1234/.m2/repository/org/springframework/spring-jcl/6.1.14/spring-jcl-6.1.14.jar
+-d
+/tmp
+/tmp/IpUtilsProbe.java
