@@ -178,3 +178,18 @@ CREATE TABLE IF NOT EXISTS webhook_delivery (
 );
 
 ALTER TABLE video_task ADD COLUMN api_key_id BIGINT NULL COMMENT '对外 API 来源判别列；空=UI' AFTER node_id;
+
+-- 模型计价配置（管理端在线改价；未配置的模型沿用 yaml 默认价）
+CREATE TABLE IF NOT EXISTS price_config (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  provider VARCHAR(32) NOT NULL COMMENT '提供方：seedance / comfyui',
+  model VARCHAR(64) NOT NULL DEFAULT '' COMMENT '模型 id；空串 = 提供方默认价',
+  billing_type VARCHAR(16) NOT NULL COMMENT 'PER_SECOND 按秒 / FLAT 按次固定',
+  unit_price DECIMAL(10, 4) NOT NULL COMMENT '单价（元）',
+  currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  remark VARCHAR(255) NULL,
+  create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_price_provider_model (provider, model)
+);

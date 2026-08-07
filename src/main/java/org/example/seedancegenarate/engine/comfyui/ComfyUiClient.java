@@ -68,6 +68,17 @@ public class ComfyUiClient {
         return promptId;
     }
 
+    /** 查询节点系统状态（GPU 型号 / 显存占用），供管理端健康检测 */
+    public JsonNode getSystemStats(String baseUrl, int timeoutMs) throws Exception {
+        HttpResponse resp = HttpRequest.get(baseUrl + "/system_stats")
+                .timeout(timeoutMs)
+                .execute();
+        if (!resp.isOk()) {
+            throw new RuntimeException("ComfyUI 查询系统状态失败: " + resp.getStatus());
+        }
+        return objectMapper.readTree(resp.body());
+    }
+
     /** 查询任务历史（含状态与输出）；prompt_id 不在结果里表示仍在排队 / 执行 */
     public JsonNode getHistory(String baseUrl, String promptId, int timeoutMs) throws Exception {
         HttpResponse resp = HttpRequest.get(baseUrl + "/history/" + promptId)
