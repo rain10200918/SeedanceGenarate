@@ -10,11 +10,13 @@ import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.event.TaskSubmittedEvent;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
@@ -33,6 +35,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final CostRecordService costRecordService;
     private final ModelAccessService modelAccessService;
     private final ObjectMapper objectMapper;
+    private final ApplicationEventPublisher applicationEventPublisher;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -92,6 +95,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 提交即计费仅对 ON_SUBMIT 提供方生效（如 Seedance），幂等。
         // 原由控制器 AOP 切面触发，现收进共享提交路径——UI 与对外 API 两条入口都走这里，都会计费。
         costRecordService.recordOnSubmit(task);
+        // 任务提交成功事件：素材库等下游通过监听器解耦登记，不阻塞提交链路（@Async）
+        applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.getTaskId(), imageUrls));
         return task;
     }
 

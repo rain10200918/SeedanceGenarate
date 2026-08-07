@@ -193,3 +193,29 @@ CREATE TABLE IF NOT EXISTS price_config (
   update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_price_provider_model (provider, model)
 );
+
+-- ===================== 素材库（一期） =====================
+-- 用户素材文件夹（树形；parent_id 为 NULL 表示根目录）
+CREATE TABLE IF NOT EXISTS asset_folder (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL COMMENT '属主用户',
+  name VARCHAR(64) NOT NULL COMMENT '文件夹名',
+  parent_id BIGINT NULL COMMENT '父文件夹；NULL=根目录',
+  create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_folder_user_parent_name (user_id, parent_id, name) COMMENT '同层防重名'
+) COMMENT '用户素材文件夹';
+
+-- 用户素材（任务提交的图片自动登记；URL 全部来自本系统 OSS，已过白名单校验，不转存）
+CREATE TABLE IF NOT EXISTS user_asset (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL COMMENT '属主用户',
+  type VARCHAR(16) NOT NULL DEFAULT 'IMAGE' COMMENT 'IMAGE / VIDEO（预留）',
+  source VARCHAR(16) NOT NULL DEFAULT 'TASK' COMMENT '来源：TASK 任务提交（UPLOAD 独立上传预留）',
+  url VARCHAR(512) NOT NULL COMMENT 'OSS 地址',
+  task_id VARCHAR(128) NULL COMMENT '来源任务 video_task.task_id；独立上传时为空',
+  folder_id BIGINT NULL COMMENT '所属文件夹；NULL=未归档',
+  status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE / DELETED（软删，保历史任务引用）',
+  create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_asset_user_time (user_id, id) COMMENT '游标分页',
+  UNIQUE KEY uk_asset_user_url (user_id, url) COMMENT '同图幂等去重'
+) COMMENT '用户素材库';
