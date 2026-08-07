@@ -220,6 +220,15 @@ public class AssetServiceImpl implements AssetService {
     }
 
     @Override
+    public List<UserAsset> listByIds(Long userId, List<Long> ids) {
+        if (ids == null || ids.isEmpty()) return List.of();
+        return userAssetMapper.selectList(new LambdaQueryWrapper<UserAsset>()
+                .eq(UserAsset::getUserId, userId)
+                .eq(UserAsset::getStatus, "ACTIVE")
+                .in(UserAsset::getId, ids));
+    }
+
+    @Override
     @Transactional
     public List<Long> softDeleteAssets(Long userId, List<Long> assetIds) {
         List<Long> refused = new ArrayList<>();

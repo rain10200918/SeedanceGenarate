@@ -40,6 +40,9 @@ public interface AssetService {
     /** 批量软删素材；返回因被引用而拒绝的 id 列表（流水线接入后填充） */
     List<Long> softDeleteAssets(Long userId, List<Long> assetIds);
 
+    /** 批量查询本人 ACTIVE 素材（流水线节点缩略图反查用） */
+    List<UserAsset> listByIds(Long userId, List<Long> ids);
+
     /** 素材被哪些流水线节点引用（删除保护；二期流水线接入后填充） */
     List<Long> assetUsages(Long userId, Long assetId);
 }

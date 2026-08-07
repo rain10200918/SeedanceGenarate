@@ -74,6 +74,12 @@ public class AssetController {
         return Result.success(assetService.softDeleteAssets(UserContext.requireUserId(), req.assetIds()));
     }
 
+    /** 按 id 批量查询本人素材（流水线节点缩略图反查） */
+    @GetMapping("/batch")
+    public Result<List<UserAsset>> batch(@RequestParam("ids") List<Long> ids) {
+        return Result.success(assetService.listByIds(UserContext.requireUserId(), ids));
+    }
+
     /** 素材被哪些流水线节点引用（删除保护；二期流水线接入后填充） */
     @GetMapping("/{id}/usages")
     public Result<List<Long>> usages(@PathVariable Long id) {

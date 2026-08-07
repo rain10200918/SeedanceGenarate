@@ -219,3 +219,36 @@ CREATE TABLE IF NOT EXISTS user_asset (
   KEY idx_asset_user_time (user_id, id) COMMENT '游标分页',
   UNIQUE KEY uk_asset_user_url (user_id, url) COMMENT '同图幂等去重'
 ) COMMENT '用户素材库';
+
+-- ===================== 分镜流水线（二期） =====================
+CREATE TABLE IF NOT EXISTS pipeline (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL COMMENT '属主用户',
+  title VARCHAR(128) NOT NULL COMMENT '流水线标题',
+  provider VARCHAR(32) NULL COMMENT '运行时统一模型提供方；空=系统默认',
+  model VARCHAR(64) NULL COMMENT '运行时统一模型；空=提供方默认',
+  status VARCHAR(16) NOT NULL DEFAULT 'DRAFT' COMMENT 'DRAFT/RUNNING/DONE/PARTIAL_FAILED',
+  create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_pipeline_user (user_id, id)
+) COMMENT '分镜流水线';
+
+CREATE TABLE IF NOT EXISTS pipeline_node (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  pipeline_id BIGINT NOT NULL COMMENT '所属流水线',
+  seq INT NOT NULL COMMENT '节点顺序（0=INPUT 素材池，其后为 SCENE 分镜）',
+  kind VARCHAR(16) NOT NULL COMMENT 'INPUT 素材池 / SCENE 分镜',
+  name VARCHAR(128) NULL COMMENT '节点名',
+  asset_ids JSON NULL COMMENT '引用 user_asset.id 数组（实体引用，非 URL）',
+  prompt TEXT NULL,
+  duration INT NULL COMMENT '生成时长（秒）',
+  ratio VARCHAR(32) NULL COMMENT '画面比例',
+  model VARCHAR(64) NULL COMMENT '分镜独立模型；空=跟随流水线模型',
+  task_id VARCHAR(128) NULL COMMENT '最近一次运行的任务（终态事件回填反查键）',
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/PROCESSING/SUCCESS/FAILED',
+  video_url VARCHAR(512) NULL COMMENT '终态回填的生成结果（本地转存地址）',
+  error_msg VARCHAR(512) NULL,
+  create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_node_pipeline (pipeline_id, seq)
+) COMMENT '流水线节点';
