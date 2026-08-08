@@ -1,36 +1,34 @@
 package org.example.seedancegenarate.service.Impl;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.engine.BillingTiming;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
-import org.example.seedancegenarate.entity.AppUser;
 import org.example.seedancegenarate.entity.CostRecord;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.mapper.AppUserMapper;
 import org.example.seedancegenarate.mapper.CostRecordMapper;
-import org.example.seedancegenarate.service.AppUserService;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 
 @Slf4j
 @Service
 public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRecord> implements CostRecordService {
-    private final AppUserService appUserService;
+    private final AppUserMapper appUserMapper;
     private final VideoTaskService videoTaskService;
     private final PricingService pricingService;
     private final VideoEngineRegistry videoEngineRegistry;
 
-    public CostRecordServiceImpl(AppUserService appUserService, @Lazy VideoTaskService videoTaskService,
+    public CostRecordServiceImpl(AppUserMapper appUserMapper, @Lazy VideoTaskService videoTaskService,
                                  PricingService pricingService, VideoEngineRegistry videoEngineRegistry) {
-        this.appUserService = appUserService;
+        this.appUserMapper = appUserMapper;
         this.videoTaskService = videoTaskService;
         this.pricingService = pricingService;
         this.videoEngineRegistry = videoEngineRegistry;
@@ -66,15 +64,9 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
         }
     }
 
-    /** 真正落账：幂等（同一任务已计费则跳过），写 cost_record + 回写 task.costAmount + 累加用户消费 */
+    /** 真正落账：幂等（唯一键兜底），写 cost_record + 回写 task.costAmount + 原子累加用户消费 */
     private void doRecord(VideoTask task) {
         if (task == null || task.getId() == null || task.getUserId() == null) {
-            return;
-        }
-        boolean already = this.count(
-                Wrappers.<CostRecord>lambdaQuery().eq(CostRecord::getTaskId, task.getId())
-        ) > 0;
-        if (already) {
             return;
         }
 
@@ -93,7 +85,12 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
         record.setCurrency(price.currency());
         record.setBizType(hasReferenceImage ? "IMAGE_TO_VIDEO" : "TEXT_TO_VIDEO");
         record.setRemark(providerLabel(task.getProvider()) + (hasReferenceImage ? " 图生视频生成费用" : " 文生视频生成费用"));
-        this.save(record);
+        try {
+            this.save(record);
+        } catch (DuplicateKeyException e) {
+            // 多实例/重复终态并发下，由 uk_cost_record_task_id 保证同一任务只计费一次。
+            return;
+        }
 
         VideoTask updateTask = new VideoTask();
         updateTask.setId(task.getId());
@@ -101,14 +98,7 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
         videoTaskService.updateById(updateTask);
         task.setCostAmount(amount);
 
-        AppUser user = appUserService.getById(task.getUserId());
-        if (user != null) {
-            BigDecimal totalCost = user.getTotalCost() == null ? BigDecimal.ZERO : user.getTotalCost();
-            AppUser updateUser = new AppUser();
-            updateUser.setId(user.getId());
-            updateUser.setTotalCost(totalCost.add(amount).setScale(2, RoundingMode.HALF_UP));
-            appUserService.updateById(updateUser);
-        }
+        appUserMapper.incrementTotalCost(task.getUserId(), amount);
     }
 
     private String providerLabel(String provider) {

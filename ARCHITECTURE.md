@@ -127,7 +127,7 @@
 - `user_token`：token → user_id + 过期时间（`TokenCleanupTask` 定期清）。
 - `invite_code`：邀请码及使用状态。
 - `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 status、video_url（本地路径）、error_msg、cost_amount、images(JSON)。**任务类型**（文生视频/图生视频/文生图/图生图）是正交派生：输入维度看 `images` 空否、输出维度看 `output_type`，用 `GenerationMode.of(hasImage, outputType)` 现算，**不单独落库**（避免与 `images` 重复→漂移）。
-- `cost_record`：每笔计费；含 `provider`、`amount`、`unit_price`、`biz_type`、`task_id`。
+- `cost_record`：每笔计费；含 `provider`、`amount`、`unit_price`、`biz_type`、`task_id`。`V2__billing_idempotency.sql` 为 `task_id` 增加唯一约束，重复终态处理捕获唯一键冲突直接视为已计费。
 - `model_access`：模型开放开关（管理员运行时开/关）。**稀疏覆盖**：只存被显式设过的模型（`model` 唯一 + `enabled`），没有行的模型走默认 `video.model-access.default-open`；「有哪些模型」仍以 `VideoEngineRegistry` 为准，本表只叠加开关、不作模型清单来源（避免与注册表漂移）。
 - `api_key`：对外 API 钥匙（只存 SHA-256 哈希 + 前缀；明文创建时返回一次）。`api_call_log`：API 调用明细（**唯一真相**，模型次数/消费/拒绝分布全聚合现算，不建计数器表；两阶段状态 RECEIVED→SUCCESS/FAILED/REJECTED，含 request_id 幂等键、参数摘要、IP/UA、耗时分段、金额冗余）。`webhook_delivery`：回调投递（`(task_id,status)` 唯一幂等 + 重试计数）。
 > 设计要点：**单一 `video_task` 生命周期**（一张表 + provider 判别 + `api_key_id` 来源判别），不为 ComfyUI / 对外 API 另开并行子系统/表，避免历史记录割裂。

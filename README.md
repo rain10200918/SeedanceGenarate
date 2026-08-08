@@ -48,7 +48,7 @@
 
 3. **计费时机由引擎声明，幂等记账**
    - `VideoEngine.billingTiming()`：Seedance = `ON_SUBMIT`（云端按秒预扣），ComfyUI = `ON_SUCCESS`（自建按结果结）。
-   - 记账按 `task.id` 去重，前端反复轮询也不会重复扣费。
+   - `cost_record.task_id` 由唯一索引做最终幂等兜底，重复终态处理不会重复扣费；用户累计消费使用数据库原子累加。
 
 4. **前端不轮询，改为服务端驱动 + SSE 推送**
    - 后台 `VideoTaskPoller` 持续推进 `PROCESSING` 任务，完成即下载产物落本地（规避云端地址过期）；终态经 `@TransactionalEventListener(AFTER_COMMIT)` 发事件 → SSE 推给对应浏览器。
