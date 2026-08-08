@@ -252,3 +252,19 @@ CREATE TABLE IF NOT EXISTS pipeline_node (
   update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_node_pipeline (pipeline_id, seq)
 ) COMMENT '流水线节点';
+
+-- ===================== 索引优化（2026-08-08） =====================
+-- 轮询器每 2 秒按 status+create_time 捞任务；任务按 taskId 反查；任务列表按 user_id+update_time 排序
+ALTER TABLE video_task
+  ADD KEY idx_video_task_status_time (status, create_time),
+  ADD KEY idx_video_task_task_id (task_id),
+  ADD KEY idx_video_task_user_update (user_id, update_time);
+-- 流水线终态回填按 taskId 反查节点
+ALTER TABLE pipeline_node ADD KEY idx_node_task_id (task_id);
+-- 与同列唯一索引重复的冗余索引
+ALTER TABLE invite_code DROP INDEX idx_invite_code_code;
+ALTER TABLE model_access DROP INDEX idx_model_access_model;
+ALTER TABLE user_token DROP INDEX idx_user_token_token;
+
+-- API 调用日志：管理端按状态 + 时间范围过滤（日志量上来后生效）
+ALTER TABLE api_call_log ADD KEY idx_call_log_status_time (status, create_time);
