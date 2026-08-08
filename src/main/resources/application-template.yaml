@@ -16,8 +16,13 @@ spring:
         size: ${SCHEDULING_POOL_SIZE:4}
   sql:
     init:
-      mode: always
+      # 数据库结构由 Flyway 版本化迁移管理；schema.sql 仅保留为历史参考，不再启动自动执行。
+      mode: ${SPRING_SQL_INIT_MODE:never}
       continue-on-error: true
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    # 本地已有 schema.sql 初始化过的库可自动 baseline；生产首次接入前应先备份并确认当前结构。
+    baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
 server:
   port: ${SERVER_PORT:8080}
 seedance:

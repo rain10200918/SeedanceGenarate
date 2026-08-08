@@ -14,7 +14,7 @@
 
 ## 2. 技术栈
 
-- Java 17、Spring Boot 3.3.5、MyBatis-Plus 3.5.7、MySQL
+- Java 17、Spring Boot 3.3.5、MyBatis-Plus 3.5.7、MySQL、Flyway（版本化数据库迁移）
 - Hutool 5.8.27（ComfyUI HTTP 调用）、Jackson（工作流 JSON 编辑）、Lombok
 - 阿里云 OSS SDK
 - 前端：Vue3 + Pinia + Element Plus + axios
@@ -26,7 +26,7 @@
   - `engine.comfyui.Impl.*WorkflowBuilderTest` 为纯 JUnit，不依赖 Spring/DB。
   - `SeedanceGenarateApplicationTests` 会启动 Spring 上下文并连接 MySQL —— **跑全量测试需要 MySQL 可用**。
 - 运行：`./mvnw spring-boot:run`（端口 `SERVER_PORT`，默认 8080）
-- 数据库：启动时自动执行 `resources/schema.sql`（`spring.sql.init.mode=always` + `continue-on-error=true`，故重复 ALTER 报错会被忽略）。
+- 数据库：由 Flyway 执行 `resources/db/migration/V1__baseline.sql` 起的版本化迁移；`schema.sql` 仅保留为历史参考，默认 `spring.sql.init.mode=never` 不再启动自动执行。已有本地库可通过 `spring.flyway.baseline-on-migrate=true` 自动纳管。
 
 ## 4. 目录结构（关键包，`org.example.seedancegenarate`）
 
@@ -43,6 +43,7 @@
 - `service/VideoSubmitService` —— **提交编排共享服务**（UI 与对外 API 共用：模型解析/闸门/落库/提交/计费）；`service/ApiKeyService`（钥匙生成/哈希/校验）、`service/ApiVideoService`（API 提交门面：幂等+两阶段日志）
 - `interceptor/` —— `AuthInterceptor` + 三个限流拦截器 + `ApiKeyInterceptor`/`ApiKeyRateLimitInterceptor`（对外 API）；`config/WebConfig` 注册它们
 - `config/` —— 各 `@ConfigurationProperties`；`entity/`、`mapper/`、`dto/`、`context/UserContext`、`util/`、`task/TokenCleanupTask`（清过期 token）、`task/VideoTaskPoller`（推进 PROCESSING 任务）、`task/WebhookDispatcher`（API 回调投递）、`stream/TaskStreamManager`（SSE 连接管理 + 推送）、`event/TaskStatusChangedEvent`（终态变化事件）、`event/ApiCallLogUpdater`（调用日志终态收尾）、`exception/ApiException(+Handler)`（API 错误契约）
+- `resources/db/migration/*.sql` —— Flyway 数据库迁移脚本（`V1__baseline.sql` 为当前基线）
 - `resources/comfyui/workflows/*.json` —— ComfyUI 工作流模板
 
 ## 5. 核心设计：两层策略 + 注册表（最重要）
@@ -120,7 +121,7 @@
 | GET | `/api/v1/models` | 对外 API：模型清单与能力（开关过滤同 /options） |
 | — | 对外 API webhook | 终态回调 `callbackUrl`（`X-Signature` HMAC 签名） |
 
-## 10. 数据模型（`schema.sql`，MySQL）
+## 10. 数据模型（Flyway `db/migration`，MySQL）
 
 - `app_user`：账号、角色（USER/ADMIN）、累计消费、登录/活动 IP 与时间。
 - `user_token`：token → user_id + 过期时间（`TokenCleanupTask` 定期清）。
@@ -134,6 +135,7 @@
 ## 11. 配置（`application.yaml`，均为 `${ENV:默认值}`）
 
 - `spring.datasource.*`：MySQL 连接。
+- `spring.flyway.*` / `spring.sql.init.*`：Flyway 默认启用并纳管数据库迁移；旧 `schema.sql` 初始化默认关闭。
 - `seedance.*`：Seedance api-key / url；`seedance.model`（单模型模式默认 API 模型名）；`seedance.models`（多模型模式列表：`id`=注册标识/闸门 key、`name`=方舟 API 模型名、`label`=展示名；未配置时回退单模型 `id:"seedance"→name:model`）。请求里的 model 是注册标识，由 `SeedanceEngine.submit` 解析成 API 模型名后发给方舟。
 - `video.default-provider`：未指定时的默认提供方（`seedance`）。
 - `video.model-access.default-open`：模型无显式开关覆盖时的默认（`true`=新模型自动开放，保持「加模型零配置即可见」；改 `false` 则新模型默认隐藏、需管理员放开）。

@@ -65,7 +65,7 @@
 | 层 | 技术 |
 |---|---|
 | 语言 / 框架 | Java 17 · Spring Boot 3.3.5 · Spring Web / AOP |
-| 持久层 | MyBatis-Plus 3.5.7 · MySQL（`schema.sql` 自动初始化） |
+| 持久层 | MyBatis-Plus 3.5.7 · MySQL · Flyway（版本化数据库迁移） |
 | 引擎通信 | Hutool 5.8.27（ComfyUI HTTP）· Jackson（工作流 JSON 编辑）· Aliyun OSS SDK 3.17.4 |
 | 其他 | Lombok · ip2region（IP 属地，离线 xdb）· spring-security-crypto |
 | 前端（配对仓库） | Vue3 · Pinia · Element Plus · axios · SSE (`EventSource`) |
@@ -261,7 +261,8 @@ src/main/java/org/example/seedancegenarate/
 ├── exception/  dto/  entity/  mapper/  context/  util/
 └── resources/
     ├── application.yaml  # 全部配置支持 ${ENV:默认值}
-    ├── schema.sql        # 建表（启动自动执行）
+    ├── db/migration/     # Flyway 版本化数据库迁移（V1__baseline.sql 起）
+    ├── schema.sql        # 历史参考：不再启动自动执行
     ├── comfyui/workflows/  # 工作流模板 JSON
     └── prompts/            # 提示词优化模板（{model}.md）
 ```
@@ -271,7 +272,7 @@ src/main/java/org/example/seedancegenarate/
 ## 快速开始
 
 ```bash
-# 1. 准备 MySQL（启动时自动执行 schema.sql 建表）
+# 1. 准备 MySQL（启动时由 Flyway 执行 db/migration/V1__baseline.sql；已有本地库会自动 baseline）
 # 2. 配置：至少数据库连接 + 你实际使用的提供方密钥（见「关键配置」）
 
 # 3. 编译
@@ -296,11 +297,12 @@ src/main/java/org/example/seedancegenarate/
 
 ## 关键配置
 
-所有配置均为 `${ENV:默认值}` 形式，生产环境用环境变量覆盖（`application.yaml` 见 §11 详表）。
+所有配置均为 `${ENV:默认值}` 形式，生产环境用环境变量覆盖（`application.yaml` 见 §11 详表）。数据库结构由 Flyway 管理，默认启用 `spring.flyway.enabled=true` 且 `spring.sql.init.mode=never`。
 
 | 配置项 | 说明 |
 |---|---|
 | `SPRING_DATASOURCE_*` | MySQL 连接 |
+| `SPRING_FLYWAY_*` / `SPRING_SQL_INIT_MODE` | Flyway 迁移开关 / 旧 SQL 初始化开关 |
 | `SEEDANCE_API_KEY` / `SEEDANCE_MODEL*` | Seedance 密钥与模型 |
 | `COMFYUI_NODE{0,1,3,6}_URL` / `_ENABLED` | ComfyUI 实例节点 |
 | `ALIYUN_OSS_*` | 参考图对象存储（须后端可读，ComfyUI 会回源下载） |
