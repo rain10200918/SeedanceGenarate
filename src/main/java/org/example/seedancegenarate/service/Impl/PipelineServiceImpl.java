@@ -14,9 +14,12 @@ import org.example.seedancegenarate.mapper.PipelineNodeMapper;
 import org.example.seedancegenarate.mapper.UserAssetMapper;
 import org.example.seedancegenarate.service.PipelineService;
 import org.example.seedancegenarate.service.VideoSubmitService;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+
+import java.util.concurrent.Executor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -40,6 +43,9 @@ public class PipelineServiceImpl implements PipelineService {
     private final UserAssetMapper userAssetMapper;
     private final VideoSubmitService videoSubmitService;
     private final ObjectMapper objectMapper;
+    /** 流水线后台提交线程池（单线程串行：引擎一次只吃一个任务） */
+    @Qualifier("pipelineSubmitExecutor")
+    private final Executor pipelineSubmitExecutor;
 
     @Override
     public List<Pipeline> listPipelines(Long userId) {
@@ -169,19 +175,42 @@ public class PipelineServiceImpl implements PipelineService {
         }
         pipeline.setStatus("RUNNING");
         pipelineMapper.updateById(pipeline);
-        // 逐节点独立提交：单个节点失败标 FAILED，不中断其余节点
-        for (PipelineNode node : scenes) {
-            try {
-                submitNode(userId, pipeline, node);
-            } catch (Exception e) {
-                log.warn("流水线节点提交失败 pipelineId={} nodeId={}: {}", pipelineId, node.getId(), e.getMessage());
-                node.setStatus("FAILED");
-                node.setErrorMsg(truncate(e.getMessage()));
-                pipelineNodeMapper.updateById(node);
+        // 异步提交：引擎提交是慢 IO（传图 + 提交工作流，超时可达 60s/次），
+        // 同步串行会让「一键提交」阻塞 HTTP 数分钟。校验与状态门完成后立即返回，
+        // 提交循环丢后台线程（单线程串行，引擎一次只吃一个任务），前端靠 SSE 看节点逐个变绿。
+        Long uid = userId;
+        Long pid = pipelineId;
+        pipelineSubmitExecutor.execute(() -> submitLoop(uid, pid));
+        return pipeline;
+    }
+
+    /** 后台提交循环：逐节点独立提交，单个失败不中断；兜底防状态卡 RUNNING */
+    private void submitLoop(Long userId, Long pipelineId) {
+        try {
+            Pipeline pipeline = pipelineMapper.selectById(pipelineId);
+            if (pipeline == null) {
+                return;
+            }
+            for (PipelineNode node : scenesOf(pipelineId)) {
+                try {
+                    submitNode(userId, pipeline, node);
+                } catch (Exception e) {
+                    log.warn("流水线节点提交失败 pipelineId={} nodeId={}: {}", pipelineId, node.getId(), e.getMessage());
+                    node.setStatus("FAILED");
+                    node.setErrorMsg(truncate(e.getMessage()));
+                    pipelineNodeMapper.updateById(node);
+                }
+            }
+            refreshPipelineStatus(pipeline);
+        } catch (Exception e) {
+            log.error("流水线后台提交异常 pipelineId={}", pipelineId, e);
+            // 兜底：防止进程异常后状态永久卡 RUNNING（启动恢复是第二道保险）
+            Pipeline pipeline = pipelineMapper.selectById(pipelineId);
+            if (pipeline != null) {
+                pipeline.setStatus("PARTIAL_FAILED");
+                pipelineMapper.updateById(pipeline);
             }
         }
-        refreshPipelineStatus(pipeline);
-        return pipeline;
     }
 
     @Override

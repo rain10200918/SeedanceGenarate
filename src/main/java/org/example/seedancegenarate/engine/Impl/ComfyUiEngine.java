@@ -1,5 +1,6 @@
 package org.example.seedancegenarate.engine.Impl;
 
+import cn.hutool.crypto.digest.DigestUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.engine.BillingTiming;
@@ -82,10 +83,11 @@ public class ComfyUiEngine implements VideoEngine {
         log.info("ComfyUI 选中节点 {} 处理任务, model={}", node.getId(), command.getModel());
 
         // 2. 上传参考图到该节点（顺序保持，对应 <Picture 1..N>）
+        // 文件名内容 hash 化：同图幂等，防止 ComfyUI input 目录无限增长
         List<String> filenames = new ArrayList<>();
         for (String url : imageUrls) {
             byte[] bytes = client.downloadBytes(url);
-            String filename = UUID.randomUUID() + extensionOf(url);
+            String filename = DigestUtil.md5Hex(bytes) + extensionOf(url);
             filenames.add(client.uploadImage(node.getBaseUrl(), bytes, filename, properties.getReadTimeoutMs()));
         }
 
