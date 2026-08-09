@@ -1,10 +1,7 @@
 package org.example.seedancegenarate.service.Impl;
 
 import com.aliyun.oss.OSS;
-import com.aliyun.oss.OSSClientBuilder;
 import cn.hutool.crypto.digest.DigestUtil;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.OssConfig;
 import org.example.seedancegenarate.service.OssService;
@@ -24,27 +21,11 @@ import java.util.Locale;
 @Service
 public class OssServiceImpl implements OssService {
     private final OssConfig ossConfig;
-    private OSS ossClient;
+    private final OSS ossClient;
 
-    public OssServiceImpl(OssConfig ossConfig) {
+    public OssServiceImpl(OssConfig ossConfig, OSS ossClient) {
         this.ossConfig = ossConfig;
-    }
-
-    @PostConstruct
-    public void init() {
-        ossClient = new OSSClientBuilder()
-                .build(
-                        ossConfig.getEndpoint(),
-                        ossConfig.getAccessKeyId(),
-                        ossConfig.getAccessKeySecret()
-                );
-    }
-
-    @PreDestroy
-    public void destroy() {
-        if (ossClient != null) {
-            ossClient.shutdown();
-        }
+        this.ossClient = ossClient;
     }
 
     @Override
@@ -75,19 +56,21 @@ public class OssServiceImpl implements OssService {
     }
 
     /**
-     * 对象访问域名。优先用配置的 domain；未配置时回退为 https://{bucket}.{endpoint}（OSS 公网标准地址），
-     * 避免返回缺少协议头的地址（会导致下游 http 客户端报 "Failed to select a proxy"）。
+     * 对象访问域名。配置可填完整 URL 或裸域名；裸域名统一补 https://，
+     * 避免浏览器把 {@code bucket.endpoint/images/...} 误解释成相对路径。
+     * 未配置时回退为 https://{bucket}.{endpoint}（OSS 公网标准地址）。
      */
-    private String resolveBaseDomain() {
+    String resolveBaseDomain() {
         String domain = ossConfig.getDomain();
         if (domain != null && !domain.isBlank()) {
-            return domain.replaceAll("/+$", "");
+            String normalized = domain.trim().replaceAll("/+$", "");
+            return normalized.matches("(?i)^https?://.*") ? normalized : "https://" + normalized;
         }
         String endpoint = ossConfig.getEndpoint();
         if (endpoint == null) {
             endpoint = "";
         } else {
-            endpoint = endpoint.replaceFirst("^https?://", "");
+            endpoint = endpoint.replaceFirst("(?i)^https?://", "");
         }
         return "https://" + ossConfig.getBucketName() + "." + endpoint;
     }

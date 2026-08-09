@@ -7,10 +7,12 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.dto.ApiVideoCreateRequest;
 import org.example.seedancegenarate.dto.ApiVideoCreateResponse;
+import org.example.seedancegenarate.config.OssConfig;
 import org.example.seedancegenarate.entity.ApiKey;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.exception.ApiException;
 import org.example.seedancegenarate.service.ApiDocService;
+import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.ApiVideoService;
 import org.example.seedancegenarate.service.Impl.ApiVideoServiceImpl;
 import org.example.seedancegenarate.service.VideoTaskService;
@@ -22,6 +24,7 @@ import org.springframework.web.bind.annotation.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -35,6 +38,8 @@ public class ApiVideoController {
     private final ApiVideoService apiVideoService;
     private final VideoTaskService videoTaskService;
     private final ApiDocService apiDocService;
+    private final ArtifactStorage artifactStorage;
+    private final OssConfig ossConfig;
 
     /** 当前请求的 API Key（ApiKeyInterceptor 注入） */
     private static ApiKey currentKey(HttpServletRequest request) {
@@ -104,6 +109,11 @@ public class ApiVideoController {
         if (task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             throw ApiException.validation("任务尚无产物");
         }
+        if (hasOssArtifact(task)) {
+            response.sendRedirect(artifactStorage.createSignedGetUrl(
+                    task.getArtifactKey(), Duration.ofSeconds(ossConfig.getSignedUrlTtlSeconds())));
+            return;
+        }
         String stored = task.getVideoUrl();
         String fileName = stored.startsWith("data/videos/")
                 ? stored.substring("data/videos/".length())
@@ -114,6 +124,11 @@ public class ApiVideoController {
         }
         response.setContentType(contentTypeOf(fileName));
         Files.copy(path, response.getOutputStream());
+    }
+
+    private boolean hasOssArtifact(VideoTask task) {
+        return "OSS".equals(task.getArtifactStorageType())
+                && task.getArtifactKey() != null && !task.getArtifactKey().isBlank();
     }
 
     private VideoTask findTask(Long apiKeyId, String taskId) {

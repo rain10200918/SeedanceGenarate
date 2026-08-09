@@ -10,7 +10,7 @@
 - **Seedance**：火山方舟（Volcano Ark）云端 API。
 - **ComfyUI**：自建多实例（同主机不同端口，共享同一套模型）。
 
-配套能力：用户注册/登录（token 鉴权）、邀请码、按次/按秒计费、令牌桶限流、阿里云 OSS 图片存储、提示词优化（后端代理大模型）。前端为配对的 Vue3 仓库（见文末）。
+配套能力：用户注册/登录（token 鉴权）、邀请码、按次/按秒计费、令牌桶限流、阿里云 OSS 图片与生成产物存储、提示词优化（后端代理大模型）。前端为配对的 Vue3 仓库（见文末）。
 
 ## 2. 技术栈
 
@@ -67,8 +67,8 @@
 2. **推进 + 推送**（后台 `VideoTaskPoller` + SSE，替代前端轮询）：
    - 后台推进器每 `video.poll.interval-ms`（默认 2s）扫最近 `max-age-hours` 内的 `PROCESSING` 任务 → `poll(task)` → 归一化 `RemoteStatus` → `videoTaskService.updateStatus(task, status)`。与在线客户端数无关；完成即下载，规避 Seedance 云端地址过期 / ComfyUI 历史被清。
    - `updateStatus` 落终态后发 `TaskStatusChangedEvent`（`@TransactionalEventListener` AFTER_COMMIT，提交后才推）；`TaskStreamManager` 经 SSE（`GET /api/video/stream`，`?token=` 鉴权）推给该任务所属用户的浏览器。SSE 尽力而为、非权威，DB 仍是唯一真相；断线由前端 `EventSource` 自动重连 + refetch 兜底。
-   - `GET /task/{taskId}` 现为**纯读库**（不再触发远端轮询），供首屏加载与手动刷新兜底。
-   - 成功：按 `provider_task_id` 查询远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**）并**下载到本地** `data/videos/`，写 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。`VideoDownloadService` 按来源真实扩展名保存（读 ComfyUI `/view?filename=` 或 URL 路径，白名单 mp4/webm/png/jpg… ，识别不到回退 `.mp4`）；对外播放/下载时 `VideoController` 按扩展名设 `Content-Type`（图片 `<img>`、视频 `<video>`）。`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`，故 SaveImage 的图片输出无需改动即可命中。
+   - `GET /task/{taskId}` 现为**纯读库**（不再触发远端轮询），供首屏加载与手动刷新兜底；产物 URL 由鉴权媒体接口按需生成短期签名地址。
+   - 成功：按 `provider_task_id` 查询远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**），由 `VideoDownloadService` 将响应流转存到 OSS，写入 `artifact_key`、`artifact_content_type`、`artifact_size`、`artifact_etag` 和兼容用 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。播放/下载接口先鉴权，再签发短期 OSS URL；历史 `data/videos/` 记录仍回退本地读取。真实扩展名优先从 ComfyUI `filename` / URL 路径 / Content-Type 推断，`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`。
 3. **播放 / 下载**：`GET /api/video/{fileName}`（内联播放）、`GET /api/video/download/{taskId}`（附件下载），均读本地文件。
 
 **节点亲和性（ComfyUI）**：submit 选定节点后 `node_id` 落库；poll 与 `/view` 必须回到**同一节点**（队列/历史/产物都存节点本地）。
@@ -126,7 +126,7 @@
 - `app_user`：账号、角色（USER/ADMIN）、累计消费、登录/活动 IP 与时间。
 - `user_token`：token → user_id + 过期时间（`TokenCleanupTask` 定期清）。
 - `invite_code`：邀请码及使用状态。
-- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、`video_url`（本地路径）、`error_msg`、`cost_amount`、`images(JSON)`。
+- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、兼容用 `video_url`、`artifact_key`（OSS object key）、`artifact_content_type`、`artifact_size`、`artifact_etag`、`error_msg`、`cost_amount`、`images(JSON)`。
   - `biz_task_id`：系统生成的公开任务 ID，创建任务时立即生成，后续异步 Worker 以它为业务追踪 ID；
   - `provider_task_id`：Seedance / ComfyUI 返回的远端任务 ID，仅用于调用提供方和轮询；
   - 旧 `task_id`：当前兼容字段。新任务暂与 `biz_task_id` 双写，历史记录保留原值，查询同时兼容旧 `task_id` 与 `biz_task_id`。
@@ -147,13 +147,14 @@
 - `spring.task.scheduling.pool.size`：定时任务线程池（默认 4）；推进器 / SSE 心跳 / token 清理各占一线程，互不阻塞。
 - `video.comfyui.*`：`scheduling`（least-queue / round-robin）、连接/读超时、`nodes[]`（id / base-url / enabled）。
 - `prompt-optimize.*`：提示词优化 LLM 代理 url / key / model。系统提示词**按模型选模板**：`resources/prompts/{model}.md`（缺失回退 `default.md`），运行时注入 `{imageCount}/{duration}/{ratio}` 占位并统一追加"只输出提示词本身"的输出铁律；加某模型的提示词风格 = 丢一份 `prompts/{model}.md`，零代码（已有 `minimax-h3.md` 参考生视频专用模板）。
-- `file.upload-path`、`billing.*`、`rate-limit.*`、`aliyun.oss.*`、`mybatis-plus.*`。
+- `file.upload-path`、`billing.*`、`rate-limit.*`、`aliyun.oss.*`（含 `artifact-prefix`、`signed-url-ttl-seconds`）、`mybatis-plus.*`。
 
 ## 12. 安全注意事项（重要）
 
 - ⚠️ `application.yaml` 目前把**真实样式的密钥**写成了默认值（Seedance key、OSS access-key-id/secret、prompt-optimize key）。生产务必用环境变量覆盖，切勿把真实密钥提交进仓库。
 - ComfyUI 节点 URL、各 API key **仅后端持有，绝不下发前端**（提示词优化正是为此走后端代理）。
-- OSS 上传的参考图必须**后端可读**：ComfyUI submit 会用该 URL `downloadBytes`；私有 bucket 会 403。`aliyun.oss.domain` 为空时 `OssServiceImpl` 回退成 `https://{bucket}.{endpoint}`（保证带协议头，否则 hutool 报 "Failed to select a proxy"）。
+- 生成产物 OSS Bucket 必须配置 Lifecycle（例如 `outputs/` 前缀 48 小时后删除）；应用只负责鉴权签名和历史本地文件兼容，不再把 OSS 对象下载到 API 实例磁盘。
+- OSS 上传的参考图必须**后端可读**：ComfyUI submit 会用该 URL `downloadBytes`；私有 bucket 会 403。`aliyun.oss.domain` 可填写完整 URL 或裸域名，`OssServiceImpl` 会规范化为带 `https://` 的 URL；为空时回退成 `https://{bucket}.{endpoint}`，避免浏览器把裸域名图片地址误解释为相对路径。
 - 对外暴露的生成接口已有限流；新增网络端点注意鉴权。
 
 ## 13. 已知事项 / TODO

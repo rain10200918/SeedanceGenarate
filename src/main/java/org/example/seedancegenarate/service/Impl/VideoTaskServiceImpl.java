@@ -34,16 +34,28 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
                 if ("SUCCESS".equals(task.getStatus())) {
                     return; // 幂等：已成功，勿重复下载 / 计费
                 }
-                // 两类提供方统一处理：远端地址一律下载到本地再对外播放
-                // （Seedance 规避云端 2 天过期；ComfyUI 的 /view 是内网节点地址，浏览器不可达）
-                String localVideo = videoDownloadService.download(status.getRemoteVideoUrl());
+                // 两类提供方统一转存 OSS：Seedance 地址会过期，ComfyUI /view 又是内网节点地址。
+                VideoDownloadService.DownloadedArtifact downloaded = videoDownloadService.download(
+                        status.getRemoteVideoUrl(), task.businessTaskId());
+                String mediaName = downloaded.mediaName();
                 task.setStatus("SUCCESS");
-                task.setVideoUrl(localVideo);
+                // 保持既有前端契约：videoUrl 是后端媒体路由的文件标识，而非 OSS key/签名 URL。
+                task.setVideoUrl(mediaName);
+                task.setArtifactStorageType("OSS");
+                task.setArtifactKey(downloaded.artifact().objectKey());
+                task.setArtifactContentType(downloaded.artifact().contentType());
+                task.setArtifactSize(downloaded.artifact().contentLength());
+                task.setArtifactEtag(downloaded.artifact().etag());
                 task.setErrorMsg(null);
                 LambdaUpdateWrapper<VideoTask> wrapper = new LambdaUpdateWrapper<>();
                 wrapper.eq(VideoTask::getId, task.getId())
                         .set(VideoTask::getStatus, "SUCCESS")
-                        .set(VideoTask::getVideoUrl, localVideo)
+                        .set(VideoTask::getVideoUrl, mediaName)
+                        .set(VideoTask::getArtifactStorageType, "OSS")
+                        .set(VideoTask::getArtifactKey, downloaded.artifact().objectKey())
+                        .set(VideoTask::getArtifactContentType, downloaded.artifact().contentType())
+                        .set(VideoTask::getArtifactSize, downloaded.artifact().contentLength())
+                        .set(VideoTask::getArtifactEtag, downloaded.artifact().etag())
                         .set(VideoTask::getErrorMsg, null);
                 this.update(wrapper);
                 // 成功计费：仅「成功才计费」的提供方（如 ComfyUI）真正落账，且幂等

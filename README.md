@@ -51,7 +51,7 @@
    - `cost_record.task_id` 由唯一索引做最终幂等兜底，重复终态处理不会重复扣费；用户累计消费使用数据库原子累加。
 
 4. **前端不轮询，改为服务端驱动 + SSE 推送**
-   - 后台 `VideoTaskPoller` 持续推进 `PROCESSING` 任务，完成即下载产物落本地（规避云端地址过期）；终态经 `@TransactionalEventListener(AFTER_COMMIT)` 发事件 → SSE 推给对应浏览器。
+   - 后台 `VideoTaskPoller` 持续推进 `PROCESSING` 任务，完成即将远端产物流式转存到 OSS（规避云端地址过期和实例本地磁盘依赖）；终态经 `@TransactionalEventListener(AFTER_COMMIT)` 发事件 → SSE 推给对应浏览器。
    - SSE 尽力而为、非权威，**DB 仍是唯一真相**；断线由前端 `EventSource` 自动重连 + refetch 兜底。
 
 5. **对外 API 的工程化细节**
@@ -100,8 +100,8 @@ flowchart TB
 
     subgraph STORE["存储"]
         DB[("MySQL<br/>video_task / cost_record<br/>api_key / model_access")]
-        OSS[("阿里云 OSS<br/>参考图")]
-        LOCAL[("本地磁盘 data/videos<br/>生成产物")]
+        OSS[("阿里云 OSS<br/>参考图 + 生成产物")]
+        LOCAL[("本地磁盘 data/videos<br/>历史兼容 / 临时")]
     end
 
     subgraph PROV["提供方"]
@@ -225,7 +225,7 @@ sequenceDiagram
 - **模型开放闸门**：`ModelAccessService` 为唯一权威，提交时按「实际生效模型」硬校验（防手拼请求绕过），管理员可运行时开 / 关模型。
 - **提示词优化**：后端代理 LLM，系统提示词按模型选模板（`resources/prompts/{model}.md`，可零代码新增风格），LLM Key 仅后端持有。
 - **SSE 实时状态**：`GET /api/video/stream` 替代前端轮询；`GET /task/{id}` 纯读库兜底。
-- 产物（视频 / 图片）统一下载到本地 `data/videos/`，按真实扩展名设置 `Content-Type`，支持内联播放与附件下载。
+- 产物（视频 / 图片）统一流式转存到阿里云 OSS，数据库保存 `artifact_key` 和媒体元数据；播放/下载接口鉴权后签发短期 OSS URL。历史 `data/videos/` 文件保留兼容读取，OSS Lifecycle 负责正式产物过期清理。
 
 ---
 
@@ -305,7 +305,7 @@ src/main/java/org/example/seedancegenarate/
 | `SPRING_FLYWAY_*` / `SPRING_SQL_INIT_MODE` | Flyway 迁移开关 / 旧 SQL 初始化开关 |
 | `SEEDANCE_API_KEY` / `SEEDANCE_MODEL*` | Seedance 密钥与模型 |
 | `COMFYUI_NODE{0,1,3,6}_URL` / `_ENABLED` | ComfyUI 实例节点 |
-| `ALIYUN_OSS_*` | 参考图对象存储（须后端可读，ComfyUI 会回源下载） |
+| `ALIYUN_OSS_*` | 参考图与生成产物对象存储（须后端可读，ComfyUI 会回源下载）；`ALIYUN_OSS_ARTIFACT_PREFIX` / `ALIYUN_OSS_SIGNED_URL_TTL_SECONDS` 控制产物前缀与签名有效期 |
 | `PROMPT_OPTIMIZE_API_KEY` | 提示词优化 LLM 密钥（仅后端） |
 | `BILLING_*` / `RATE_LIMIT_*` / `VIDEO_POLL_*` | 计费 / 限流 / 推进器参数 |
 | `VIDEO_MODEL_ACCESS_DEFAULT_OPEN` | 新模型默认是否开放 |

@@ -57,7 +57,6 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         assertModelOpen(effectiveModel);
 
         // 统一默认值（与 UI 控制器一致）：API 可能不传 duration/ratio，而 ComfyUI builder 的
-        // Map.of 查找不接受 null key（2026-08-06 实测 NPE），空值必须先归一
         Integer duration = request.duration() == null ? 8 : request.duration();
         String ratio = (request.ratio() == null || request.ratio().isBlank()) ? "16:9" : request.ratio();
 
@@ -101,7 +100,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 提交即计费仅对 ON_SUBMIT 提供方生效（如 Seedance），幂等。
         // 原由控制器 AOP 切面触发，现收进共享提交路径——UI 与对外 API 两条入口都走这里，都会计费。
         costRecordService.recordOnSubmit(task);
-        // 任务提交成功事件：素材库等下游通过监听器解耦登记，不阻塞提交链路（@Async）
+        // 任务提交成功事件：异步提交
         applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
     }

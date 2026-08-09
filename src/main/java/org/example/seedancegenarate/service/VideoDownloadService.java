@@ -1,7 +1,10 @@
 package org.example.seedancegenarate.service;
 
-import com.baomidou.mybatisplus.extension.service.IService;
-
+/** 将提供方远端产物转存为本系统可长期访问的 OSS 对象。 */
 public interface VideoDownloadService {
-    String download(String url) throws Exception;
+
+    DownloadedArtifact download(String remoteUrl, String bizTaskId) throws Exception;
+
+    record DownloadedArtifact(String mediaName, ArtifactStorage.StoredArtifact artifact) {
+    }
 }

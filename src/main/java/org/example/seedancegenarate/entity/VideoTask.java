@@ -28,7 +28,20 @@ public class VideoTask {
     private Integer duration;
     private String ratio;
     private String status;
+    /** 对前端公开的稳定媒体路由标识；旧记录为 data/videos/ 本地路径，新记录为业务 ID 文件名。 */
     private String videoUrl;
+    /** 正式产物存储类型（当前为 OSS）。 */
+    @JsonIgnore
+    private String artifactStorageType;
+    /** OSS object key；是产物的存储真相，不直接下发客户端。 */
+    @JsonIgnore
+    private String artifactKey;
+    @JsonIgnore
+    private String artifactContentType;
+    @JsonIgnore
+    private Long artifactSize;
+    @JsonIgnore
+    private String artifactEtag;
     private String errorMsg;
     private BigDecimal costAmount;
     /** 生成提供方 */

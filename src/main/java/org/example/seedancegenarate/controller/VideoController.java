@@ -15,6 +15,7 @@ import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.OssService;
 import org.example.seedancegenarate.service.PromptContext;
@@ -47,6 +48,7 @@ public class VideoController {
     private final PromptOptimizeService promptOptimizeService;
     private final ModelAccessService modelAccessService;
     private final VideoSubmitService videoSubmitService;
+    private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
@@ -349,34 +351,18 @@ public class VideoController {
             HttpServletResponse response
     ) throws Exception {
         UserContext.requireUserId();
-        LambdaQueryWrapper<VideoTask> wrapper = Wrappers.<VideoTask>lambdaQuery()
-                .eq(VideoTask::getTaskId, taskId);
-        if (!UserContext.isAdmin()) {
-            wrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
-        }
-        VideoTask task = videoTaskService.getOne(wrapper, false);
+        VideoTask task = findOwnedTask(taskId);
         if (task == null || task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        String stored = task.getVideoUrl();
-        String fileName = stored.startsWith("data/videos/")
-                ? stored.substring("data/videos/".length())
-                : stored;
-        Path path = Paths.get("data/videos/", fileName);
-        if (!Files.exists(path)) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+        if (hasOssArtifact(task)) {
+            String name = "seedance-" + task.businessTaskId() + extensionOf(task.getVideoUrl());
+            response.sendRedirect(artifactStorage.createSignedDownloadUrl(
+                    task.getArtifactKey(), name, java.time.Duration.ofSeconds(ossConfig.getSignedUrlTtlSeconds())));
             return;
         }
-        response.setContentType(contentTypeOf(fileName));
-        response.setHeader(
-                "Content-Disposition",
-                "attachment; filename=\"seedance-" + taskId + extensionOf(fileName) + "\""
-        );
-        Files.copy(
-                path,
-                response.getOutputStream()
-        );
+        copyLegacyLocalArtifact(task.getVideoUrl(), response, true, task.businessTaskId());
     }
 
     @GetMapping("/{fileName}")
@@ -394,17 +380,53 @@ public class VideoController {
         if (!UserContext.isAdmin()) {
             videoWrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
         }
-        long count = videoTaskService.count(videoWrapper);
-        if (count <= 0) {
+        VideoTask task = videoTaskService.getOne(videoWrapper, false);
+        if (task == null) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        Path path = Paths.get("data/videos/" + fileName);
+        if (hasOssArtifact(task)) {
+            response.sendRedirect(artifactStorage.createSignedGetUrl(
+                    task.getArtifactKey(), java.time.Duration.ofSeconds(ossConfig.getSignedUrlTtlSeconds())));
+            return;
+        }
+        copyLegacyLocalArtifact(task.getVideoUrl(), response, false, null);
+    }
+
+    /** 查询当前用户有权访问的任务；迁移期兼容旧 task_id。 */
+    private VideoTask findOwnedTask(String taskId) {
+        LambdaQueryWrapper<VideoTask> wrapper = Wrappers.<VideoTask>lambdaQuery()
+                .and(w -> w.eq(VideoTask::getBizTaskId, taskId)
+                        .or()
+                        .eq(VideoTask::getTaskId, taskId));
+        if (!UserContext.isAdmin()) {
+            wrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
+        }
+        return videoTaskService.getOne(wrapper, false);
+    }
+
+    private boolean hasOssArtifact(VideoTask task) {
+        return "OSS".equals(task.getArtifactStorageType())
+                && StringUtils.hasText(task.getArtifactKey());
+    }
+
+    /** 兼容迁移前的 data/videos/ 文件；新产物不再进入此路径。 */
+    private void copyLegacyLocalArtifact(String stored, HttpServletResponse response,
+                                         boolean attachment, String taskId) throws Exception {
+        String fileName = stored.startsWith("data/videos/")
+                ? stored.substring("data/videos/".length())
+                : stored;
+        Path path = Paths.get("data/videos/", fileName);
+        if (!Files.exists(path)) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
         response.setContentType(contentTypeOf(fileName));
-        Files.copy(
-                path,
-                response.getOutputStream()
-        );
+        if (attachment) {
+            response.setHeader("Content-Disposition",
+                    "attachment; filename=\"seedance-" + taskId + extensionOf(fileName) + "\"");
+        }
+        Files.copy(path, response.getOutputStream());
     }
 
     /** 按文件扩展名推断 Content-Type（视频 / 图片通用），未知时回退 video/mp4 */

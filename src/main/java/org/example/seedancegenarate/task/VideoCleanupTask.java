@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.VideoTaskService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -31,8 +32,14 @@ public class VideoCleanupTask {
 
     private final VideoTaskService videoTaskService;
 
+    @Value("${video.cleanup.local-enabled:false}")
+    private boolean localCleanupEnabled;
+
     @Scheduled(cron = "${video.cleanup-cron:0 30 3 * * *}")
     public void cleanupExpiredVideos() {
+        if (!localCleanupEnabled) {
+            return;
+        }
         Path dir = Paths.get(VIDEO_PATH);
         if (!Files.exists(dir)) {
             return;
