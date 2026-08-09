@@ -275,7 +275,7 @@ public class PipelineServiceImpl implements PipelineService {
                 userId, pipeline.getProvider(), effectiveModel,
                 node.getPrompt(), urls,
                 node.getDuration(), node.getRatio(), null, null));
-        node.setTaskId(task.getTaskId());
+        node.setTaskId(task.businessTaskId());
         node.setStatus("PROCESSING");
         node.setErrorMsg(null);
         pipelineNodeMapper.updateById(node);

@@ -70,7 +70,7 @@ public class VideoTaskPoller {
             } catch (Exception e) {
                 // 单个任务轮询失败（网络抖动、节点暂时不可达等）不影响其他任务；
                 // 不轻易置为 FAILED（那是提供方明确返回失败才做的），下一轮继续重试
-                log.warn("推进任务 {} 失败: {}", task.getTaskId(), e.getMessage());
+                log.warn("推进任务 {} 失败: {}", task.businessTaskId(), e.getMessage());
             }
         }
     }

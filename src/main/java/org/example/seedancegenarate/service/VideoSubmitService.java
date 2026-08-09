@@ -16,7 +16,8 @@ public interface VideoSubmitService {
     void validate(String provider, String model);
 
     /**
-     * 完整提交编排：解析实际生效模型 → 开放闸门 → 落库 PROCESSING → 引擎提交 → 回写 taskId/nodeId。
+     * 完整提交编排：解析实际生效模型 → 开放闸门 → 生成业务 ID 并落库 PROCESSING
+     * → 引擎提交 → 回写 providerTaskId/nodeId。
      * 提交成功后立即计费（ON_SUBMIT 提供方，如 Seedance；幂等）。
      */
     VideoTask submit(SubmitRequest request) throws Exception;

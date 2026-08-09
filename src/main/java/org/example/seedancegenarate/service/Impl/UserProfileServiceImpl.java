@@ -102,7 +102,7 @@ public class UserProfileServiceImpl implements UserProfileService {
         List<UserStatsResponse.RecentTask> recentTasks = tasks.stream()
                 .sorted(Comparator.comparing(VideoTask::getId).reversed())
                 .limit(10)
-                .map(t -> new UserStatsResponse.RecentTask(t.getTaskId(), t.getModel(), t.getStatus(),
+                .map(t -> new UserStatsResponse.RecentTask(t.businessTaskId(), t.getModel(), t.getStatus(),
                         t.getCostAmount(), t.getCreateTime()))
                 .toList();
 

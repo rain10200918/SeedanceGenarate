@@ -105,8 +105,9 @@ public class ComfyUiEngine implements VideoEngine {
         if (node == null) {
             return RemoteStatus.failed("找不到处理该任务的 ComfyUI 节点: " + task.getNodeId());
         }
-        JsonNode history = client.getHistory(node.getBaseUrl(), task.getTaskId(), properties.getReadTimeoutMs());
-        JsonNode entry = history.path(task.getTaskId());
+        String providerTaskId = task.remoteTaskId();
+        JsonNode history = client.getHistory(node.getBaseUrl(), providerTaskId, properties.getReadTimeoutMs());
+        JsonNode entry = history.path(providerTaskId);
         if (entry.isMissingNode() || entry.isEmpty()) {
             return RemoteStatus.processing();   // 尚未进入 history，仍在排队 / 执行
         }

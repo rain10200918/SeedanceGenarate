@@ -77,7 +77,7 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
         CostRecord record = new CostRecord();
         record.setUserId(task.getUserId());
         record.setTaskId(task.getId());
-        record.setSeedanceTaskId(task.getTaskId());
+        record.setSeedanceTaskId(task.remoteTaskId());
         record.setProvider(task.getProvider());
         record.setDuration(task.getDuration());
         record.setUnitPrice(price.unitPrice());

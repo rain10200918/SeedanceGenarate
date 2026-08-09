@@ -43,7 +43,7 @@
    - 前端 `/options` 遍历注册表下发 `ModelSpec` 能力约束（输出类型 / 时长档位 / 比例 / 图数量 / 分辨率），驱动选择器渲染——**加模型、改能力，前端零代码**。
 
 2. **单一路径、单一事实源**
-   - 所有生成任务共用 `video_task` 一张表 + `provider` / `node_id` / `model` 判别列，不为 ComfyUI / 对外 API 另开并行子系统，历史记录不割裂。
+   - 所有生成任务共用 `video_task` 一张表 + `biz_task_id` / `provider_task_id` / `provider` / `node_id` / `model` 判别列，不为 ComfyUI / 对外 API 另开并行子系统，历史记录不割裂；旧 `task_id` 在过渡期继续兼容。
    - UI 与对外 API **共用 `VideoSubmitService` 提交编排**（模型解析 → 开放闸门 → 落库 → 引擎提交 → 计费），两条入口行为天然一致。
 
 3. **计费时机由引擎声明，幂等记账**
@@ -261,7 +261,7 @@ src/main/java/org/example/seedancegenarate/
 ├── exception/  dto/  entity/  mapper/  context/  util/
 └── resources/
     ├── application.yaml  # 全部配置支持 ${ENV:默认值}
-    ├── db/migration/     # Flyway 版本化数据库迁移（V1__baseline.sql 起）
+    ├── db/migration/     # Flyway 版本化数据库迁移（V1 基线、V2 计费幂等、V3 任务 ID 分离）
     ├── schema.sql        # 历史参考：不再启动自动执行
     ├── comfyui/workflows/  # 工作流模板 JSON
     └── prompts/            # 提示词优化模板（{model}.md）

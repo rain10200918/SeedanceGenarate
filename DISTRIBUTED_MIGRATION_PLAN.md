@@ -343,10 +343,10 @@ WHERE id = ? AND status = 'FINALIZING';
 
 1. 新增 `biz_task_id`、`provider_task_id`，暂时允许空；
 2. 将旧 `task_id` 复制到 `provider_task_id`；
-3. 为历史记录生成 `biz_task_id`；
-4. 新代码写三者，新接口返回 `biz_task_id`；
-5. 查询接口在过渡期支持 `biz_task_id`，必要时兼容旧 `task_id`；
-6. `pipeline_node`、`api_call_log`、`webhook_delivery` 逐步增加 `video_task_id`，内部关联改用数值主键；
+3. 为历史记录生成 `tsk_legacy_{video_task.id}` 形式的 `biz_task_id`；
+4. 新代码写 `biz_task_id`、兼容旧 `task_id`，并把提供方返回值写入 `provider_task_id`；
+5. 新接口返回 `biz_task_id`，查询接口在过渡期同时支持 `biz_task_id` 与旧 `task_id`；
+6. `api_call_log`、`webhook_delivery`、`pipeline_node`、`user_asset` 的内部字符串引用回填为 `biz_task_id`，旧外部 ID 仍由 `video_task` 兼容查询；
 7. 全部迁移稳定后，再决定是否删除或重命名旧 `task_id`。
 
 建议格式：

@@ -75,7 +75,7 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         eventPublisher.publishEvent(new TaskStatusChangedEvent(
                 task.getUserId(),
                 new TaskStatusChangedEvent.Message(
-                        task.getTaskId(),
+                        task.businessTaskId(),
                         task.getStatus(),
                         task.getVideoUrl(),
                         task.getOutputType(),

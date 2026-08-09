@@ -43,7 +43,7 @@
 - `service/VideoSubmitService` —— **提交编排共享服务**（UI 与对外 API 共用：模型解析/闸门/落库/提交/计费）；`service/ApiKeyService`（钥匙生成/哈希/校验）、`service/ApiVideoService`（API 提交门面：幂等+两阶段日志）
 - `interceptor/` —— `AuthInterceptor` + 三个限流拦截器 + `ApiKeyInterceptor`/`ApiKeyRateLimitInterceptor`（对外 API）；`config/WebConfig` 注册它们
 - `config/` —— 各 `@ConfigurationProperties`；`entity/`、`mapper/`、`dto/`、`context/UserContext`、`util/`、`task/TokenCleanupTask`（清过期 token）、`task/VideoTaskPoller`（推进 PROCESSING 任务）、`task/WebhookDispatcher`（API 回调投递）、`stream/TaskStreamManager`（SSE 连接管理 + 推送）、`event/TaskStatusChangedEvent`（终态变化事件）、`event/ApiCallLogUpdater`（调用日志终态收尾）、`exception/ApiException(+Handler)`（API 错误契约）
-- `resources/db/migration/*.sql` —— Flyway 数据库迁移脚本（`V1__baseline.sql` 为当前基线）
+- `resources/db/migration/*.sql` —— Flyway 数据库迁移脚本（`V1__baseline.sql` 基线、`V2__billing_idempotency.sql` 计费幂等、`V3__separate_business_and_provider_task_ids.sql` 任务 ID 分离）
 - `resources/comfyui/workflows/*.json` —— ComfyUI 工作流模板
 
 ## 5. 核心设计：两层策略 + 注册表（最重要）
@@ -68,7 +68,7 @@
    - 后台推进器每 `video.poll.interval-ms`（默认 2s）扫最近 `max-age-hours` 内的 `PROCESSING` 任务 → `poll(task)` → 归一化 `RemoteStatus` → `videoTaskService.updateStatus(task, status)`。与在线客户端数无关；完成即下载，规避 Seedance 云端地址过期 / ComfyUI 历史被清。
    - `updateStatus` 落终态后发 `TaskStatusChangedEvent`（`@TransactionalEventListener` AFTER_COMMIT，提交后才推）；`TaskStreamManager` 经 SSE（`GET /api/video/stream`，`?token=` 鉴权）推给该任务所属用户的浏览器。SSE 尽力而为、非权威，DB 仍是唯一真相；断线由前端 `EventSource` 自动重连 + refetch 兜底。
    - `GET /task/{taskId}` 现为**纯读库**（不再触发远端轮询），供首屏加载与手动刷新兜底。
-   - 成功：把远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**）**下载到本地** `data/videos/`，写 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。`VideoDownloadService` 按来源真实扩展名保存（读 ComfyUI `/view?filename=` 或 URL 路径，白名单 mp4/webm/png/jpg… ，识别不到回退 `.mp4`）；对外播放/下载时 `VideoController` 按扩展名设 `Content-Type`（图片 `<img>`、视频 `<video>`）。`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`，故 SaveImage 的图片输出无需改动即可命中。
+   - 成功：按 `provider_task_id` 查询远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**）并**下载到本地** `data/videos/`，写 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。`VideoDownloadService` 按来源真实扩展名保存（读 ComfyUI `/view?filename=` 或 URL 路径，白名单 mp4/webm/png/jpg… ，识别不到回退 `.mp4`）；对外播放/下载时 `VideoController` 按扩展名设 `Content-Type`（图片 `<img>`、视频 `<video>`）。`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`，故 SaveImage 的图片输出无需改动即可命中。
 3. **播放 / 下载**：`GET /api/video/{fileName}`（内联播放）、`GET /api/video/download/{taskId}`（附件下载），均读本地文件。
 
 **节点亲和性（ComfyUI）**：submit 选定节点后 `node_id` 落库；poll 与 `/view` 必须回到**同一节点**（队列/历史/产物都存节点本地）。
@@ -126,7 +126,11 @@
 - `app_user`：账号、角色（USER/ADMIN）、累计消费、登录/活动 IP 与时间。
 - `user_token`：token → user_id + 过期时间（`TokenCleanupTask` 定期清）。
 - `invite_code`：邀请码及使用状态。
-- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 status、video_url（本地路径）、error_msg、cost_amount、images(JSON)。**任务类型**（文生视频/图生视频/文生图/图生图）是正交派生：输入维度看 `images` 空否、输出维度看 `output_type`，用 `GenerationMode.of(hasImage, outputType)` 现算，**不单独落库**（避免与 `images` 重复→漂移）。
+- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、`video_url`（本地路径）、`error_msg`、`cost_amount`、`images(JSON)`。
+  - `biz_task_id`：系统生成的公开任务 ID，创建任务时立即生成，后续异步 Worker 以它为业务追踪 ID；
+  - `provider_task_id`：Seedance / ComfyUI 返回的远端任务 ID，仅用于调用提供方和轮询；
+  - 旧 `task_id`：当前兼容字段。新任务暂与 `biz_task_id` 双写，历史记录保留原值，查询同时兼容旧 `task_id` 与 `biz_task_id`。
+  - **任务类型**（文生视频/图生视频/文生图/图生图）是正交派生：输入维度看 `images` 空否、输出维度看 `output_type`，用 `GenerationMode.of(hasImage, outputType)` 现算，**不单独落库**（避免与 `images` 重复→漂移）。
 - `cost_record`：每笔计费；含 `provider`、`amount`、`unit_price`、`biz_type`、`task_id`。`V2__billing_idempotency.sql` 为 `task_id` 增加唯一约束，重复终态处理捕获唯一键冲突直接视为已计费。
 - `model_access`：模型开放开关（管理员运行时开/关）。**稀疏覆盖**：只存被显式设过的模型（`model` 唯一 + `enabled`），没有行的模型走默认 `video.model-access.default-open`；「有哪些模型」仍以 `VideoEngineRegistry` 为准，本表只叠加开关、不作模型清单来源（避免与注册表漂移）。
 - `api_key`：对外 API 钥匙（只存 SHA-256 哈希 + 前缀；明文创建时返回一次）。`api_call_log`：API 调用明细（**唯一真相**，模型次数/消费/拒绝分布全聚合现算，不建计数器表；两阶段状态 RECEIVED→SUCCESS/FAILED/REJECTED，含 request_id 幂等键、参数摘要、IP/UA、耗时分段、金额冗余）。`webhook_delivery`：回调投递（`(task_id,status)` 唯一幂等 + 重试计数）。

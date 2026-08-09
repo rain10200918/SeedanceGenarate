@@ -46,8 +46,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
                 Wrappers.<ApiCallLog>lambdaQuery().eq(ApiCallLog::getRequestId, context.requestId()));
         if (existing != null && existing.getTaskId() != null
                 && context.apiKey().getId().equals(existing.getApiKeyId())) {
-            VideoTask task = videoTaskService.getOne(
-                    Wrappers.<VideoTask>lambdaQuery().eq(VideoTask::getTaskId, existing.getTaskId()), false);
+            VideoTask task = findByTaskId(existing.getTaskId(), context.apiKey().getId());
             if (task != null) {
                 return task;
             }
@@ -69,8 +68,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             ApiCallLog winner = apiCallLogMapper.selectOne(
                     Wrappers.<ApiCallLog>lambdaQuery().eq(ApiCallLog::getRequestId, context.requestId()));
             if (winner != null && winner.getTaskId() != null) {
-                VideoTask task = videoTaskService.getOne(
-                        Wrappers.<VideoTask>lambdaQuery().eq(VideoTask::getTaskId, winner.getTaskId()), false);
+                VideoTask task = findByTaskId(winner.getTaskId(), context.apiKey().getId());
                 if (task != null) {
                     return task;
                 }
@@ -87,7 +85,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             // 两阶段日志：回写 taskId + 排队耗时（终态由 ApiCallLogUpdater 收尾）
             ApiCallLog update = new ApiCallLog();
             update.setId(callLog.getId());
-            update.setTaskId(task.getTaskId());
+            update.setTaskId(task.businessTaskId());
             update.setQueuedMs(System.currentTimeMillis() - startMs);
             apiCallLogMapper.updateById(update);
             return task;
@@ -112,6 +110,15 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             }
         }
         throw ApiException.modelNotFound(trimmed);
+    }
+
+    /** 按新业务 ID 查询，同时兼容迁移前的 legacy task_id。 */
+    private VideoTask findByTaskId(String taskId, Long apiKeyId) {
+        return videoTaskService.getOne(Wrappers.<VideoTask>lambdaQuery()
+                .and(w -> w.eq(VideoTask::getBizTaskId, taskId)
+                        .or()
+                        .eq(VideoTask::getTaskId, taskId))
+                .eq(VideoTask::getApiKeyId, apiKeyId), false);
     }
 
     /** 图片 URL 下载并转存 OSS；单个失败即整体失败（与 UI 传图失败语义一致） */

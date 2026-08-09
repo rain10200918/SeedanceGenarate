@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 提交编排实现。从 {@code VideoController} 提取（UI/API 共用）：
@@ -66,8 +67,13 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         OutputType outputType = engine.outputType(effectiveModel);
         GenerationMode mode = GenerationMode.of(hasImages, outputType);
 
+        // 业务 ID 在调用外部提供方之前生成：后续异步 Worker 即使尚未拿到 providerTaskId，
+        // 也能立即对外返回稳定的任务标识。taskId 暂作为兼容别名，保持现有 UI/API 契约。
+        String bizTaskId = "tsk_" + UUID.randomUUID().toString().replace("-", "");
         VideoTask task = new VideoTask();
         task.setUserId(request.userId());
+        task.setBizTaskId(bizTaskId);
+        task.setTaskId(bizTaskId);
         task.setPrompt(request.prompt());
         task.setImages(hasImages ? objectMapper.writeValueAsString(imageUrls) : null);
         task.setDuration(duration);
@@ -89,14 +95,14 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                 .megapixels(request.megapixels())
                 .build();
         SubmitResult submit = engine.submit(command);
-        task.setTaskId(submit.getProviderTaskId());
+        task.setProviderTaskId(submit.getProviderTaskId());
         task.setNodeId(submit.getNodeId());
         videoTaskService.updateById(task);
         // 提交即计费仅对 ON_SUBMIT 提供方生效（如 Seedance），幂等。
         // 原由控制器 AOP 切面触发，现收进共享提交路径——UI 与对外 API 两条入口都走这里，都会计费。
         costRecordService.recordOnSubmit(task);
         // 任务提交成功事件：素材库等下游通过监听器解耦登记，不阻塞提交链路（@Async）
-        applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.getTaskId(), imageUrls));
+        applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
     }
 

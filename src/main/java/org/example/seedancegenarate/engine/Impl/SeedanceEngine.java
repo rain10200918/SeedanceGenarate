@@ -79,7 +79,7 @@ public class SeedanceEngine implements VideoEngine {
 
     @Override
     public RemoteStatus poll(VideoTask task) throws Exception {
-        Object result = seedanceService.getTask(task.getTaskId());
+        Object result = seedanceService.getTask(task.remoteTaskId());
         JsonNode node = objectMapper.valueToTree(result);
         String status = node.path("status").asText();
         if ("succeeded".equals(status)) {

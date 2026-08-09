@@ -71,7 +71,7 @@ public class ApiVideoController {
                 request.prompt().trim(), request.model(), request.images(),
                 request.duration(), request.ratio(), request.megapixels()));
         return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .body(new ApiVideoCreateResponse(task.getTaskId(), task.getStatus(), requestId));
+                .body(new ApiVideoCreateResponse(task.businessTaskId(), task.getStatus(), requestId));
     }
 
     /** 查状态：PROCESSING / SUCCESS（含结果）/ FAILED（含错误） */
@@ -118,7 +118,9 @@ public class ApiVideoController {
 
     private VideoTask findTask(Long apiKeyId, String taskId) {
         VideoTask task = videoTaskService.getOne(Wrappers.<VideoTask>lambdaQuery()
-                .eq(VideoTask::getTaskId, taskId)
+                .and(w -> w.eq(VideoTask::getBizTaskId, taskId)
+                        .or()
+                        .eq(VideoTask::getTaskId, taskId))
                 .eq(VideoTask::getApiKeyId, apiKeyId), false);
         if (task == null) {
             throw ApiException.taskNotFound();

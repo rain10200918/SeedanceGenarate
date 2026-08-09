@@ -303,7 +303,7 @@ public class VideoController {
         wrapper.orderByDesc(VideoTask::getUpdateTime)
                 .orderByDesc(VideoTask::getId);
         // 列表瘦身：只取列表列（列表展示提示词/缩略图，砍掉 error_msg 大文本）
-        wrapper.select(VideoTask::getId, VideoTask::getTaskId, VideoTask::getUserId,
+        wrapper.select(VideoTask::getId, VideoTask::getTaskId, VideoTask::getBizTaskId, VideoTask::getUserId,
                 VideoTask::getStatus, VideoTask::getVideoUrl, VideoTask::getImages,
                 VideoTask::getDuration, VideoTask::getRatio, VideoTask::getProvider,
                 VideoTask::getModel, VideoTask::getOutputType, VideoTask::getCostAmount,
