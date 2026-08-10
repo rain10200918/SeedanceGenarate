@@ -16,4 +16,6 @@ import org.springframework.stereotype.Component;
 public class DistributedFeatureProperties {
     /** 是否启用 Redis Lua 分布式限流；关闭时使用本地令牌桶兼容实现。 */
     private boolean redisRateLimit = false;
+    /** 是否启用 Redis Pub/Sub 跨实例任务状态通知；关闭时只走本机 SSE。 */
+    private boolean redisTaskEvents = false;
 }

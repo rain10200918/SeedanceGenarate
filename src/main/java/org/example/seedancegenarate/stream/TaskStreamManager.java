@@ -5,8 +5,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -49,14 +47,9 @@ public class TaskStreamManager {
         return emitter;
     }
 
-    /**
-     * 事务提交后再推：保证只通知已落库的状态；推送失败也不影响业务事务。
-     * {@code fallbackExecution=true} 兜底——即便无活动事务也照常推送。
-     */
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
-    public void onStatusChanged(TaskStatusChangedEvent event) {
-        Long userId = event.userId();
-        if (userId == null) {
+    /** 将事件推给当前实例持有的该用户连接；事件来源可以是本地 Spring Event 或 Redis。 */
+    public void pushLocal(Long userId, TaskStatusChangedEvent.Message message) {
+        if (userId == null || message == null) {
             return;
         }
         Set<SseEmitter> set = userEmitters.get(userId);
@@ -65,7 +58,7 @@ public class TaskStreamManager {
         }
         String payload;
         try {
-            payload = objectMapper.writeValueAsString(event.message());
+            payload = objectMapper.writeValueAsString(message);
         } catch (Exception e) {
             log.warn("序列化任务推送载荷失败: {}", e.getMessage());
             return;

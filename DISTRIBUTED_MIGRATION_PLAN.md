@@ -655,7 +655,6 @@ Redis Pub/Sub 可以丢消息，但这里可接受，因为：
 
 - `VideoTaskPoller`；
 - `WebhookDispatcher.retryPending`；
-- `TokenCleanupTask`；
 - 数据库元数据清理任务；
 - 其他后续新增的全局维护任务。
 

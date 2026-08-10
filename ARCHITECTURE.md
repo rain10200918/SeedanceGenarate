@@ -42,7 +42,7 @@
 - `service/` + `service/Impl/` —— `VideoTaskService`、`CostRecordService`、`PricingService`（`ConfigPricingService`）、`VideoDownloadService`、`OssService`、`PromptOptimizeService`、`SeedanceService`、用户/token/邀请码/限流 等
 - `service/VideoSubmitService` —— **提交编排共享服务**（UI 与对外 API 共用：模型解析/闸门/落库/提交/计费）；`service/ApiKeyService`（钥匙生成/哈希/校验）、`service/ApiVideoService`（API 提交门面：幂等+两阶段日志）
 - `interceptor/` —— `AuthInterceptor` + 三个限流拦截器 + `ApiKeyInterceptor`/`ApiKeyRateLimitInterceptor`（对外 API）；`config/WebConfig` 注册它们
-- `config/` —— 各 `@ConfigurationProperties`；`entity/`、`mapper/`、`dto/`、`context/UserContext`、`util/`、`task/TokenCleanupTask`（清过期 token）、`task/VideoTaskPoller`（推进 PROCESSING 任务）、`task/WebhookDispatcher`（API 回调投递）、`stream/TaskStreamManager`（SSE 连接管理 + 推送）、`event/TaskStatusChangedEvent`（终态变化事件）、`event/ApiCallLogUpdater`（调用日志终态收尾）、`exception/ApiException(+Handler)`（API 错误契约）
+- `config/` —— 各 `@ConfigurationProperties`；`entity/`、`mapper/`、`dto/`、`context/UserContext`、`util/`、`task/VideoTaskPoller`（推进 PROCESSING 任务）、`task/WebhookDispatcher`（API 回调投递）、`stream/TaskStreamManager`（本地 SSE 连接管理）、`stream/TaskStatusEventBridge/Publisher/Subscriber`（Redis Pub/Sub 跨实例任务通知）、`event/TaskStatusChangedEvent`（终态变化事件）、`event/ApiCallLogUpdater`（调用日志终态收尾）、`exception/ApiException(+Handler)`（API 错误契约）
 - `resources/db/migration/*.sql` —— Flyway 数据库迁移脚本（`V1__baseline.sql` 基线、`V2__billing_idempotency.sql` 计费幂等、`V3__separate_business_and_provider_task_ids.sql` 任务 ID 分离）
 - `resources/comfyui/workflows/*.json` —— ComfyUI 工作流模板
 
@@ -66,7 +66,7 @@
    - ComfyUI 的 submit：选节点 → 从 OSS URL 下载图片字节 → `/upload/image` 传到该节点 → 按 model 选 `WorkflowBuilder` 构建工作流 → `POST /prompt`。
 2. **推进 + 推送**（后台 `VideoTaskPoller` + SSE，替代前端轮询）：
    - 后台推进器每 `video.poll.interval-ms`（默认 2s）扫最近 `max-age-hours` 内的 `PROCESSING` 任务 → `poll(task)` → 归一化 `RemoteStatus` → `videoTaskService.updateStatus(task, status)`。与在线客户端数无关；完成即下载，规避 Seedance 云端地址过期 / ComfyUI 历史被清。
-   - `updateStatus` 落终态后发 `TaskStatusChangedEvent`（`@TransactionalEventListener` AFTER_COMMIT，提交后才推）；`TaskStreamManager` 经 SSE（`GET /api/video/stream`，`?token=` 鉴权）推给该任务所属用户的浏览器。SSE 尽力而为、非权威，DB 仍是唯一真相；断线由前端 `EventSource` 自动重连 + refetch 兜底。
+   - `updateStatus` 落终态后发 `TaskStatusChangedEvent`；单实例模式由 `TaskStatusEventBridge` 在事务提交后直接交给本机 `TaskStreamManager`，启用 `feature.redis-task-events` 后则在提交后发布 Redis Pub/Sub，所有 API 实例订阅后只推送各自持有的 SSE 连接。SSE 尽力而为、非权威，DB 仍是唯一真相；断线或 Pub/Sub 丢消息由前端 `EventSource` 自动重连 + refetch 兜底。
    - `GET /task/{taskId}` 现为**纯读库**（不再触发远端轮询），供首屏加载与手动刷新兜底；产物 URL 由鉴权媒体接口按需生成短期签名地址。
    - 成功：按 `provider_task_id` 查询远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**），由 `VideoDownloadService` 将响应流转存到 OSS，写入 `artifact_key`、`artifact_content_type`、`artifact_size`、`artifact_etag` 和兼容用 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。播放/下载接口先鉴权，再签发短期 OSS URL；历史 `data/videos/` 记录仍回退本地读取。真实扩展名优先从 ComfyUI `filename` / URL 路径 / Content-Type 推断，`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`。
 3. **播放 / 下载**：`GET /api/video/{fileName}`（内联播放）、`GET /api/video/download/{taskId}`（附件下载），均读本地文件。
@@ -124,7 +124,7 @@
 ## 10. 数据模型（Flyway `db/migration`，MySQL）
 
 - `app_user`：账号、角色（USER/ADMIN）、累计消费、登录/活动 IP 与时间。
-- `user_token`：token → user_id + 过期时间（`TokenCleanupTask` 定期清）。
+- `user_token`：历史兼容表；新登录 Token 仅存 Redis Hash（userId、expireAt），通过 Redis TTL 自动过期，用户资料与角色仍从 `app_user` 查询。
 - `invite_code`：邀请码及使用状态。
 - `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、兼容用 `video_url`、`artifact_key`（OSS object key）、`artifact_content_type`、`artifact_size`、`artifact_etag`、`error_msg`、`cost_amount`、`images(JSON)`。
   - `biz_task_id`：系统生成的公开任务 ID，创建任务时立即生成，后续异步 Worker 以它为业务追踪 ID；
@@ -144,7 +144,7 @@
 - `video.default-provider`：未指定时的默认提供方（`seedance`）。
 - `video.model-access.default-open`：模型无显式开关覆盖时的默认（`true`=新模型自动开放，保持「加模型零配置即可见」；改 `false` 则新模型默认隐藏、需管理员放开）。
 - `video.poll.*`：后台任务推进器（`enabled` / `interval-ms` / `initial-delay-ms` / `max-age-hours` / `batch-size`）。关掉则不再自动推进任务、SSE 无增量可推（手动刷新 `GET /task` 仍可读库）。
-- `spring.task.scheduling.pool.size`：定时任务线程池（默认 4）；推进器 / SSE 心跳 / token 清理各占一线程，互不阻塞。
+- `spring.task.scheduling.pool.size`：定时任务线程池（默认 4）；推进器 / SSE 心跳等各占一线程，互不阻塞。
 - `video.comfyui.*`：`scheduling`（least-queue / round-robin）、连接/读超时、`nodes[]`（id / base-url / enabled）。
 - `prompt-optimize.*`：提示词优化 LLM 代理 url / key / model。系统提示词**按模型选模板**：`resources/prompts/{model}.md`（缺失回退 `default.md`），运行时注入 `{imageCount}/{duration}/{ratio}` 占位并统一追加"只输出提示词本身"的输出铁律；加某模型的提示词风格 = 丢一份 `prompts/{model}.md`，零代码（已有 `minimax-h3.md` 参考生视频专用模板）。
 - `file.upload-path`、`billing.*`、`rate-limit.*`、`aliyun.oss.*`（含 `artifact-prefix`、`signed-url-ttl-seconds`）、`mybatis-plus.*`。
@@ -163,7 +163,7 @@
 - `minimax-h3-accel` 模板里的 `142 SpectrumApplyMiniMaxH3`（额外加速节点）**已接入采样链路**：model 链为 `127→142→(124,126)`（`BasicScheduler`/`BasicGuider` 均从 142 取 model），故该节点会真正执行、加速生效。`ModelSpec.megapixels`（可选分辨率档位）目前仅该模型非空，驱动前端「分辨率」选择器，注入 ResolutionSelector 节点算出宽高。
 - `/options` 会展示 ComfyUI 即使其节点全部禁用（`models()` 与节点可用性解耦）；选中后才在 `scheduler.pick()` 抛「所有节点不可用」。可接受。
 - 更多模型（Wan / Hunyuan / LTX / 更多图片模型 …）= 各加一个 `WorkflowBuilder` + 一份工作流模板 JSON；图片模型复用 `OutputType.IMAGE` + 下载/播放的媒介类型链路（见 `z-image-turbo`）。
-- **SSE 实时推送**（`VideoTaskPoller` + `TaskStreamManager`，`event/TaskStatusChangedEvent`）替代前端轮询：`GET /task` 改纯读库、前端 `EventSource` 订阅 `/api/video/stream`。行为变化：任务现由后台推进器**持续推进 + 成功即计费，即使用户关掉页面**（旧行为需客户端 GET 才推进）。部署注意：反向代理（nginx 等）对 `/api/video/stream` 需关缓冲（`proxy_buffering off;` / `X-Accel-Buffering: no`）否则 SSE 不实时；当前为**单实例假设**——多实例后端会各自推进同一批任务，需加分布式锁或只在一台跑推进器（`video.poll.enabled=false` 关掉其余实例）。
+- **SSE 实时推送**（`VideoTaskPoller` + `TaskStreamManager`，`event/TaskStatusChangedEvent`）替代前端轮询：`GET /task` 改纯读库、前端 `EventSource` 订阅 `/api/video/stream`。启用 `feature.redis-task-events=true` 后，终态事件经 Redis Pub/Sub 广播到所有 API 实例，各实例只推送本地 SSE 连接；Pub/Sub 丢消息时由 MySQL 查询兜底。行为变化：任务现由后台推进器**持续推进 + 成功即计费，即使用户关掉页面**（旧行为需客户端 GET 才推进）。部署注意：反向代理（nginx 等）对 `/api/video/stream` 需关缓冲（`proxy_buffering off;` / `X-Accel-Buffering: no`）否则 SSE 不实时；当前仍为**单实例 Poller 假设**——多实例后端会各自推进同一批任务，需加分布式锁或只在一台跑推进器（`video.poll.enabled=false` 关掉其余实例）。
 
 ## 14. 相关
 

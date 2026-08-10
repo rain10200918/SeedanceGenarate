@@ -257,7 +257,7 @@ src/main/java/org/example/seedancegenarate/
 ├── service/              # VideoSubmitService（UI/API 共享编排）· Pricing · OSS · PromptOptimize …
 ├── interceptor/          # Auth + 限流 + ApiKey（对外 API）
 ├── config/               # 各 @ConfigurationProperties + WebConfig
-├── event/  stream/  task/ # 终态事件 · SSE 管理 · 推进器 / webhook / token 清理
+├── event/  stream/  task/ # 终态事件 · SSE 管理 · 推进器 / webhook
 ├── exception/  dto/  entity/  mapper/  context/  util/
 └── resources/
     ├── application.yaml  # 全部配置支持 ${ENV:默认值}
@@ -324,9 +324,9 @@ src/main/java/org/example/seedancegenarate/
 
 ## 已知事项与演进
 
-- **多实例部署假设**：当前为单实例。SSE 推进器 / 令牌桶限流 / webhook 分发需在多实例时换分布式方案（Redis 限流、分布式锁或仅单实例跑推进器）。
+- **多实例部署假设**：令牌桶限流已可切 Redis Lua 分布式限流（`feature.redis-rate-limit`），登录 Token 已存 Redis，任务终态可经 Redis Pub/Sub 跨实例推送 SSE（`feature.redis-task-events`）；但任务推进器 / webhook 分发仍建议只在单实例运行，或后续接入分布式锁 / 仅单实例跑 `video.poll.enabled=true`。
 - **ComfyUI 新节点**：加节点 = yaml `nodes[]` 填好 + `enabled:true` + 装对应模型权重；OSS bucket 需后端可读。
-- **演进路线**：月度配额（QUOTA_EXCEEDED）、key 校验缓存、异常 key 自动禁用、OpenAPI 文档、API 独立定价、Redis 分布式限流、更多模型（Wan / Hunyuan / LTX）。
+- **演进路线**：月度配额（QUOTA_EXCEEDED）、key 校验缓存、异常 key 自动禁用、OpenAPI 文档、API 独立定价、定时任务集群锁、更多模型（Wan / Hunyuan / LTX）。
 - 实测发现并修复的典型问题（面试可展开）：模型开放闸门绕过（`effectiveModel` 默认实现）、Spring advice 排序吞掉 `ApiException`（`@Order`）、`Map.of` 的 null key NPE（双层修复）。
 
 ---

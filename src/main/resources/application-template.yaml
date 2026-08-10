@@ -98,6 +98,11 @@ billing:
 feature:
   # 关闭时回退本地令牌桶，只适用于单实例开发；多 API 实例必须开启。
   redis-rate-limit: ${FEATURE_REDIS_RATE_LIMIT:false}
+  # 开启后通过 Redis Pub/Sub 广播任务终态，跨实例 SSE 才能收到通知。
+  redis-task-events: ${FEATURE_REDIS_TASK_EVENTS:false}
+
+task-events:
+  channel: ${TASK_STATUS_REDIS_CHANNEL:local:seedance:event:task-status}
 
 rate-limit:
   # Redis key 使用 {环境}:seedance:rate:{场景}:{身份}；不同环境共用 Redis 时请使用不同前缀。
