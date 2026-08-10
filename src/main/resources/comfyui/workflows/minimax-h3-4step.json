@@ -223,7 +223,7 @@
   },
   "200": {
     "inputs": {
-      "sage_preset": "自动",
+      "sage_preset": "关闭",
       "blocks_to_swap": 40,
       "model": [
         "220",
