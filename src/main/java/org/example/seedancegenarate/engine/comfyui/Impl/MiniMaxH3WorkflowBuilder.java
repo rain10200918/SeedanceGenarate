@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.ModelSpec;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
@@ -73,7 +74,7 @@ public class MiniMaxH3WorkflowBuilder implements WorkflowBuilder {
     }
 
     @Override
-    public JsonNode build(GenerateCommand command, List<String> imageFilenames) throws Exception {
+    public JsonNode build(GenerateCommand command, ReferenceFiles files) throws Exception {
         ObjectNode root = (ObjectNode) template().deepCopy();
 
         // 提示词
@@ -87,7 +88,7 @@ public class MiniMaxH3WorkflowBuilder implements WorkflowBuilder {
         params.put("duration", clampDuration(command.getDuration()));
 
         // 参考图：删掉模板里的 3 个 LoadImage 与 ref 连线，按实际张数重建
-        rebuildReferenceImages(root, imageFilenames);
+        rebuildReferenceImages(root, files.images());
 
         // 剥掉与 API 执行无关的 UI 节点
         for (String id : UI_ONLY_NODES) {

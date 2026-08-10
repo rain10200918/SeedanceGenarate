@@ -37,7 +37,7 @@
   - `GenerationMode`（TEXT_TO_VIDEO / IMAGE_TO_VIDEO）、`BillingTiming`（ON_SUBMIT / ON_SUCCESS）、`ModelSpec`（模型能力约束）
 - `engine/comfyui/` —— **ComfyUI 支撑**
   - `ComfyUiProperties`（`video.comfyui.*`）、`ComfyUiClient`（HTTP：/prompt、/history、/view、/queue、/upload/image）、`ComfyUiNodeScheduler`（选节点）
-  - `WorkflowBuilder`（**模型层策略**接口）、`Impl/MiniMaxH3WorkflowBuilder`（参考生视频）、`Impl/MiniMaxH3TextToVideoWorkflowBuilder`（文生视频）、`Impl/MiniMaxH3AccelWorkflowBuilder`（参考生视频·官方加速，可选 megapixels 分辨率）、`Impl/ZImageTurboWorkflowBuilder`（**文生图**，输出 PNG）、`Impl/QwenImageEditWorkflowBuilder`（**图生图**，Qwen-Image-Edit，≤3 参考图）
+  - `WorkflowBuilder`（**模型层策略**接口）、`Impl/MiniMaxH3WorkflowBuilder`（参考生视频）、`Impl/MiniMaxH3TextToVideoWorkflowBuilder`（文生视频）、`Impl/MiniMaxH3AccelWorkflowBuilder`（参考生视频·官方加速，可选 megapixels 分辨率）、`Impl/MiniMaxH34StepWorkflowBuilder`（**参考生视频·官方 4-step turbo 多参考**：图片 ≤9 / 视频 ≤2（自带音轨，`XB_VideoLoader` 帧+音轨双连线）/ 音频 ≤2（`LoadAudio`），至少一个图片或视频）、`Impl/ZImageTurboWorkflowBuilder`（**文生图**，输出 PNG）、`Impl/QwenImageEditWorkflowBuilder`（**图生图**，Qwen-Image-Edit，≤3 参考图）
 - `controller/` —— `VideoController`、`AuthController`、`UserAdminController`、`InviteCodeController`、`GlobalExceptionHandler`
 - `service/` + `service/Impl/` —— `VideoTaskService`、`CostRecordService`、`PricingService`（`ConfigPricingService`）、`VideoDownloadService`、`OssService`、`PromptOptimizeService`、`SeedanceService`、用户/token/邀请码/限流 等
 - `service/VideoSubmitService` —— **提交编排共享服务**（UI 与对外 API 共用：模型解析/闸门/落库/提交/计费）；`service/ApiKeyService`（钥匙生成/哈希/校验）、`service/ApiVideoService`（API 提交门面：幂等+两阶段日志）
@@ -53,19 +53,20 @@
 > 新增一个提供方 = 新增一个 `@Component implements VideoEngine`，其余零改动。
 
 **第二层 — ComfyUI 模型 / 工作流**
-`ComfyUiEngine` 内部再持有 `Map<model, WorkflowBuilder>`。每个 ComfyUI 模型一份 `WorkflowBuilder`：`model()` / `spec()` / `build(command, imageFilenames)`，负责把 prompt / 图片 / 时长 / 比例注入到工作流 JSON。
+`ComfyUiEngine` 内部再持有 `Map<model, WorkflowBuilder>`。每个 ComfyUI 模型一份 `WorkflowBuilder`：`model()` / `spec()` / `build(command, ReferenceFiles)`，负责把 prompt / 图片 / 视频 / 音频 / 时长 / 比例注入到工作流 JSON。`ReferenceFiles`（images / videos / audios 三个 URL 列表）是三类参考素材的统一入参；上传链路按类型下载字节并投到 ComfyUI `/upload/image`（该接口存任意文件到 input/，图片/视频/音频共用一条路径）。
 > 新增一个 ComfyUI 模型 = 新增一个 `@Component implements WorkflowBuilder`（+ 一份模板 JSON），其余零改动。
 
-`GET /api/video/options` 遍历注册表，把每个 provider 的 `models()`（即各 `ModelSpec`）下发前端，驱动「提供方 / 模型 / 比例 / 时长 / 模式」选择器 —— 因此加了新模型**前端无需改代码**即可出现并带上正确的能力约束。`ModelSpec.outputType`（`OutputType.VIDEO/IMAGE`）标记产物媒介：图片模型不下发时长、前端用 `<img>` 渲染并把生成方式文案改为「文生图 / 图生图」。`ModelSpec` 有一个 10 参向后兼容构造器默认 `VIDEO`，故已有视频 builder 零改动。
+`GET /api/video/options` 遍历注册表，把每个 provider 的 `models()`（即各 `ModelSpec`）下发前端，驱动「提供方 / 模型 / 比例 / 时长 / 模式」选择器 —— 因此加了新模型**前端无需改代码**即可出现并带上正确的能力约束。`ModelSpec.outputType`（`OutputType.VIDEO/IMAGE`）标记产物媒介：图片模型不下发时长、前端用 `<img>` 渲染并把生成方式文案改为「文生图 / 图生图」。`ModelSpec` canonical 已扩展为 15 参（追加 `videoMax` / `audioMax` / `needImageOrVideo`），并保留向后兼容构造器默认 `VIDEO` / 0 / 0 / false，故已有视频 builder 零改动。`videoMax` / `audioMax`（参考视频 / 音频上限）与 `needImageOrVideo`（至少一个图片或视频）驱动前端参考素材区块显隐与提交校验。
 
 ## 6. 一次生成的生命周期
 
 1. **提交**（`POST /image2video` 或 `/text2video`）：
-   - 图生视频先把参考图传 OSS 拿到 URL。
-   - 落库 `video_task`（status=PROCESSING，写入 `provider`、`model`）→ `registry.get(provider).submit(cmd)` → 回写 `providerTaskId`、`nodeId`。
-   - ComfyUI 的 submit：选节点 → 从 OSS URL 下载图片字节 → `/upload/image` 传到该节点 → 按 model 选 `WorkflowBuilder` 构建工作流 → `POST /prompt`。
+   - 参考素材（图片 / 视频 / 音频）先把本地文件传 OSS 拿到 URL；历史 URL 复用需过白名单校验（防 SSRF）。
+   - 落库 `video_task`（status=PROCESSING，写入 `provider`、`model`；参考视频 / 音频 URL 持久化到 `reference_videos` / `reference_audios`，同 `images` 便于历史「用这些重新生成」复用）→ `registry.get(provider).submit(cmd)` → 回写 `providerTaskId`、`nodeId`。
+   - ComfyUI 的 submit：选节点 → 按类型从 OSS URL 下载三类素材字节 → 依次 `/upload/image` 传到该节点 → 按 model 选 `WorkflowBuilder` 构建工作流 → `POST /prompt`。
 2. **推进 + 推送**（后台 `VideoTaskPoller` + SSE，替代前端轮询）：
    - 后台推进器每 `video.poll.interval-ms`（默认 2s）扫最近 `max-age-hours` 内的 `PROCESSING` 任务 → `poll(task)` → 归一化 `RemoteStatus` → `videoTaskService.updateStatus(task, status)`。与在线客户端数无关；完成即下载，规避 Seedance 云端地址过期 / ComfyUI 历史被清。
+   - ⚠️ **提交与轮询的竞态（2026-08-10 实测修复）**：submit 先落库 PROCESSING、最后一步才回写 `provider_task_id`/`node_id`，期间 poller 扫到该行会撞上空节点并误判 FAILED（任务其实在正常生成）。修法三层：poller 只轮询 `provider_task_id IS NOT NULL` 的已提交任务；`ComfyUiEngine.poll` 对空 `node_id` 返回「处理中」重试（真正该 FAILED 的是 node_id 非空但配置里找不到节点）；submit 异常时把刚插入的行落 FAILED（消除僵尸 PROCESSING，也让过滤严谨）。
    - `updateStatus` 落终态后发 `TaskStatusChangedEvent`；单实例模式由 `TaskStatusEventBridge` 在事务提交后直接交给本机 `TaskStreamManager`，启用 `feature.redis-task-events` 后则在提交后发布 Redis Pub/Sub，所有 API 实例订阅后只推送各自持有的 SSE 连接。SSE 尽力而为、非权威，DB 仍是唯一真相；断线或 Pub/Sub 丢消息由前端 `EventSource` 自动重连 + refetch 兜底。
    - `GET /task/{taskId}` 现为**纯读库**（不再触发远端轮询），供首屏加载与手动刷新兜底；产物 URL 由鉴权媒体接口按需生成短期签名地址。
    - 成功：按 `provider_task_id` 查询远端产物（Seedance 云端 URL 或 ComfyUI `/view`；视频**或图片**），由 `VideoDownloadService` 将响应流转存到 OSS，写入 `artifact_key`、`artifact_content_type`、`artifact_size`、`artifact_etag` 和兼容用 `video_url`，并 `costRecordService.recordOnSuccess`（幂等）。播放/下载接口先鉴权，再签发短期 OSS URL；历史 `data/videos/` 记录仍回退本地读取。真实扩展名优先从 ComfyUI `filename` / URL 路径 / Content-Type 推断，`ComfyUiEngine.extractVideoUrl` 已同时扫描 `gifs/videos/images`。
@@ -126,7 +127,7 @@
 - `app_user`：账号、角色（USER/ADMIN）、累计消费、登录/活动 IP 与时间。
 - `user_token`：历史兼容表；新登录 Token 仅存 Redis Hash（userId、expireAt），通过 Redis TTL 自动过期，用户资料与角色仍从 `app_user` 查询。
 - `invite_code`：邀请码及使用状态。
-- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、兼容用 `video_url`、`artifact_key`（OSS object key）、`artifact_content_type`、`artifact_size`、`artifact_etag`、`error_msg`、`cost_amount`、`images(JSON)`。
+- `video_task`：一条生成任务。关键判别列 **`provider` / `node_id` / `model` / `output_type`**（`output_type`=VIDEO/IMAGE，提交时按模型 `ModelSpec.outputType` 定死、冻结在记录上）；另有 `status`、兼容用 `video_url`、`artifact_key`（OSS object key）、`artifact_content_type`、`artifact_size`、`artifact_etag`、`error_msg`、`cost_amount`、`images(JSON)`、`reference_videos(JSON)`、`reference_audios(JSON)`（后两列 V5 起，参考视频 / 音频 URL 数组，多参考模型持久化）。
   - `biz_task_id`：系统生成的公开任务 ID，创建任务时立即生成，后续异步 Worker 以它为业务追踪 ID；
   - `provider_task_id`：Seedance / ComfyUI 返回的远端任务 ID，仅用于调用提供方和轮询；
   - 旧 `task_id`：当前兼容字段。新任务暂与 `biz_task_id` 双写，历史记录保留原值，查询同时兼容旧 `task_id` 与 `biz_task_id`。
@@ -146,7 +147,7 @@
 - `video.poll.*`：后台任务推进器（`enabled` / `interval-ms` / `initial-delay-ms` / `max-age-hours` / `batch-size`）。关掉则不再自动推进任务、SSE 无增量可推（手动刷新 `GET /task` 仍可读库）。
 - `spring.task.scheduling.pool.size`：定时任务线程池（默认 4）；推进器 / SSE 心跳等各占一线程，互不阻塞。
 - `video.comfyui.*`：`scheduling`（least-queue / round-robin）、连接/读超时、`nodes[]`（id / base-url / enabled）。
-- `prompt-optimize.*`：提示词优化 LLM 代理 url / key / model。系统提示词**按模型选模板**：`resources/prompts/{model}.md`（缺失回退 `default.md`），运行时注入 `{imageCount}/{duration}/{ratio}` 占位并统一追加"只输出提示词本身"的输出铁律；加某模型的提示词风格 = 丢一份 `prompts/{model}.md`，零代码（已有 `minimax-h3.md` 参考生视频专用模板）。
+- `prompt-optimize.*`：提示词优化 LLM 代理 url / key / model。系统提示词**按模型选模板**：`resources/prompts/{model}.md`（缺失回退 `default.md`），运行时注入 `{imageCount}/{videoCount}/{audioCount}/{duration}/{ratio}` 占位并统一追加"只输出提示词本身"的输出铁律；加某模型的提示词风格 = 丢一份 `prompts/{model}.md`，零代码（已有 `minimax-h3.md` 参考生视频、`minimax-h3-4step.md` 多参考生视频专用模板）。
 - `file.upload-path`、`billing.*`、`rate-limit.*`、`aliyun.oss.*`（含 `artifact-prefix`、`signed-url-ttl-seconds`）、`mybatis-plus.*`。
 
 ## 12. 安全注意事项（重要）
@@ -159,7 +160,8 @@
 
 ## 13. 已知事项 / TODO
 
-- ComfyUI 五个模型（参考生视频 `minimax-h3`、文生视频 `minimax-h3-t2v`、参考生视频·官方加速 `minimax-h3-accel`、文生图 `z-image-turbo`、图生图 `qwen-image-edit`）**已于 2026-08-05 真机端到端验证通过**（submit/poll/view 全通）。部署新节点时仍需：yaml 节点 `enabled` 打开、OSS 后端可读；图片模型装对应权重——z-image（`z_image_turbo_bf16` unet、`qwen_3_4b` lumina2 clip、`ae.safetensors` vae）、qwen-image-edit（Qwen GGUF unet+clip、`qwen_image_vae`、Qwen-Image-Edit-2511-Lightning-4steps LoRA）；minimax-h3-accel（`minimax_h3_ref2va_bf16` + `nvfp4_awq` clip 加速权重，及 ResolutionSelector/CreateVideo/ComfyMathExpression/**SpectrumApplyMiniMaxH3** 等节点）。
+- ComfyUI 六个模型（参考生视频 `minimax-h3`、文生视频 `minimax-h3-t2v`、参考生视频·官方加速 `minimax-h3-accel`、**参考生视频·4-step 多参考 `minimax-h3-4step`**、文生图 `z-image-turbo`、图生图 `qwen-image-edit`）**已于 2026-08-05 真机端到端验证通过**（submit/poll/view 全通）。部署新节点时仍需：yaml 节点 `enabled` 打开、OSS 后端可读；图片模型装对应权重——z-image（`z_image_turbo_bf16` unet、`qwen_3_4b` lumina2 clip、`ae.safetensors` vae）、qwen-image-edit（Qwen GGUF unet+clip、`qwen_image_vae`、Qwen-Image-Edit-2511-Lightning-4steps LoRA）；minimax-h3-accel（`minimax_h3_ref2va_bf16` + `nvfp4_awq` clip 加速权重，及 ResolutionSelector/CreateVideo/ComfyMathExpression/**SpectrumApplyMiniMaxH3** 等节点）。
+- `minimax-h3-4step`（官方 4-step turbo，2026-08-10 新增，**待真机端到端验证**）：多参考生视频，图片 ≤9、视频 ≤2（每段自带音轨，`XB_VideoLoader` output[0] 帧 + output[2] 音轨同时连入）、独立音频 ≤2（`LoadAudio`）；**至少一个图片或视频参考**（音频单独不算，`needImageOrVideo`）。三类参考素材 URL 持久化到 `reference_videos` / `reference_audios`，历史详情展示 + 「用这些重新生成」复用。真机若 `/upload/image` 拒绝视频/音频，则切 ComfyUI `/upload/video` 路径。
 - `minimax-h3-accel` 模板里的 `142 SpectrumApplyMiniMaxH3`（额外加速节点）**已接入采样链路**：model 链为 `127→142→(124,126)`（`BasicScheduler`/`BasicGuider` 均从 142 取 model），故该节点会真正执行、加速生效。`ModelSpec.megapixels`（可选分辨率档位）目前仅该模型非空，驱动前端「分辨率」选择器，注入 ResolutionSelector 节点算出宽高。
 - `/options` 会展示 ComfyUI 即使其节点全部禁用（`models()` 与节点可用性解耦）；选中后才在 `scheduler.pick()` 抛「所有节点不可用」。可接受。
 - 更多模型（Wan / Hunyuan / LTX / 更多图片模型 …）= 各加一个 `WorkflowBuilder` + 一份工作流模板 JSON；图片模型复用 `OutputType.IMAGE` + 下载/播放的媒介类型链路（见 `z-image-turbo`）。

@@ -52,8 +52,12 @@ public class VideoTaskPoller {
         }
         List<VideoTask> tasks;
         try {
+            // 只轮询「已提交完成」的任务：provider_task_id 是提交链路的最后一步才回写，
+            // 该字段为空说明 submit 仍在进行（上传素材 / POST /prompt 未结束），此刻轮询会
+            // 撞上 node_id 尚未回写的竞态（ComfyUI 会误判「找不到节点」而把任务打成 FAILED）。
             tasks = videoTaskService.list(Wrappers.<VideoTask>lambdaQuery()
                     .eq(VideoTask::getStatus, "PROCESSING")
+                    .isNotNull(VideoTask::getProviderTaskId)
                     .ge(VideoTask::getCreateTime, LocalDateTime.now().minusHours(maxAgeHours))
                     .orderByAsc(VideoTask::getId)
                     .last("limit " + Math.max(batchSize, 1)));

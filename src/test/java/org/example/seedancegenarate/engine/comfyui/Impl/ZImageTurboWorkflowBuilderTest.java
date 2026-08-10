@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -28,7 +29,7 @@ class ZImageTurboWorkflowBuilderTest {
                 .model("z-image-turbo")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of());
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of(), List.of(), List.of()));
 
         // 提示词注入到 CLIPTextEncode
         assertEquals("白发中年人，穿着道袍", wf.path("57:27").path("inputs").path("text").asText());
@@ -51,7 +52,7 @@ class ZImageTurboWorkflowBuilderTest {
                 .model("z-image-turbo")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of());
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of(), List.of(), List.of()));
 
         assertEquals(1024, wf.path("57:13").path("inputs").path("width").asInt());
         assertEquals(1024, wf.path("57:13").path("inputs").path("height").asInt());
@@ -81,7 +82,7 @@ class ZImageTurboWorkflowBuilderTest {
                 // 不传 ratio / duration
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of());
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of(), List.of(), List.of()));
 
         // 归一为共享层默认 16:9（与 VideoSubmitService 的默认一致），不抛 NPE
         assertEquals(1344, wf.path("57:13").path("inputs").path("width").asInt());

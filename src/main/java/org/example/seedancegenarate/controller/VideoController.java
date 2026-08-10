@@ -69,6 +69,10 @@ public class VideoController {
     public Result<?> image2video(
             @RequestParam(value = "images", required = false)
             MultipartFile[] images,
+            @RequestParam(value = "videos", required = false)
+            MultipartFile[] videos,
+            @RequestParam(value = "audios", required = false)
+            MultipartFile[] audios,
             @RequestParam("prompt")
             String prompt,
             @RequestParam(
@@ -90,7 +94,11 @@ public class VideoController {
             @RequestParam(value = "imageUrls", required = false)
             List<String> imageUrls,
             @RequestParam(value = "imageOrder", required = false)
-            List<String> imageOrder
+            List<String> imageOrder,
+            @RequestParam(value = "videoUrls", required = false)
+            List<String> videoUrls,
+            @RequestParam(value = "audioUrls", required = false)
+            List<String> audioUrls
     ) throws Exception {
         Long userId = UserContext.requireUserId();
         // 闸门在传图副作用之前（提交编排内会再校验一次）
@@ -103,33 +111,55 @@ public class VideoController {
                 imagePaths.add(url);
             }
         }
-        List<String> urls = imageUrls == null ? List.of() : imageUrls.stream().map(this::validateOssUrl).toList();
+        List<String> urls = imageUrls == null ? List.of() : imageUrls.stream().map(u -> validateMediaUrl(u, "图片")).toList();
         imagePaths = mergeImagePaths(imagePaths, urls, imageOrder);
+        // 参考视频/音频：本地文件上传 OSS + 历史 URL 白名单校验，按「本地在前、URL 在后」归并
+        List<String> videoPaths = uploadRefFiles(videos, videoUrls, "视频");
+        List<String> audioPaths = uploadRefFiles(audios, audioUrls, "音频");
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
-                userId, provider, model, prompt, imagePaths, duration, ratio, megapixels, null));
+                userId, provider, model, prompt, imagePaths, videoPaths, audioPaths,
+                duration, ratio, megapixels, null));
         return Result.success(task);
     }
 
+    /** 参考视频/音频归并：本地文件（MultipartFile → OSS）在前，历史 URL（白名单校验）在后；数量 ≤2 不引入 order 标签 */
+    private List<String> uploadRefFiles(MultipartFile[] files, List<String> urls, String label) throws Exception {
+        List<String> paths = new ArrayList<>();
+        if (files != null) {
+            for (MultipartFile file : files) {
+                paths.add(ossService.upload(file));
+            }
+        }
+        if (urls != null) {
+            for (String url : urls) {
+                paths.add(validateMediaUrl(url, label));
+            }
+        }
+        return paths;
+    }
+
     /**
-     * 历史图片 URL 白名单校验：必须 http(s) 且 host 为本系统 OSS 域名。
-     * imageUrls 会被引擎端下载，不校验等于开放任意地址让后端打内网（SSRF）。
+     * 历史参考素材 URL 白名单校验：必须 http(s) 且 host 为本系统 OSS 域名。
+     * URL 会被引擎端下载，不校验等于开放任意地址让后端打内网（SSRF）。
+     *
+     * @param label 素材类型标签（图片 / 视频 / 音频），用于错误提示
      */
-    private String validateOssUrl(String url) {
+    private String validateMediaUrl(String url, String label) {
         if (!StringUtils.hasText(url)) {
-            throw new RuntimeException("图片地址不能为空");
+            throw new RuntimeException(label + "地址不能为空");
         }
         try {
             URI uri = new URI(url.trim());
             String scheme = uri.getScheme();
             if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-                throw new RuntimeException("图片地址必须为 http(s)");
+                throw new RuntimeException(label + "地址必须为 http(s)");
             }
             String allowedHost = hostOf(ossConfig.getDomain());
             if (StringUtils.hasText(allowedHost) && !allowedHost.equalsIgnoreCase(uri.getHost())) {
-                throw new RuntimeException("图片地址必须来自本系统存储");
+                throw new RuntimeException(label + "地址必须来自本系统存储");
             }
         } catch (URISyntaxException e) {
-            throw new RuntimeException("图片地址不合法");
+            throw new RuntimeException(label + "地址不合法");
         }
         return url.trim();
     }
@@ -190,7 +220,7 @@ public class VideoController {
                 : request.getRatio();
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, request.getProvider(), request.getModel(), prompt,
-                List.of(), duration, ratio, null, null));
+                List.of(), List.of(), List.of(), duration, ratio, null, null));
         return Result.success(task);
     }
 
@@ -212,6 +242,7 @@ public class VideoController {
         }
         return Result.success(promptOptimizeService.optimize(prompt,
                 new PromptContext(request.getModel(), request.getImageCount(),
+                        request.getVideoCount(), request.getAudioCount(),
                         request.getDuration(), request.getRatio())));
     }
 
@@ -265,7 +296,8 @@ public class VideoController {
                 spec.model(), spec.label(), spec.needImages(),
                 spec.imageMin(), spec.imageMax(), spec.ratios(), durations,
                 spec.outputType().name(), spec.megapixels(),
-                modelAccessService.isOpen(spec.model())
+                modelAccessService.isOpen(spec.model()),
+                spec.videoMax(), spec.audioMax(), spec.needImageOrVideo()
         );
     }
 

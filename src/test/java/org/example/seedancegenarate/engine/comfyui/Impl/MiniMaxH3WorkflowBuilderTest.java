@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -27,7 +28,7 @@ class MiniMaxH3WorkflowBuilderTest {
                 .model("minimax-h3")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of("f0.png", "f1.jpg"));
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of("f0.png", "f1.jpg"), List.of(), List.of()));
 
         // 提示词注入
         assertEquals("你好世界", wf.path("170").path("inputs").path("value").asText());

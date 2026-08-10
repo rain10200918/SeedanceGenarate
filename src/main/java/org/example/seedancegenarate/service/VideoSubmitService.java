@@ -22,13 +22,15 @@ public interface VideoSubmitService {
      */
     VideoTask submit(SubmitRequest request) throws Exception;
 
-    /** 统一提交入参；{@code imageUrls} 为已上传到 OSS 的图片 URL（两条入口各自负责图片获取）。 */
+    /** 统一提交入参；{@code imageUrls}/{@code videoUrls}/{@code audioUrls} 为已上传到 OSS 的参考素材 URL（两条入口各自负责素材获取）。 */
     record SubmitRequest(
             Long userId,
             String provider,
             String model,
             String prompt,
             List<String> imageUrls,
+            List<String> videoUrls,
+            List<String> audioUrls,
             Integer duration,
             String ratio,
             Double megapixels,

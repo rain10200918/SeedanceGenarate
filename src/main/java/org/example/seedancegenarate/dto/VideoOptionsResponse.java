@@ -28,7 +28,10 @@ public record VideoOptionsResponse(
             List<Integer> durations,
             String outputType,
             List<Double> megapixels,
-            boolean open
+            boolean open,
+            int videoMax,
+            int audioMax,
+            boolean needImageOrVideo
     ) {
     }
 }

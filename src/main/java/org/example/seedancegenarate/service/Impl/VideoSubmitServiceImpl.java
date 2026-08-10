@@ -62,6 +62,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
         // 任务类型 = (有无参考图) × (模型输出类型)
         List<String> imageUrls = request.imageUrls() == null ? Collections.emptyList() : request.imageUrls();
+        List<String> videoUrls = request.videoUrls() == null ? Collections.emptyList() : request.videoUrls();
+        List<String> audioUrls = request.audioUrls() == null ? Collections.emptyList() : request.audioUrls();
         boolean hasImages = !imageUrls.isEmpty();
         OutputType outputType = engine.outputType(effectiveModel);
         GenerationMode mode = GenerationMode.of(hasImages, outputType);
@@ -75,6 +77,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setTaskId(bizTaskId);
         task.setPrompt(request.prompt());
         task.setImages(hasImages ? objectMapper.writeValueAsString(imageUrls) : null);
+        task.setReferenceVideos(videoUrls.isEmpty() ? null : objectMapper.writeValueAsString(videoUrls));
+        task.setReferenceAudios(audioUrls.isEmpty() ? null : objectMapper.writeValueAsString(audioUrls));
         task.setDuration(duration);
         task.setRatio(ratio);
         task.setStatus("PROCESSING");
@@ -87,13 +91,25 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         GenerateCommand command = GenerateCommand.builder()
                 .mode(mode)
                 .imageUrls(imageUrls)
+                .videoUrls(videoUrls)
+                .audioUrls(audioUrls)
                 .prompt(request.prompt())
                 .duration(duration)
                 .ratio(ratio)
                 .model(effectiveModel)
                 .megapixels(request.megapixels())
                 .build();
-        SubmitResult submit = engine.submit(command);
+        SubmitResult submit;
+        try {
+            submit = engine.submit(command);
+        } catch (Exception e) {
+            // 提交失败：把刚 INSERT 的 PROCESSING 行落 FAILED。否则会留下「PROCESSING + 空
+            // provider_task_id」的僵尸行，且 poller 只轮询已提交任务时永远不会碰它（清理不到）。
+            task.setStatus("FAILED");
+            task.setErrorMsg(e.getMessage());
+            videoTaskService.updateById(task);
+            throw e;
+        }
         task.setProviderTaskId(submit.getProviderTaskId());
         task.setNodeId(submit.getNodeId());
         videoTaskService.updateById(task);

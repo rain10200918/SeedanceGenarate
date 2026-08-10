@@ -28,7 +28,8 @@ public class ComfyUiClient {
         return HttpUtil.downloadBytes(url);
     }
 
-    /** 上传图片到 ComfyUI 的 input 目录，返回 LoadImage 可用的文件名 */
+    /** 上传文件到 ComfyUI 的 input 目录，返回 LoadImage / LoadAudio / XB_VideoLoader 可用的文件名。
+     *  ComfyUI 的 /upload/image 端点接受任意文件类型并存入 input/，故图片 / 视频 / 音频复用同一条路径。 */
     public String uploadImage(String baseUrl, byte[] bytes, String filename, int timeoutMs) throws Exception {
         HttpResponse resp = HttpRequest.post(baseUrl + "/upload/image")
                 .form("image", bytes, filename)

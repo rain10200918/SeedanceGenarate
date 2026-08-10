@@ -15,6 +15,10 @@ public class GenerateCommand {
     private GenerationMode mode;
     /** 参考图地址（图生视频用；文生视频为空） */
     private List<String> imageUrls;
+    /** 参考视频地址（多参考模型用；可为空） */
+    private List<String> videoUrls;
+    /** 参考音频地址（多参考模型用；可为空） */
+    private List<String> audioUrls;
     /** 提示词 */
     private String prompt;
     /** 时长（秒） */

@@ -119,6 +119,8 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
         }
         return template
                 .replace("{imageCount}", String.valueOf(ctx.imageCount() == null ? 0 : ctx.imageCount()))
+                .replace("{videoCount}", String.valueOf(ctx.videoCount() == null ? 0 : ctx.videoCount()))
+                .replace("{audioCount}", String.valueOf(ctx.audioCount() == null ? 0 : ctx.audioCount()))
                 .replace("{duration}", ctx.duration() == null ? "" : String.valueOf(ctx.duration()))
                 .replace("{ratio}", ctx.ratio() == null ? "" : ctx.ratio())
                 .replace("{model}", ctx.model() == null ? "" : ctx.model());

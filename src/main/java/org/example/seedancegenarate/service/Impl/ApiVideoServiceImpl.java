@@ -80,7 +80,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
         try {
             VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                     context.apiKey().getUserId(), engine.provider(), context.model(), context.prompt(),
-                    imageUrls, context.duration(), context.ratio(), context.megapixels(),
+                    imageUrls, List.of(), List.of(), context.duration(), context.ratio(), context.megapixels(),
                     context.apiKey().getId()));
             // 两阶段日志：回写 taskId + 排队耗时（终态由 ApiCallLogUpdater 收尾）
             ApiCallLog update = new ApiCallLog();

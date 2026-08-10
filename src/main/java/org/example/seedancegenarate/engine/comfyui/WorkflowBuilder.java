@@ -21,8 +21,8 @@ public interface WorkflowBuilder {
     /**
      * 生成 ComfyUI /prompt 所需的工作流图。
      *
-     * @param command        生成参数
-     * @param imageFilenames 已上传到目标节点的参考图文件名，顺序对应 &lt;Picture 1..N&gt;
+     * @param command 生成参数
+     * @param files   已上传到目标节点的参考素材文件名（图片 / 视频 / 音频，顺序对应 &lt;Picture 1..N&gt; 等）
      */
-    JsonNode build(GenerateCommand command, List<String> imageFilenames) throws Exception;
+    JsonNode build(GenerateCommand command, ReferenceFiles files) throws Exception;
 }

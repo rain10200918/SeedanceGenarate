@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS video_task (
     task_id VARCHAR(128),
     prompt TEXT,
     images TEXT,
+    reference_videos TEXT,
+    reference_audios TEXT,
     duration INT,
     ratio VARCHAR(32),
     status VARCHAR(32),
@@ -104,6 +106,8 @@ ALTER TABLE app_user ADD COLUMN last_active_ip_location VARCHAR(128) NULL AFTER 
 ALTER TABLE app_user ADD COLUMN last_operation VARCHAR(128) NULL AFTER last_active_ip_location;
 ALTER TABLE app_user ADD COLUMN last_operation_time DATETIME NULL AFTER last_operation;
 ALTER TABLE video_task ADD COLUMN user_id BIGINT NULL AFTER id;
+ALTER TABLE video_task ADD COLUMN reference_videos TEXT NULL AFTER images;
+ALTER TABLE video_task ADD COLUMN reference_audios TEXT NULL AFTER reference_videos;
 ALTER TABLE video_task ADD COLUMN cost_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00 AFTER error_msg;
 ALTER TABLE video_task ADD INDEX idx_video_task_user_id (user_id);
 ALTER TABLE video_task ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'seedance' AFTER cost_amount;

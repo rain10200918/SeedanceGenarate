@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
@@ -82,7 +83,7 @@ public class MiniMaxH3AccelWorkflowBuilder implements WorkflowBuilder {
     }
 
     @Override
-    public JsonNode build(GenerateCommand command, List<String> imageFilenames) throws Exception {
+    public JsonNode build(GenerateCommand command, ReferenceFiles files) throws Exception {
         ObjectNode root = (ObjectNode) template().deepCopy();
 
         // 提示词
@@ -98,7 +99,7 @@ public class MiniMaxH3AccelWorkflowBuilder implements WorkflowBuilder {
         requireInputs(root, NODE_DURATION).put("value", clampDuration(command.getDuration()));
 
         // 参考图：删模板占位 LoadImage，按实际张数重建并重连 ref_image_i
-        rebuildReferenceImages(root, imageFilenames);
+        rebuildReferenceImages(root, files.images());
 
         return root;
     }

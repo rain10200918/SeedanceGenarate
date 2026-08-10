@@ -24,7 +24,12 @@ public class VideoTask {
     @JsonIgnore
     private String providerTaskId;
     private String prompt;
+    /** 参考图片 OSS URL 的 JSON 数组（顺序对应 <Picture 1..N>） */
     private String images;
+    /** 参考视频 OSS URL 的 JSON 数组（顺序对应 <Video 1..N>） */
+    private String referenceVideos;
+    /** 参考音频 OSS URL 的 JSON 数组（顺序对应 <Audio 1..N>） */
+    private String referenceAudios;
     private Integer duration;
     private String ratio;
     private String status;

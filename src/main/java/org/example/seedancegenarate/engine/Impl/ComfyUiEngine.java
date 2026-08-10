@@ -12,6 +12,7 @@ import org.example.seedancegenarate.engine.comfyui.ComfyUiClient;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiNodeScheduler;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
 import org.example.seedancegenarate.engine.ModelSpec;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.springframework.stereotype.Component;
@@ -76,34 +77,52 @@ public class ComfyUiEngine implements VideoEngine {
     public SubmitResult submit(GenerateCommand command) throws Exception {
         WorkflowBuilder builder = resolveBuilder(command.getModel());
         List<String> imageUrls = command.getImageUrls() == null ? Collections.emptyList() : command.getImageUrls();
-        validate(builder.spec(), imageUrls, command);
+        List<String> videoUrls = command.getVideoUrls() == null ? Collections.emptyList() : command.getVideoUrls();
+        List<String> audioUrls = command.getAudioUrls() == null ? Collections.emptyList() : command.getAudioUrls();
+        validate(builder.spec(), imageUrls, videoUrls, audioUrls, command);
 
         // 1. 选节点
         ComfyUiProperties.Node node = scheduler.pick();
         log.info("ComfyUI 选中节点 {} 处理任务, model={}", node.getId(), command.getModel());
 
-        // 2. 上传参考图到该节点（顺序保持，对应 <Picture 1..N>）
-        // 文件名内容 hash 化：同图幂等，防止 ComfyUI input 目录无限增长
-        List<String> filenames = new ArrayList<>();
-        for (String url : imageUrls) {
-            byte[] bytes = client.downloadBytes(url);
-            String filename = DigestUtil.md5Hex(bytes) + extensionOf(url);
-            filenames.add(client.uploadImage(node.getBaseUrl(), bytes, filename, properties.getReadTimeoutMs()));
-        }
+        // 2. 上传参考素材到该节点（各类内顺序保持，对应 <Picture 1..N> / <Video 1..N> / <Audio 1..N>）
+        // 文件名内容 hash 化：同素材幂等，防止 ComfyUI input 目录无限增长
+        ReferenceFiles files = new ReferenceFiles(
+                uploadRefs(node, imageUrls, ".png"),
+                uploadRefs(node, videoUrls, ".mp4"),
+                uploadRefs(node, audioUrls, ".wav"));
 
         // 3. 构建工作流并提交
-        JsonNode workflow = builder.build(command, filenames);
+        JsonNode workflow = builder.build(command, files);
         String clientId = UUID.randomUUID().toString();
         String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId, properties.getReadTimeoutMs());
 
         return SubmitResult.of(promptId, node.getId());
     }
 
+    /** 下载 OSS URL → 上传到节点 input 目录，返回 LoadImage/LoadAudio/XB_VideoLoader 可用的文件名（内容 hash 幂等） */
+    private List<String> uploadRefs(ComfyUiProperties.Node node, List<String> urls, String defaultExt) throws Exception {
+        List<String> filenames = new ArrayList<>();
+        for (String url : urls) {
+            byte[] bytes = client.downloadBytes(url);
+            String filename = DigestUtil.md5Hex(bytes) + extensionOf(url, defaultExt);
+            filenames.add(client.uploadImage(node.getBaseUrl(), bytes, filename, properties.getReadTimeoutMs()));
+        }
+        return filenames;
+    }
+
     @Override
     public RemoteStatus poll(VideoTask task) throws Exception {
-        ComfyUiProperties.Node node = properties.findNode(task.getNodeId());
+        String nodeId = task.getNodeId();
+        if (nodeId == null || nodeId.isBlank()) {
+            // 任务尚未完成提交（node_id 由提交链路最后一步回写）：submit 先落库 PROCESSING、
+            // 后回写 node_id，poller 可能先扫到这条仍在提交中的任务。此时视为处理中、下一轮再查，
+            // 绝不能判失败——那是「节点已被移除」这类配置错误才该报的。
+            return RemoteStatus.processing();
+        }
+        ComfyUiProperties.Node node = properties.findNode(nodeId);
         if (node == null) {
-            return RemoteStatus.failed("找不到处理该任务的 ComfyUI 节点: " + task.getNodeId());
+            return RemoteStatus.failed("找不到处理该任务的 ComfyUI 节点: " + nodeId);
         }
         String providerTaskId = task.remoteTaskId();
         JsonNode history = client.getHistory(node.getBaseUrl(), providerTaskId, properties.getReadTimeoutMs());
@@ -135,12 +154,29 @@ public class ComfyUiEngine implements VideoEngine {
         return builder;
     }
 
-    private void validate(ModelSpec spec, List<String> imageUrls, GenerateCommand command) {
-        if (spec.needImages() && imageUrls.isEmpty()) {
+    private void validate(ModelSpec spec, List<String> imageUrls, List<String> videoUrls,
+                          List<String> audioUrls, GenerateCommand command) {
+        // 多参考模型：图片或视频至少一个（音频单独不算）
+        if (spec.needImageOrVideo() && imageUrls.isEmpty() && videoUrls.isEmpty()) {
+            throw new RuntimeException("该模型至少需要一个参考图片或参考视频");
+        }
+        if (!spec.needImageOrVideo() && spec.needImages() && imageUrls.isEmpty()) {
             throw new RuntimeException("该模型需要参考图");
         }
         if (!imageUrls.isEmpty() && (imageUrls.size() < spec.imageMin() || imageUrls.size() > spec.imageMax())) {
             throw new RuntimeException("参考图数量需为 " + spec.imageMin() + "-" + spec.imageMax() + " 张");
+        }
+        if (!videoUrls.isEmpty() && spec.videoMax() == 0) {
+            throw new RuntimeException("该模型不支持参考视频");
+        }
+        if (spec.videoMax() > 0 && videoUrls.size() > spec.videoMax()) {
+            throw new RuntimeException("参考视频数量需为 1-" + spec.videoMax() + " 段");
+        }
+        if (!audioUrls.isEmpty() && spec.audioMax() == 0) {
+            throw new RuntimeException("该模型不支持参考音频");
+        }
+        if (spec.audioMax() > 0 && audioUrls.size() > spec.audioMax()) {
+            throw new RuntimeException("参考音频数量需为 1-" + spec.audioMax() + " 段");
         }
         if (command.getRatio() != null && !spec.ratios().isEmpty() && !spec.ratios().contains(command.getRatio())) {
             throw new RuntimeException("该模型不支持的比例: " + command.getRatio());
@@ -185,9 +221,10 @@ public class ComfyUiEngine implements VideoEngine {
         return "ComfyUI 执行失败";
     }
 
-    private String extensionOf(String url) {
+    /** 取 URL 的媒体扩展名（图片 / 视频 / 音频），识别不了回退调用方按类型给的默认值 */
+    private String extensionOf(String url, String defaultExt) {
         if (url == null) {
-            return ".png";
+            return defaultExt;
         }
         int q = url.indexOf('?');
         String path = q >= 0 ? url.substring(0, q) : url;
@@ -195,10 +232,10 @@ public class ComfyUiEngine implements VideoEngine {
         int slash = path.lastIndexOf('/');
         if (dot > slash) {
             String ext = path.substring(dot).toLowerCase();
-            if (ext.matches("\\.(png|jpg|jpeg|webp|bmp|gif)")) {
+            if (ext.matches("\\.(png|jpg|jpeg|webp|bmp|gif|mp4|mov|webm|mkv|avi|mp3|wav|m4a|flac|aac|ogg)")) {
                 return ext;
             }
         }
-        return ".png";
+        return defaultExt;
     }
 }

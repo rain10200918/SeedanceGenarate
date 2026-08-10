@@ -17,7 +17,7 @@ class PromptOptimizeServiceImplTest {
 
     @Test
     void ref2vaTemplateSelectedAndImageCountInjected() {
-        String sys = service.buildSystemPrompt(new PromptContext("minimax-h3", 3, 8, "16:9"));
+        String sys = service.buildSystemPrompt(new PromptContext("minimax-h3", 3, 0, 0, 8, "16:9"));
 
         assertTrue(sys.contains("参考生视频"), "应命中 minimax-h3 专用模板");
         assertTrue(sys.contains("<Picture 3>"), "{imageCount} 应被替换为 3");
@@ -27,7 +27,7 @@ class PromptOptimizeServiceImplTest {
 
     @Test
     void unknownModelFallsBackToDefault() {
-        String sys = service.buildSystemPrompt(new PromptContext("no-such-model", 0, null, null));
+        String sys = service.buildSystemPrompt(new PromptContext("no-such-model", 0, null, null, null, null));
 
         assertTrue(sys.contains("文生视频"), "未知模型应回退到 default.md");
         assertTrue(sys.contains("只输出"), "仍应有输出铁律");

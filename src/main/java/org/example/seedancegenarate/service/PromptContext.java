@@ -7,6 +7,8 @@ package org.example.seedancegenarate.service;
 public record PromptContext(
         String model,
         Integer imageCount,
+        Integer videoCount,
+        Integer audioCount,
         Integer duration,
         String ratio
 ) {

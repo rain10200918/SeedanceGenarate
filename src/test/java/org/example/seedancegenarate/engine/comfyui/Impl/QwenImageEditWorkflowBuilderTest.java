@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -28,7 +29,7 @@ class QwenImageEditWorkflowBuilderTest {
                 .model("qwen-image-edit")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of("a.png", "b.jpg"));
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of("a.png", "b.jpg"), List.of(), List.of()));
 
         // 提示词注入到 QwenImageEditPlus（正向）
         assertEquals("图一的人物换上图二的衣服", wf.path("48").path("inputs").path("prompt").asText());
@@ -69,7 +70,7 @@ class QwenImageEditWorkflowBuilderTest {
                 .model("qwen-image-edit")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of("1.png", "2.png", "3.png", "4.png"));
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of("1.png", "2.png", "3.png", "4.png"), List.of(), List.of()));
 
         JsonNode in48 = wf.path("48").path("inputs");
         assertFalse(in48.path("image3").isMissingNode());

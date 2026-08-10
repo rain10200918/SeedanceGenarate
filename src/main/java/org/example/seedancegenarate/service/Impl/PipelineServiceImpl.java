@@ -273,7 +273,7 @@ public class PipelineServiceImpl implements PipelineService {
         String effectiveModel = StringUtils.hasText(node.getModel()) ? node.getModel() : pipeline.getModel();
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, pipeline.getProvider(), effectiveModel,
-                node.getPrompt(), urls,
+                node.getPrompt(), urls, List.of(), List.of(),
                 node.getDuration(), node.getRatio(), null, null));
         node.setTaskId(task.businessTaskId());
         node.setStatus("PROCESSING");

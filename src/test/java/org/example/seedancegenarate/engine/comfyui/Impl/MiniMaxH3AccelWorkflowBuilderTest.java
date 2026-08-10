@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -30,7 +31,7 @@ class MiniMaxH3AccelWorkflowBuilderTest {
                 .model("minimax-h3-accel")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of("f0.png", "f1.jpg"));
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of("f0.png", "f1.jpg"), List.of(), List.of()));
 
         assertEquals("你好世界", wf.path("138").path("inputs").path("value").asText());
         assertEquals("16:9 (Widescreen)", wf.path("115").path("inputs").path("aspect_ratio").asText());
@@ -63,7 +64,7 @@ class MiniMaxH3AccelWorkflowBuilderTest {
                 .model("minimax-h3-accel")
                 .build();
 
-        JsonNode wf = builder.build(cmd, List.of("a.png"));
+        JsonNode wf = builder.build(cmd, new ReferenceFiles(List.of("a.png"), List.of(), List.of()));
 
         assertEquals(0.7, wf.path("115").path("inputs").path("megapixels").asDouble(), 1e-9);
     }

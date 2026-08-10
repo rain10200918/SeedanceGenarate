@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
@@ -72,7 +73,7 @@ public class QwenImageEditWorkflowBuilder implements WorkflowBuilder {
     }
 
     @Override
-    public JsonNode build(GenerateCommand command, List<String> imageFilenames) throws Exception {
+    public JsonNode build(GenerateCommand command, ReferenceFiles files) throws Exception {
         ObjectNode root = (ObjectNode) template().deepCopy();
 
         // 提示词
@@ -89,7 +90,7 @@ public class QwenImageEditWorkflowBuilder implements WorkflowBuilder {
         latent.put("height", size[1]);
 
         // 参考图：删模板单张占位，按实际张数（1..3）重建 LoadImage→缩放 并接到 image1..N
-        rebuildReferenceImages(root, imageFilenames);
+        rebuildReferenceImages(root, files.images());
 
         return root;
     }
