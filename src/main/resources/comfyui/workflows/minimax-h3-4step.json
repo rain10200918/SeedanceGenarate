@@ -224,7 +224,7 @@
   "200": {
     "inputs": {
       "sage_preset": "自动",
-      "blocks_to_swap": 10,
+      "blocks_to_swap": 40,
       "model": [
         "220",
         0
