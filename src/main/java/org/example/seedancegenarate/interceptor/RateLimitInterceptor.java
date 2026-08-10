@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.config.RateLimitConfig;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.service.RateLimitResult;
 import org.example.seedancegenarate.service.TokenBucketRateLimitService;
 import org.example.seedancegenarate.util.IpUtils;
 import org.springframework.stereotype.Component;
@@ -28,18 +29,22 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         }
         Long userId = UserContext.requireUserId();
         String ip = IpUtils.getClientIp(request);
-        boolean userAllowed = tokenBucketRateLimitService.tryAcquire(
-                "generate:user:" + userId,
-                UserContext.isAdmin() ? rateLimitConfig.getGenerateAdmin() : rateLimitConfig.getGenerateUser()
+        boolean admin = UserContext.isAdmin();
+        RateLimitResult userResult = tokenBucketRateLimitService.tryAcquire(
+                (admin ? "generate:admin:" : "generate:user:") + userId,
+                admin ? rateLimitConfig.getGenerateAdmin() : rateLimitConfig.getGenerateUser()
         );
-        boolean ipAllowed = tokenBucketRateLimitService.tryAcquire(
+        RateLimitResult ipResult = tokenBucketRateLimitService.tryAcquire(
                 "generate:ip:" + ip,
                 rateLimitConfig.getGenerateIp()
         );
-        if (userAllowed && ipAllowed) {
+        if (userResult.allowed() && ipResult.allowed()) {
             return true;
         }
         response.setStatus(429);
+        response.setHeader("Retry-After", String.valueOf(Math.max(
+                userResult.allowed() ? 0 : userResult.retryAfterSeconds(),
+                ipResult.allowed() ? 0 : ipResult.retryAfterSeconds())));
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(objectMapper.writeValueAsString(Result.tooManyRequests("请求过于频繁，请稍后再试")));

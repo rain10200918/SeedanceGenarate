@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.config.RateLimitConfig;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.service.RateLimitResult;
 import org.example.seedancegenarate.service.TokenBucketRateLimitService;
 import org.example.seedancegenarate.util.IpUtils;
 import org.springframework.stereotype.Component;
@@ -31,18 +32,21 @@ public class PromptOptimizeRateLimitInterceptor implements HandlerInterceptor {
         }
         Long userId = UserContext.requireUserId();
         String ip = IpUtils.getClientIp(request);
-        boolean userAllowed = tokenBucketRateLimitService.tryAcquire(
-                "optimize:user:" + userId,
+        RateLimitResult userResult = tokenBucketRateLimitService.tryAcquire(
+                "prompt:user:" + userId,
                 rateLimitConfig.getPromptOptimizeUser()
         );
-        boolean ipAllowed = tokenBucketRateLimitService.tryAcquire(
-                "optimize:ip:" + ip,
+        RateLimitResult ipResult = tokenBucketRateLimitService.tryAcquire(
+                "prompt:ip:" + ip,
                 rateLimitConfig.getPromptOptimizeIp()
         );
-        if (userAllowed && ipAllowed) {
+        if (userResult.allowed() && ipResult.allowed()) {
             return true;
         }
         response.setStatus(429);
+        response.setHeader("Retry-After", String.valueOf(Math.max(
+                userResult.allowed() ? 0 : userResult.retryAfterSeconds(),
+                ipResult.allowed() ? 0 : ipResult.retryAfterSeconds())));
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(objectMapper.writeValueAsString(Result.tooManyRequests("优化过于频繁，请稍后再试")));

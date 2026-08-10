@@ -1,35 +1,38 @@
 package org.example.seedancegenarate.service.Impl;
 
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import lombok.RequiredArgsConstructor;
+import org.example.seedancegenarate.config.AuthTokenProperties;
 import org.example.seedancegenarate.entity.AppUser;
-import org.example.seedancegenarate.entity.UserToken;
-import org.example.seedancegenarate.mapper.UserTokenMapper;
 import org.example.seedancegenarate.service.AppUserService;
+import org.example.seedancegenarate.service.TokenCacheService;
 import org.example.seedancegenarate.service.UserTokenService;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
-public class UserTokenServiceImpl extends ServiceImpl<UserTokenMapper, UserToken> implements UserTokenService {
+public class UserTokenServiceImpl implements UserTokenService {
     private final AppUserService appUserService;
+    private final TokenCacheService tokenCacheService;
+    private final AuthTokenProperties authTokenProperties;
 
-    public UserTokenServiceImpl(@Lazy AppUserService appUserService) {
+    public UserTokenServiceImpl(@Lazy AppUserService appUserService,
+                                TokenCacheService tokenCacheService,
+                                AuthTokenProperties authTokenProperties) {
         this.appUserService = appUserService;
+        this.tokenCacheService = tokenCacheService;
+        this.authTokenProperties = authTokenProperties;
     }
 
     @Override
     public String createToken(Long userId) {
         String token = UUID.randomUUID().toString().replace("-", "");
-        UserToken userToken = new UserToken();
-        userToken.setUserId(userId);
-        userToken.setToken(token);
-        userToken.setExpireTime(LocalDateTime.now().plusDays(30));
-        this.save(userToken);
+        long ttlSeconds = Math.max(authTokenProperties.getTtlSeconds(), 1);
+        Instant expireAt = Instant.now().plusSeconds(ttlSeconds);
+        if (!tokenCacheService.put(token, userId, expireAt, ttlSeconds)) {
+            throw new IllegalStateException("登录服务暂不可用，请稍后重试");
+        }
         return token;
     }
 
@@ -38,19 +41,20 @@ public class UserTokenServiceImpl extends ServiceImpl<UserTokenMapper, UserToken
         if (token == null || token.isBlank()) {
             return null;
         }
-        UserToken userToken = this.getOne(
-                Wrappers.<UserToken>lambdaQuery()
-                        .eq(UserToken::getToken, token)
-                        .gt(UserToken::getExpireTime, LocalDateTime.now()),
-                false
+        TokenCacheService.CachedToken cached = tokenCacheService.getAndRefreshIfNeeded(
+                token,
+                authTokenProperties.getTtlSeconds(),
+                authTokenProperties.getRefreshThresholdSeconds()
         );
-        if (userToken == null) {
+        if (cached == null) {
             return null;
         }
-        AppUser user = appUserService.getById(userToken.getUserId());
-        if (user != null) {
-            user.setPassword(null);
+        AppUser user = appUserService.getById(cached.userId());
+        if (user == null) {
+            tokenCacheService.delete(token);
+            return null;
         }
+        user.setPassword(null);
         return user;
     }
 
@@ -59,13 +63,6 @@ public class UserTokenServiceImpl extends ServiceImpl<UserTokenMapper, UserToken
         if (token == null || token.isBlank()) {
             return;
         }
-        this.remove(Wrappers.<UserToken>lambdaQuery().eq(UserToken::getToken, token));
-    }
-
-    @Override
-    public int deleteExpiredTokens() {
-        return this.getBaseMapper().delete(
-                Wrappers.<UserToken>lambdaQuery().le(UserToken::getExpireTime, LocalDateTime.now())
-        );
+        tokenCacheService.delete(token);
     }
 }

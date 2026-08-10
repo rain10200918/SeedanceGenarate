@@ -9,6 +9,7 @@ import org.example.seedancegenarate.entity.ApiKey;
 import org.example.seedancegenarate.exception.ApiErrorResponse;
 import org.example.seedancegenarate.exception.ApiException;
 import org.example.seedancegenarate.exception.ApiExceptionHandler;
+import org.example.seedancegenarate.service.RateLimitResult;
 import org.example.seedancegenarate.service.TokenBucketRateLimitService;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
@@ -35,15 +36,15 @@ public class ApiKeyRateLimitInterceptor implements HandlerInterceptor {
         if (!(attribute instanceof ApiKey apiKey)) {
             return true; // 鉴权失败由 ApiKeyInterceptor 处理
         }
-        boolean allowed = tokenBucketRateLimitService.tryAcquire(
+        RateLimitResult result = tokenBucketRateLimitService.tryAcquire(
                 "api-key:" + apiKey.getId(), rateLimitConfig.getApiKey());
-        if (allowed) {
+        if (result.allowed()) {
             return true;
         }
         response.setStatus(429);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
-        response.setHeader("Retry-After", "30");
+        response.setHeader("Retry-After", String.valueOf(result.retryAfterSeconds()));
         response.getWriter().write(objectMapper.writeValueAsString(
                 new ApiErrorResponse(new ApiErrorResponse.ApiError(
                         ApiException.rateLimited().getCode(), "请求过于频繁，请稍后再试",

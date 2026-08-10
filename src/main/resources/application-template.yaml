@@ -4,6 +4,13 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:127.0.0.1}
+      port: ${SPRING_REDIS_PORT:6379}
+      password: ${SPRING_REDIS_PASSWORD:}
+      database: ${SPRING_REDIS_DATABASE:0}
+      timeout: ${SPRING_REDIS_TIMEOUT:3s}
   servlet:
     multipart:
       max-file-size: 50MB
@@ -25,6 +32,12 @@ spring:
     baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
 server:
   port: ${SERVER_PORT:8080}
+auth:
+  token:
+    ttl-seconds: ${AUTH_TOKEN_TTL_SECONDS:2592000}
+    # 剩余有效期低于 5 分钟时，认证拦截链续回完整 TTL。
+    refresh-threshold-seconds: ${AUTH_TOKEN_REFRESH_THRESHOLD_SECONDS:300}
+    key-prefix: ${AUTH_TOKEN_REDIS_KEY_PREFIX:local:seedance:auth:token}
 seedance:
   api-key: ${SEEDANCE_API_KEY}
   model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
@@ -82,7 +95,13 @@ billing:
   comfyui:
     currency: ${BILLING_COMFYUI_CURRENCY:CNY}
     flat-price: ${BILLING_COMFYUI_FLAT_PRICE:0.01}
+feature:
+  # 关闭时回退本地令牌桶，只适用于单实例开发；多 API 实例必须开启。
+  redis-rate-limit: ${FEATURE_REDIS_RATE_LIMIT:false}
+
 rate-limit:
+  # Redis key 使用 {环境}:seedance:rate:{场景}:{身份}；不同环境共用 Redis 时请使用不同前缀。
+  redis-key-prefix: ${RATE_LIMIT_REDIS_KEY_PREFIX:local:seedance:rate}
   generate-user:
     enabled: ${RATE_LIMIT_GENERATE_USER_ENABLED:true}
     capacity: ${RATE_LIMIT_GENERATE_USER_CAPACITY:3}

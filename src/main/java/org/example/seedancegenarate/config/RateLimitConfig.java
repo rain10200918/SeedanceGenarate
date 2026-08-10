@@ -16,6 +16,8 @@ public class RateLimitConfig {
     private Bucket promptOptimizeIp = new Bucket(true, 30, 10, 60L);
     /** 对外 API：按钥匙限流（每次提交消耗 1 令牌） */
     private Bucket apiKey = new Bucket(true, 10, 5, 60L);
+    /** Redis Key 前缀；生产、预发和本地共用 Redis 时必须配置为不同值。 */
+    private String redisKeyPrefix = "local:seedance:rate";
 
     @Data
     public static class Bucket {
