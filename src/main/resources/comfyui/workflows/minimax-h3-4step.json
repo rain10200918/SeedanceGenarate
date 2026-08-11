@@ -195,7 +195,7 @@
   },
   "193": {
     "inputs": {
-      "unet_name": "minimax_h3_fl2va_bf16.safetensors",
+      "unet_name": "minimax_h3_fi2va_int8_convrot.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",
