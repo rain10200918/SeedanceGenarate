@@ -36,6 +36,9 @@ public class TaskStatusEventPublisher {
                         event.message().taskId(), properties.getChannel());
                 return false;
             }
+            log.info("已发布任务状态事件: taskId={}, status={}, userId={}, channel={}, receivers={}",
+                    event.message().taskId(), event.message().status(), event.userId(),
+                    properties.getChannel(), receivers);
             return true;
         } catch (Exception e) {
             log.warn("发布任务状态 Redis 事件失败: taskId={}, reason={}",

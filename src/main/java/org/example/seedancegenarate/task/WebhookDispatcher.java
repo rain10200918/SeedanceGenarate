@@ -9,8 +9,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.ApiCallLog;
 import org.example.seedancegenarate.entity.ApiKey;
 import org.example.seedancegenarate.entity.WebhookDelivery;
+import org.example.seedancegenarate.config.DistributedLockProperties;
 import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.example.seedancegenarate.mapper.ApiCallLogMapper;
+import org.example.seedancegenarate.service.DistributedLock;
 import org.example.seedancegenarate.mapper.ApiKeyMapper;
 import org.example.seedancegenarate.mapper.WebhookDeliveryMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -50,6 +52,11 @@ public class WebhookDispatcher {
     private final ApiKeyMapper apiKeyMapper;
     private final WebhookDeliveryMapper webhookDeliveryMapper;
     private final ObjectMapper objectMapper;
+    private final DistributedLock distributedLock;
+    private final DistributedLockProperties lockProperties;
+
+    /** 锁 TTL：单轮最多 50 次投递 × 10s 超时可能接近 10 分钟，给足余量。 */
+    private static final java.time.Duration LOCK_TTL = java.time.Duration.ofSeconds(900);
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void onStatusChanged(TaskStatusChangedEvent event) {
@@ -89,6 +96,25 @@ public class WebhookDispatcher {
     /** 定时重试：投递失败且未到上限的行，到期自动重发（同一 payload，客户端按签名去重） */
     @Scheduled(fixedDelay = 30_000L, initialDelay = 30_000L)
     public void retryPending() {
+        if (!lockProperties.isEnabled()) {
+            // 单实例开发：未启用锁，直接执行（兼容旧行为）
+            retryPendingLocked();
+            return;
+        }
+        // 多实例部署时同一时刻只有一个实例扫描，防止同一行被并发投递；
+        // Redis 不可用时跳过本轮（fail-closed），恢复后自动继续。
+        AutoCloseable lock = distributedLock.tryLock("webhook-retry", LOCK_TTL);
+        if (lock == null) {
+            return;
+        }
+        try (lock) {
+            retryPendingLocked();
+        } catch (Exception e) {
+            log.warn("webhook 重试扫描失败: {}", e.getMessage());
+        }
+    }
+
+    private void retryPendingLocked() {
         try {
             List<WebhookDelivery> pending = webhookDeliveryMapper.selectList(
                     Wrappers.<WebhookDelivery>lambdaQuery()

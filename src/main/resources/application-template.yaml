@@ -65,10 +65,17 @@ video:
   cleanup:
     # OSS 产物由 Bucket Lifecycle 清理；仅打开此项才清理迁移前的本地 data/videos 文件。
     local-enabled: ${VIDEO_CLEANUP_LOCAL_ENABLED:false}
+  completion:
+    # 事件驱动（CALLBACK）引擎的回调公网基址；未配置时回退轮询（对账兜底）。
+    callback-base-url: ${VIDEO_CALLBACK_BASE_URL:}
+    # 回调鉴权 token（防伪造回调）；必须为随机长串。
+    callback-secret: ${VIDEO_CALLBACK_SECRET:}
   comfyui:
     scheduling: ${VIDEO_COMFYUI_SCHEDULING:least-queue}
     connect-timeout-ms: ${VIDEO_COMFYUI_CONNECT_TIMEOUT_MS:3000}
     read-timeout-ms: ${VIDEO_COMFYUI_READ_TIMEOUT_MS:60000}
+    # 访问令牌：所有请求统一带 X-Comfy-Token（与 nginx 入口校验一致）。
+    access-token: ${COMFYUI_ACCESS_TOKEN:}
     nodes:
       - id: gpu-0
         base-url: ${COMFYUI_NODE0_URL}
@@ -103,6 +110,27 @@ feature:
 
 task-events:
   channel: ${TASK_STATUS_REDIS_CHANNEL:local:seedance:event:task-status}
+
+distributed:
+  lock:
+    # 多实例部署时开启，保证 VideoTaskPoller / WebhookDispatcher 同一时刻只在一个实例执行。
+    enabled: ${DISTRIBUTED_LOCK_ENABLED:false}
+    key-prefix: ${DISTRIBUTED_LOCK_KEY_PREFIX:local:seedance:lock}
+    default-ttl-seconds: ${DISTRIBUTED_LOCK_TTL_SECONDS:120}
+
+pipeline:
+  # 持久化作业驱动（默认）；关闭回退旧版本地线程池（仅单实例灰度回滚用）。
+  job-driven: ${PIPELINE_JOB_DRIVEN:true}
+
+async-job:
+  # 作业可用时经 Redis 通知即时唤醒消费；此间隔仅作通知丢失的兜底扫描。
+  reconcile-interval-ms: ${ASYNC_JOB_RECONCILE_INTERVAL_MS:30000}
+  initial-delay-ms: ${ASYNC_JOB_INITIAL_DELAY_MS:10000}
+  claim-batch-size: ${ASYNC_JOB_CLAIM_BATCH_SIZE:20}
+  lease-seconds: ${ASYNC_JOB_LEASE_SECONDS:60}
+  max-attempts: ${ASYNC_JOB_MAX_ATTEMPTS:5}
+  backoff-base-seconds: ${ASYNC_JOB_BACKOFF_BASE_SECONDS:30}
+  channel: ${ASYNC_JOB_REDIS_CHANNEL:local:seedance:event:job-available}
 
 rate-limit:
   # Redis key 使用 {环境}:seedance:rate:{场景}:{身份}；不同环境共用 Redis 时请使用不同前缀。

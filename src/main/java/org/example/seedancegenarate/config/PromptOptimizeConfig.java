@@ -29,9 +29,9 @@ public class PromptOptimizeConfig {
      */
     private Double temperature = 0.7;
     /**
-     * 最大生成 token 数
+     * 最大生成 token 数。H3 模板要求完整英文六段结构（detailed_description 300-500 词），默认 1500 才够容纳；旧默认 512 会截断。
      */
-    private Integer maxTokens = 512;
+    private Integer maxTokens = 1500;
     /**
      * 请求超时时间（毫秒）
      */

@@ -2,7 +2,10 @@ package org.example.seedancegenarate.service.Impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.context.UserContext;
+import org.example.seedancegenarate.engine.CompletionMechanism;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
@@ -18,6 +21,7 @@ import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.util.Collections;
 import java.util.List;
@@ -27,6 +31,7 @@ import java.util.UUID;
  * 提交编排实现。从 {@code VideoController} 提取（UI/API 共用）：
  * 解析实际生效模型 → 开放闸门 → 落库 → 引擎提交 → 回写 → 提交即计费。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class VideoSubmitServiceImpl implements VideoSubmitService {
@@ -37,6 +42,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final ModelAccessService modelAccessService;
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final VideoCompletionProperties completionProperties;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -98,7 +104,11 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                 .ratio(ratio)
                 .model(effectiveModel)
                 .megapixels(request.megapixels())
+                .webhookUrl(resolveWebhookUrl(engine, provider))
                 .build();
+        log.info("提交生成任务: provider={}, model={}, taskId={}, webhookUrl={}",
+                provider, effectiveModel, task.businessTaskId(),
+                command.getWebhookUrl() == null ? "无（轮询推进）" : command.getWebhookUrl());
         SubmitResult submit;
         try {
             submit = engine.submit(command);
@@ -123,6 +133,21 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
     private String resolveProvider(String provider) {
         return (provider == null || provider.isBlank()) ? defaultProvider : provider.trim();
+    }
+
+    /** 事件驱动引擎注入回调地址（带鉴权 token）；未配置基址或轮询引擎返回 null */
+    private String resolveWebhookUrl(VideoEngine engine, String provider) {
+        if (engine.completionMechanism() != CompletionMechanism.CALLBACK) {
+            return null;
+        }
+        String base = completionProperties.getCallbackBaseUrl();
+        String secret = completionProperties.getCallbackSecret();
+        if (!StringUtils.hasText(base) || !StringUtils.hasText(secret)) {
+            return null; // 未配置回调：引擎回退轮询兜底（对账任务）
+        }
+        return base.replaceAll("/+$", "")
+                + "/api/callback/" + provider
+                + "?token=" + java.net.URLEncoder.encode(secret, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**

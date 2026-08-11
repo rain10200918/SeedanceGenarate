@@ -25,6 +25,8 @@ public class TaskStatusEventSubscriber implements MessageListener {
                 log.warn("忽略未知任务状态 Redis 事件: schemaVersion={}", event.schemaVersion());
                 return;
             }
+            log.info("收到任务状态事件: taskId={}, status={}, userId={}, eventId={}",
+                    event.message().taskId(), event.message().status(), event.userId(), event.eventId());
             taskStreamManager.pushLocal(event.userId(), event.message());
         } catch (Exception e) {
             log.warn("解析任务状态 Redis 事件失败: reason={}", e.getMessage());

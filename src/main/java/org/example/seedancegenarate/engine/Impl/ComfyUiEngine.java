@@ -2,12 +2,15 @@ package org.example.seedancegenarate.engine.Impl;
 
 import cn.hutool.crypto.digest.DigestUtil;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.engine.BillingTiming;
+import org.example.seedancegenarate.engine.CompletionMechanism;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.RemoteStatus;
 import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
+import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiClient;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiNodeScheduler;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
@@ -16,6 +19,7 @@ import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,9 +30,10 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * ComfyUI 引擎（多实例，提交-轮询模型）。
- * 提交：选节点 → 上传参考图到该节点 → 按 model 选 {@link WorkflowBuilder} 构建工作流 → POST /prompt。
- * 轮询：回到任务记录的同一节点查 /history，翻译成归一化的 {@link RemoteStatus}。
+ * ComfyUI 引擎（多实例，事件驱动 + 轮询兜底）。
+ * 提交：选节点 → 上传参考素材到该节点 → 按 model 选 {@link WorkflowBuilder} 构建工作流 → POST /prompt
+ * （配置了回调基址时附带 webhook_url，完成/失败主动回调，零轮询）。
+ * 兜底：{@link #poll(VideoTask)} 回到任务记录的同一节点查 /history，供对账任务低频兜底（回调丢失时）。
  */
 @Slf4j
 @Component
@@ -40,14 +45,19 @@ public class ComfyUiEngine implements VideoEngine {
     private final ComfyUiClient client;
     private final ComfyUiNodeScheduler scheduler;
     private final Map<String, WorkflowBuilder> builders;
+    private final ObjectMapper objectMapper;
+    private final VideoCompletionProperties completionProperties;
 
     public ComfyUiEngine(ComfyUiProperties properties, ComfyUiClient client,
-                         ComfyUiNodeScheduler scheduler, List<WorkflowBuilder> builderList) {
+                         ComfyUiNodeScheduler scheduler, List<WorkflowBuilder> builderList,
+                         ObjectMapper objectMapper, VideoCompletionProperties completionProperties) {
         this.properties = properties;
         this.client = client;
         this.scheduler = scheduler;
         this.builders = builderList.stream()
                 .collect(Collectors.toMap(WorkflowBuilder::model, Function.identity()));
+        this.objectMapper = objectMapper;
+        this.completionProperties = completionProperties;
     }
 
     @Override
@@ -59,6 +69,38 @@ public class ComfyUiEngine implements VideoEngine {
     @Override
     public BillingTiming billingTiming() {
         return BillingTiming.ON_SUCCESS;
+    }
+
+    /** ComfyUI 支持 webhook 回调：事件驱动（epoll 式），轮询仅作对账兜底 */
+    @Override
+    public CompletionMechanism completionMechanism() {
+        return CompletionMechanism.CALLBACK;
+    }
+
+    /** 未配置回调（开发环境）时回退轮询推进，避免任务无回调也无轮询而卡死 */
+    @Override
+    public boolean needsPolling() {
+        return !StringUtils.hasText(completionProperties.getCallbackBaseUrl())
+                || !StringUtils.hasText(completionProperties.getCallbackSecret());
+    }
+
+    /** 从 ComfyUI 回调提取 prompt_id（execution_success / execution_error 同构） */
+    @Override
+    public String parseCallbackTaskId(String payload) {
+        try {
+            JsonNode node = objectMapper.readTree(payload);
+            String promptId = node.path("data").path("prompt_id").asText("");
+            return promptId.isEmpty() ? null : promptId;
+        } catch (Exception e) {
+            log.warn("解析 ComfyUI 回调失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 回调到达时任务通常已完成：复用 poll 查 /history 拿产物并归一化 */
+    @Override
+    public RemoteStatus handleCallback(VideoTask task, String payload) throws Exception {
+        return poll(task);
     }
 
     @Override
@@ -92,10 +134,11 @@ public class ComfyUiEngine implements VideoEngine {
                 uploadRefs(node, videoUrls, ".mp4"),
                 uploadRefs(node, audioUrls, ".wav"));
 
-        // 3. 构建工作流并提交
+        // 3. 构建工作流并提交（附 webhook_url 时事件驱动，完成/失败主动回调）
         JsonNode workflow = builder.build(command, files);
         String clientId = UUID.randomUUID().toString();
-        String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId, properties.getReadTimeoutMs());
+        String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId,
+                command.getWebhookUrl(), properties.getReadTimeoutMs());
 
         return SubmitResult.of(promptId, node.getId());
     }

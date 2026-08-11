@@ -63,4 +63,32 @@ public interface VideoEngine {
         }
         return models().stream().map(ModelSpec::model).findFirst().orElse(null);
     }
+
+    /**
+     * 任务完成通知机制。默认 {@link CompletionMechanism#POLL}（轮询）——
+     * 支持回调 / 推送的提供方覆写为 {@link CompletionMechanism#CALLBACK} 并实现
+     * {@link #parseCallbackTaskId(String)} / {@link #handleCallback(VideoTask, String)}。
+     */
+    default CompletionMechanism completionMechanism() {
+        return CompletionMechanism.POLL;
+    }
+
+    /**
+     * 该引擎的任务是否需要框架轮询推进。默认按机制：POLL=需要，CALLBACK=不需要。
+     * 声明 CALLBACK 但实际未配置回调的引擎（如开发环境）应覆写返回 true，
+     * 保证没有回调时也能由轮询/对账推进。
+     */
+    default boolean needsPolling() {
+        return completionMechanism() == CompletionMechanism.POLL;
+    }
+
+    /** CALLBACK 引擎：从回调 body 提取提供方任务 ID（用于反查任务）。 */
+    default String parseCallbackTaskId(String payload) {
+        throw new UnsupportedOperationException("该提供方不支持回调");
+    }
+
+    /** CALLBACK 引擎：处理回调，返回归一化状态（通常复用 poll 查询提供方最新状态）。 */
+    default RemoteStatus handleCallback(VideoTask task, String payload) throws Exception {
+        throw new UnsupportedOperationException("该提供方不支持回调");
+    }
 }

@@ -19,6 +19,8 @@ public class ComfyUiProperties {
     private String scheduling = "least-queue";
     private int connectTimeoutMs = 3000;
     private int readTimeoutMs = 60000;
+    /** 访问令牌：所有对 ComfyUI 的请求统一带 X-Comfy-Token（nginx 入口校验）。 */
+    private String accessToken;
     private List<Node> nodes = new ArrayList<>();
 
     /** 仅返回启用的节点 */

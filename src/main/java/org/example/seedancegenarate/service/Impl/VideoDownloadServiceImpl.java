@@ -2,11 +2,13 @@ package org.example.seedancegenarate.service.Impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.example.seedancegenarate.config.OssConfig;
+import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.VideoDownloadService;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -18,16 +20,20 @@ import java.util.Locale;
 /**
  * 提供方产物转存：远端响应流直接写 OSS，不再落到 API/Worker 实例的本地磁盘。
  * object key 按业务任务 ID 确定，Worker 重试可安全覆盖同一个对象。
+ * 下载 ComfyUI /view 产物时携带 X-Comfy-Token（nginx 入口校验）。
  */
 @Service
 public class VideoDownloadServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask> implements VideoDownloadService {
 
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
+    private final ComfyUiProperties comfyUiProperties;
 
-    public VideoDownloadServiceImpl(ArtifactStorage artifactStorage, OssConfig ossConfig) {
+    public VideoDownloadServiceImpl(ArtifactStorage artifactStorage, OssConfig ossConfig,
+                                    ComfyUiProperties comfyUiProperties) {
         this.artifactStorage = artifactStorage;
         this.ossConfig = ossConfig;
+        this.comfyUiProperties = comfyUiProperties;
     }
 
     @Override
@@ -36,6 +42,10 @@ public class VideoDownloadServiceImpl extends ServiceImpl<VideoTaskMapper, Video
         connection.setConnectTimeout(10_000);
         connection.setReadTimeout(120_000);
         connection.setRequestMethod("GET");
+        String token = comfyUiProperties.getAccessToken();
+        if (StringUtils.hasText(token)) {
+            connection.setRequestProperty("X-Comfy-Token", token);
+        }
         connection.connect();
         int status = connection.getResponseCode();
         if (status < 200 || status >= 300) {

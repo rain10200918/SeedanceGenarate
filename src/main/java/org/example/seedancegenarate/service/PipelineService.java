@@ -39,6 +39,15 @@ public interface PipelineService {
     /** 终态事件回填：按 taskId 更新节点状态/结果并汇总流水线状态（由 PipelineEventListener 调用） */
     void applyTaskFinished(String taskId, String status, String videoUrl, String errorMsg);
 
+    /** 提交分镜节点（作业消费方调用；调用方必须先原子占位防并发双提交） */
+    void submitNodeForJob(Long nodeId) throws Exception;
+
+    /**
+     * 对账一条 RUNNING 流水线：节点全终态则汇总状态；存在 PENDING 节点但没有活跃
+     * 提交作业时补插作业（替代旧的「启动时全量置 PARTIAL_FAILED」恢复方式）。
+     */
+    void reconcileRunning(Long pipelineId);
+
     /** 节点编排草稿（全量保存入参；assetIds 引用 user_asset.id；model 空=跟随流水线模型） */
     record NodeDraft(String kind, String name, List<Long> assetIds, String prompt, Integer duration, String ratio,
                      String model) {

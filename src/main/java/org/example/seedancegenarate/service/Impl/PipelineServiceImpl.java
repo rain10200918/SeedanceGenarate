@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.entity.Pipeline;
 import org.example.seedancegenarate.entity.PipelineNode;
 import org.example.seedancegenarate.entity.UserAsset;
@@ -12,9 +13,11 @@ import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.PipelineMapper;
 import org.example.seedancegenarate.mapper.PipelineNodeMapper;
 import org.example.seedancegenarate.mapper.UserAssetMapper;
+import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.PipelineService;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -43,9 +46,14 @@ public class PipelineServiceImpl implements PipelineService {
     private final UserAssetMapper userAssetMapper;
     private final VideoSubmitService videoSubmitService;
     private final ObjectMapper objectMapper;
-    /** 流水线后台提交线程池（单线程串行：引擎一次只吃一个任务） */
+    private final AsyncJobService asyncJobService;
+    /** 流水线后台提交线程池（单线程串行：引擎一次只吃一个任务）；job-driven 关闭时使用 */
     @Qualifier("pipelineSubmitExecutor")
     private final Executor pipelineSubmitExecutor;
+
+    /** 是否走持久化作业驱动（true=默认）；false=旧版本地线程池（仅单实例灰度回滚用） */
+    @Value("${pipeline.job-driven:true}")
+    private boolean jobDriven;
 
     @Override
     public List<Pipeline> listPipelines(Long userId) {
@@ -164,24 +172,71 @@ public class PipelineServiceImpl implements PipelineService {
     }
 
     @Override
+    @Transactional
     public Pipeline run(Long userId, Long pipelineId) throws Exception {
         Pipeline pipeline = requireOwned(userId, pipelineId);
-        if (!"DRAFT".equals(pipeline.getStatus()) && !"PARTIAL_FAILED".equals(pipeline.getStatus())) {
-            throw new RuntimeException("当前状态不可运行（运行中或已完成）");
-        }
         List<PipelineNode> scenes = scenesOf(pipelineId);
         if (scenes.isEmpty()) {
             throw new RuntimeException("请先添加分镜节点");
         }
+        if (jobDriven) {
+            // 原子状态门：DRAFT/PARTIAL_FAILED → RUNNING，并发重复 run 只有一次成功
+            if (pipelineMapper.markRunning(pipelineId) != 1) {
+                throw new RuntimeException("当前状态不可运行（运行中或已完成）");
+            }
+            // 每个分镜节点入队持久化作业；biz_key 幂等，重复 run 会重置为 READY
+            for (PipelineNode node : scenes) {
+                asyncJobService.enqueue("PIPELINE_NODE_SUBMIT",
+                        jobKey(pipelineId, node.getId()),
+                        "{\"pipelineNodeId\":" + node.getId() + "}");
+            }
+            return pipeline;
+        }
+        // 旧版兼容：本地单线程提交循环（仅单实例灰度回滚用）
+        if (!"DRAFT".equals(pipeline.getStatus()) && !"PARTIAL_FAILED".equals(pipeline.getStatus())) {
+            throw new RuntimeException("当前状态不可运行（运行中或已完成）");
+        }
         pipeline.setStatus("RUNNING");
         pipelineMapper.updateById(pipeline);
-        // 异步提交：引擎提交是慢 IO（传图 + 提交工作流，超时可达 60s/次），
-        // 同步串行会让「一键提交」阻塞 HTTP 数分钟。校验与状态门完成后立即返回，
-        // 提交循环丢后台线程（单线程串行，引擎一次只吃一个任务），前端靠 SSE 看节点逐个变绿。
         Long uid = userId;
         Long pid = pipelineId;
         pipelineSubmitExecutor.execute(() -> submitLoop(uid, pid));
         return pipeline;
+    }
+
+    /** 节点提交作业的业务幂等键。 */
+    public static String jobKey(Long pipelineId, Long nodeId) {
+        return "pipeline:" + pipelineId + ":node:" + nodeId;
+    }
+
+    @Override
+    public void reconcileRunning(Long pipelineId) {
+        Pipeline pipeline = pipelineMapper.selectById(pipelineId);
+        if (pipeline == null || !"RUNNING".equals(pipeline.getStatus())) {
+            return;
+        }
+        List<PipelineNode> scenes = scenesOf(pipelineId);
+        if (scenes.isEmpty()) {
+            return;
+        }
+        boolean allTerminal = scenes.stream()
+                .allMatch(n -> "SUCCESS".equals(n.getStatus()) || "FAILED".equals(n.getStatus()));
+        if (allTerminal) {
+            // 所有节点已到终态（例如终态事件处理中实例重启），汇总流水线状态
+            refreshPipelineStatus(pipeline);
+            return;
+        }
+        for (PipelineNode node : scenes) {
+            if (!"PENDING".equals(node.getStatus())) {
+                continue; // PROCESSING 等事件回填；终态节点无需作业
+            }
+            AsyncJob job = asyncJobService.find("PIPELINE_NODE_SUBMIT", jobKey(pipelineId, node.getId()));
+            if (job == null) {
+                // 实例重启丢失了内存提交循环后，这里补插作业让 Worker 接管
+                asyncJobService.enqueue("PIPELINE_NODE_SUBMIT", jobKey(pipelineId, node.getId()),
+                        "{\"pipelineNodeId\":" + node.getId() + "}");
+            }
+        }
     }
 
     /** 后台提交循环：逐节点独立提交，单个失败不中断；兜底防状态卡 RUNNING */
@@ -193,7 +248,7 @@ public class PipelineServiceImpl implements PipelineService {
             }
             for (PipelineNode node : scenesOf(pipelineId)) {
                 try {
-                    submitNode(userId, pipeline, node);
+                    submitNodeForJob(node.getId());
                 } catch (Exception e) {
                     log.warn("流水线节点提交失败 pipelineId={} nodeId={}: {}", pipelineId, node.getId(), e.getMessage());
                     node.setStatus("FAILED");
@@ -220,12 +275,12 @@ public class PipelineServiceImpl implements PipelineService {
         if (node == null || !Objects.equals(node.getPipelineId(), pipelineId)) {
             throw new RuntimeException("节点不存在");
         }
-        // 单节点执行：待执行 / 失败 / 已完成 均可单独重跑（生成中禁止，防重复提交）
-        if ("PROCESSING".equals(node.getStatus())) {
+        // 单节点执行：原子占位（PENDING/FAILED → PROCESSING），并发重复点击只有一次成功
+        if (pipelineNodeMapper.occupyForSubmit(nodeId) != 1) {
             throw new RuntimeException("该分镜正在生成中，请稍候");
         }
         try {
-            submitNode(userId, pipeline, node);
+            submitNodeForJob(nodeId);
         } catch (Exception e) {
             node.setStatus("FAILED");
             node.setErrorMsg(truncate(e.getMessage()));
@@ -259,8 +314,17 @@ public class PipelineServiceImpl implements PipelineService {
         }
     }
 
-    /** 单节点提交：校验 + 素材 ID → URL + 复用 submit 链路；成功后节点回 PROCESSING */
-    private void submitNode(Long userId, Pipeline pipeline, PipelineNode node) throws Exception {
+    /** 提交分镜节点：校验 + 素材 ID → URL + 复用 submit 链路；成功后回写 taskId */
+    @Override
+    public void submitNodeForJob(Long nodeId) throws Exception {
+        PipelineNode node = pipelineNodeMapper.selectById(nodeId);
+        if (node == null) {
+            throw new RuntimeException("节点不存在");
+        }
+        Pipeline pipeline = pipelineMapper.selectById(node.getPipelineId());
+        if (pipeline == null) {
+            throw new RuntimeException("流水线不存在");
+        }
         if (!StringUtils.hasText(node.getPrompt())) {
             throw new RuntimeException("提示词不能为空");
         }
@@ -268,17 +332,19 @@ public class PipelineServiceImpl implements PipelineService {
         if (assetIds.isEmpty()) {
             throw new RuntimeException("未选择参考图");
         }
-        List<String> urls = resolveAssetUrls(userId, assetIds);
+        List<String> urls = resolveAssetUrls(pipeline.getUserId(), assetIds);
         // 分镜独立模型优先，空则跟随流水线模型（统一默认由 submit 链路解析）
         String effectiveModel = StringUtils.hasText(node.getModel()) ? node.getModel() : pipeline.getModel();
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
-                userId, pipeline.getProvider(), effectiveModel,
+                pipeline.getUserId(), pipeline.getProvider(), effectiveModel,
                 node.getPrompt(), urls, List.of(), List.of(),
                 node.getDuration(), node.getRatio(), null, null));
-        node.setTaskId(task.businessTaskId());
-        node.setStatus("PROCESSING");
-        node.setErrorMsg(null);
-        pipelineNodeMapper.updateById(node);
+        PipelineNode update = new PipelineNode();
+        update.setId(nodeId);
+        update.setTaskId(task.businessTaskId());
+        update.setStatus("PROCESSING");
+        update.setErrorMsg(null);
+        pipelineNodeMapper.updateById(update);
     }
 
     /** 素材 ID 引用 → URL（实体引用：素材换存储位置流水线不受影响） */

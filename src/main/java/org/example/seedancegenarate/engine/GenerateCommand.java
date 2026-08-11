@@ -29,4 +29,6 @@ public class GenerateCommand {
     private String model;
     /** 输出分辨率档位（百万像素，如 MiniMax-H3 加速版的 ResolutionSelector）；为空则用模型默认 */
     private Double megapixels;
+    /** 事件驱动引擎的回调地址（框架注入，带鉴权 token）；轮询引擎忽略 */
+    private String webhookUrl;
 }

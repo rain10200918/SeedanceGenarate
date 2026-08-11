@@ -48,6 +48,8 @@ public class VideoTask {
     @JsonIgnore
     private String artifactEtag;
     private String errorMsg;
+    /** 轮询退避：下次可查询时间；NULL=立即可查（CALLBACK 机制引擎不更新） */
+    private LocalDateTime nextPollAt;
     private BigDecimal costAmount;
     /** 生成提供方 */
     private String provider;

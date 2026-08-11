@@ -25,9 +25,9 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class PromptOptimizeServiceImpl implements PromptOptimizeService {
 
-    /** 通用输出铁律，追加在任何模板末尾，保证输出可直接使用 */
+    /** 通用输出铁律，追加在任何模板末尾，保证输出可直接使用。输出语言由各模板自行规定（如 h3 模板要求英文正文、对白保留原文）。 */
     private static final String OUTPUT_FOOTER =
-            "只输出最终优化后的提示词本身，与用户输入使用同一种语言，不要输出分析过程、标题、说明、引号或任何额外内容。";
+            "只输出最终优化后的提示词本身，不要输出分析过程、标题、说明、引号或任何额外内容；输出语言、结构与格式一律以模板要求为准。";
     /** 模板文件都缺失时的兜底指导 */
     private static final String FALLBACK_GUIDE =
             "你是 AI 生成提示词专家，请把用户的粗略描述改写成一条高质量、结构清晰的提示词。";
