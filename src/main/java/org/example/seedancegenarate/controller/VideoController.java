@@ -18,6 +18,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.OssService;
+import org.example.seedancegenarate.service.ApiDocService;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
 import org.example.seedancegenarate.service.VideoSubmitService;
@@ -51,6 +52,7 @@ public class VideoController {
     private final VideoSubmitService videoSubmitService;
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
+    private final ApiDocService apiDocService;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -223,6 +225,18 @@ public class VideoController {
                 userId, request.getProvider(), request.getModel(), prompt,
                 List.of(), List.of(), List.of(), duration, ratio, null, null));
         return Result.success(task);
+    }
+
+    /**
+     * API 接入文档（原始 Markdown）：登录用户可见，与对外 API 的 /api/v1/videos/docs 同一份资源。
+     *
+     * GET
+     * /api/video/api-docs
+     */
+    @GetMapping("/api-docs")
+    public Result<String> apiDocs() {
+        UserContext.requireUserId();
+        return Result.success(apiDocService.content());
     }
 
     /**
