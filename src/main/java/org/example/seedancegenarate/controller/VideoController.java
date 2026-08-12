@@ -21,6 +21,7 @@ import org.example.seedancegenarate.service.OssService;
 import org.example.seedancegenarate.service.ApiDocService;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
+import org.example.seedancegenarate.service.TaskEtaService;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
@@ -53,6 +54,7 @@ public class VideoController {
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
     private final ApiDocService apiDocService;
+    private final TaskEtaService taskEtaService;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -363,6 +365,23 @@ public class VideoController {
                 VideoTask::getModel, VideoTask::getOutputType, VideoTask::getCostAmount,
                 VideoTask::getPrompt, VideoTask::getCreateTime, VideoTask::getUpdateTime);
         return Result.success(videoTaskService.page(page, wrapper));
+    }
+
+    /**
+     * 任务预计完成时间（ETA）：排队位置 + 剩余估算。
+     * 前端按字段是否有值渲染，不感知提供方能力。
+     *
+     * GET
+     * /api/video/task/{taskId}/eta
+     */
+    @GetMapping("/task/{taskId}/eta")
+    public Result<TaskEtaService.TaskEta> taskEta(@PathVariable String taskId) {
+        UserContext.requireUserId();
+        VideoTask task = findOwnedTask(taskId);
+        if (task == null) {
+            throw new RuntimeException("任务不存在");
+        }
+        return Result.success(taskEtaService.estimate(task));
     }
 
     /**

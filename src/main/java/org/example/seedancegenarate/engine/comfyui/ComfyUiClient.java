@@ -99,14 +99,19 @@ public class ComfyUiClient {
 
     /** 队列负载 = 运行中 + 排队中；用于 least-queue 调度，同时兼作健康检查 */
     public int queueLoad(String baseUrl, int timeoutMs) throws Exception {
+        JsonNode n = getQueue(baseUrl, timeoutMs);
+        return n.path("queue_running").size() + n.path("queue_pending").size();
+    }
+
+    /** 完整队列（running + pending 的 prompt_id 列表），ETA 排队定位用 */
+    public JsonNode getQueue(String baseUrl, int timeoutMs) throws Exception {
         HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/queue"))
                 .timeout(timeoutMs)
                 .execute();
         if (!resp.isOk()) {
             throw new RuntimeException("ComfyUI 查询队列失败: " + resp.getStatus());
         }
-        JsonNode n = objectMapper.readTree(resp.body());
-        return n.path("queue_running").size() + n.path("queue_pending").size();
+        return objectMapper.readTree(resp.body());
     }
 
     /** 构造结果文件的下载地址（/view），指向具体节点；下载方需自行携带 X-Comfy-Token */

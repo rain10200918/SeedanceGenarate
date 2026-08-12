@@ -10,6 +10,7 @@ import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
+import org.example.seedancegenarate.service.TaskEtaService;
 import org.example.seedancegenarate.service.VideoDownloadService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.context.ApplicationEventPublisher;
@@ -29,6 +30,7 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final CostRecordService costRecordService;
     private final ApplicationEventPublisher eventPublisher;
     private final AsyncJobService asyncJobService;
+    private final TaskEtaService taskEtaService;
 
     /** 终态作业幂等键。 */
     public static String finalizeJobKey(Long videoTaskId) {
@@ -122,6 +124,8 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         // 成功计费：仅「成功才计费」的提供方（如 ComfyUI）真正落账，且幂等
         costRecordService.recordOnSuccess(task);
         publishStatusChanged(task);
+        // 刷新该模型平均耗时缓存（ETA 统计）
+        taskEtaService.refreshAvgDuration(task.getModel());
         log.info("任务终态落库成功: taskId={}, mediaName={}, size={}",
                 task.businessTaskId(), mediaName, downloaded.artifact().contentLength());
     }

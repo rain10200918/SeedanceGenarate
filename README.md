@@ -58,6 +58,15 @@
    - API Key 只存 SHA-256 哈希 + 明文仅创建时返回一次；webhook 带 HMAC-SHA256 签名防伪造，`(task_id, status)` 唯一索引保证幂等，退避重试 3 次。
    - 提交幂等（`Idempotency-Key` / `request_id`）、两阶段调用日志（RECEIVED → 终态）、按 key 令牌桶限流（429 带 `Retry-After`）、统一 `{error:{code,message,request_id}}` 错误契约。
 
+6. **面向多实例的分布式能力（Redis + 持久化作业）**
+   - **Redis Lua 分布式限流**：`feature.redis-rate-limit` 开启后全局限流额度一致，多实例不会放大配额。
+   - **登录 Token 存 Redis**：Hash 保存 userId + 有效期，TTL 低于阈值自动续期；MySQL 不再保存登录态。
+   - **跨实例 SSE**：`feature.redis-task-events` 开启后终态经 Redis Pub/Sub 广播，所有 API 实例都能推给自己的 SSE 连接。
+   - **全局定时任务锁**：`distributed.lock.enabled` 开启后 Poller / Webhook / 对账同一时刻只在一个实例执行。
+   - **持久化作业（async_job）**：流水线节点提交、任务终态收尾都变成 MySQL 作业表 + 行级租约，多 Worker 并行领取、崩溃自动接管；作业可用经 Redis 通知即时唤醒消费（无忙等轮询）。
+   - **事件驱动完成通知**：ComfyUI 提交时注入 webhook_url（完成后主动回调），Seedance 按 `next_poll_at` 退避轮询，对账任务低频兜底防丢。
+   - **ETA 预计完成时间**：ComfyUI 直接查真实队列给出排队位置（`GET /api/video/task/{id}/eta`），平均耗时按 model 统计并 Redis 共享缓存，前端详情页展示进度与预计剩余。
+
 ---
 
 ## 技术栈
@@ -66,6 +75,7 @@
 |---|---|
 | 语言 / 框架 | Java 17 · Spring Boot 3.3.5 · Spring Web / AOP |
 | 持久层 | MyBatis-Plus 3.5.7 · MySQL · Flyway（版本化数据库迁移） |
+| 缓存 / 协调 | Redis（Lua 限流 · Token · Pub/Sub · 分布式锁 · ETA 统计缓存） |
 | 引擎通信 | Hutool 5.8.27（ComfyUI HTTP）· Jackson（工作流 JSON 编辑）· Aliyun OSS SDK 3.17.4 |
 | 其他 | Lombok · ip2region（IP 属地，离线 xdb）· spring-security-crypto |
 | 前端（配对仓库） | Vue3 · Pinia · Element Plus · axios · SSE (`EventSource`) |
@@ -83,29 +93,40 @@ flowchart TB
         DEV["外部开发者<br/>持 sk- API Key"]
     end
 
-    subgraph BE["Spring Boot 后端 (Java 17 · :8080)"]
-        IN["拦截器链<br/>Auth / ApiKey / RateLimit（令牌桶）"]
-        CTRL["Controller 层<br/>Auth / Video / ApiVideo / Admin"]
+    subgraph BE["Spring Boot 后端（API / Worker 一体，可多实例）"]
+        IN["拦截器链<br/>Auth(Redis Token) / ApiKey / RateLimit(Redis Lua)"]
+        CTRL["Controller 层<br/>Auth / Video / ApiVideo / Admin / TaskCallback"]
         SUB["VideoSubmitService<br/>UI 与 API 共用提交编排"]
-        REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;"]
-        SE["SeedanceEngine"]
-        CE["ComfyUiEngine"]
+        REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;<br/>+ 能力声明：回调机制 / ETA"]
+        SE["SeedanceEngine<br/>POLL + BASIC"]
+        CE["ComfyUiEngine<br/>CALLBACK + FULL"]
         WB["WorkflowBuilder 策略集<br/>MiniMaxH3 / ZImageTurbo / ..."]
         GATE["ModelAccessService<br/>模型开放闸门"]
-        BILL["PricingService<br/>+ CostRecordService"]
-        POLL["VideoTaskPoller<br/>后台推进器（2s 一轮）"]
-        SSE["TaskStreamManager<br/>SSE 推送"]
+        ETA["TaskEtaService<br/>排队位置 + 平均耗时"]
+        POLL["VideoTaskPoller<br/>退避轮询（仅 POLL 引擎）"]
+        RECON["TaskReconcileTask<br/>低频兜底对账"]
+        CON1["TaskFinalizeConsumer<br/>终态收尾（下载 → OSS）"]
+        CON2["PipelineNodeSubmitConsumer<br/>流水线节点提交"]
+        SSE["TaskStreamManager<br/>本地 SSE 连接"]
         WH["WebhookDispatcher<br/>HMAC 回调 + 重试"]
     end
 
+    subgraph REDIS["Redis"]
+        RL["限流令牌桶（Lua）"]
+        TK["登录 Token（Hash + TTL）"]
+        PS["Pub/Sub：task-status / job-available"]
+        LK["分布式锁"]
+        ETAC["ETA 统计缓存"]
+    end
+
     subgraph STORE["存储"]
-        DB[("MySQL<br/>video_task / cost_record<br/>api_key / model_access")]
+        DB[("MySQL<br/>video_task / async_job / cost_record<br/>api_key / model_access")]
         OSS[("阿里云 OSS<br/>参考图 + 生成产物")]
-        LOCAL[("本地磁盘 data/videos<br/>历史兼容 / 临时")]
     end
 
     subgraph PROV["提供方"]
         SD["Seedance 云端 API<br/>火山方舟"]
+        NG["nginx（X-Comfy-Token 校验）"]
         CF["ComfyUI 多实例<br/>gpu-0/1/3/6 · 共享模型"]
     end
 
@@ -120,12 +141,22 @@ flowchart TB
     REG --> CE
     CE --> WB
     SE --> SD
-    CE --> CF
+    CE --> NG
+    NG --> CF
     CE -->|"下载/上传参考图"| OSS
     POLL --> REG
     POLL --> DB
+    CON1 --> DB
+    CON2 --> DB
+    CON1 --> OSS
+    ETA --> REG
+    CTRL --> ETA
     SUB --> DB
-    CTRL --> LOCAL
+    SUB --> REDIS
+    POLL --> REDIS
+    CON1 --> REDIS
+    RECON --> DB
+    RECON --> REDIS
     SSE -.->|"终态推送"| FE
     WH -.->|"异步回调"| DEV
 ```
@@ -138,8 +169,8 @@ flowchart TD
 
     subgraph L1["第一层 · 提供方（VideoEngine）"]
         REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;"]
-        SE["SeedanceEngine<br/>云端 · ON_SUBMIT"]
-        CE["ComfyUiEngine<br/>自建 · ON_SUCCESS"]
+        SE["SeedanceEngine<br/>云端 · ON_SUBMIT<br/>POLL轮询 · BASIC估算"]
+        CE["ComfyUiEngine<br/>自建 · ON_SUCCESS<br/>CALLBACK回调 · FULL队列"]
         REG --> SE
         REG --> CE
     end
@@ -164,6 +195,59 @@ flowchart TD
 
 > 扩展方式：新增一个提供方 = 加一个 `VideoEngine` 实现；新增一个 ComfyUI 模型 = 加一个 `WorkflowBuilder` + 一份模板 JSON。注册表会自动把它暴露到 `/options`。
 
+> **能力声明（策略驱动框架分流）**：`VideoEngine` 除业务方法外声明三类能力——`completionMechanism()`（CALLBACK 事件驱动 / POLL 轮询）、`etaCapability()`（FULL 可查真实队列 / BASIC 时间估算）、`needsPolling()`（未配置回调时回退轮询）。框架按声明统一分流：poller 只查需要轮询的引擎、ETA 按能力组装、回调端点按提供方路由。新增引擎零改动即可接入。
+
+### 分布式设计（Redis + 持久化作业）
+
+```mermaid
+flowchart LR
+    subgraph API["API 实例（可多台，无状态）"]
+        A1["实例 A"]
+        A2["实例 B"]
+    end
+
+    subgraph REDIS["Redis"]
+        R1["限流 Lua<br/>全局配额一致"]
+        R2["Token Hash<br/>跨实例登录态"]
+        R3["Pub/Sub<br/>task-status / job-available"]
+        R4["分布式锁<br/>全局任务单实例执行"]
+        R5["ETA 统计<br/>avg / queue 缓存"]
+    end
+
+    subgraph WORKER["Worker 逻辑（多实例并行，行级租约）"]
+        W1["TaskFinalizeConsumer<br/>终态收尾并行"]
+        W2["PipelineNodeSubmitConsumer<br/>流水线节点提交"]
+    end
+
+    subgraph DB["MySQL"]
+        D1["video_task<br/>任务状态真相"]
+        D2["async_job<br/>持久化作业 + 租约"]
+    end
+
+    A1 --> R1
+    A2 --> R1
+    A1 --> R2
+    A2 --> R2
+    A1 --> R3
+    A2 --> R3
+    W1 --> R4
+    W1 --> D2
+    W2 --> D2
+    W1 --> D1
+    A1 --> D1
+    A2 --> D1
+
+    style REDIS fill:#fff3e0,stroke:#f5a623
+    style WORKER fill:#eefaf1,stroke:#4fbf6a
+```
+
+**关键原则**：
+
+- **MySQL 是业务状态唯一真相**，Redis 只做限流 / 登录态 / 通知 / 锁 / 可重建缓存；
+- **作业化**：提交、终态收尾、流水线节点都走 `async_job` 行级租约——多 Worker 并行领取、崩溃自动接管、Redis 通知即时唤醒（空闲 30 秒兜底扫描）；
+- **事件驱动完成**：ComfyUI 完成回调（秒级），Seedance 退避轮询（2s/5s/30s），对账任务低频兜底防丢；
+- **能力声明分流**：poller 只查需要轮询的引擎，ETA 按引擎能力组装，新增引擎不改框架。
+
 ### 一次生成的任务生命周期
 
 ```mermaid
@@ -175,8 +259,11 @@ sequenceDiagram
     participant G as ModelAccessService
     participant E as VideoEngine
     participant B as Seedance / ComfyUI
-    participant P as VideoTaskPoller
+    participant P as Poller / 回调 / 对账
+    participant J as async_job 作业
+    participant F as TaskFinalizeConsumer
     participant DB as MySQL
+    participant R as Redis
     participant SSE as TaskStreamManager
     participant COST as CostRecordService
 
@@ -184,22 +271,38 @@ sequenceDiagram
     C->>S: submit(request)
     S->>G: 校验模型是否开放（effectiveModel 闸门）
     S->>DB: 落库 video_task（PROCESSING + provider/model/node）
-    S->>E: submit(command)
+    S->>E: submit(command)（CALLBACK 引擎附带 webhook_url）
     E->>B: 选节点 → 上传参考图 → 构建工作流 → /prompt
     E-->>S: 回写 providerTaskId / nodeId
     S-->>C: 返回 taskId
     C-->>U: 200（UI）/ 202（API）
 
-    loop 每 2s 扫最近 24h 的 PROCESSING 任务
-        P->>DB: 查询待推进任务
-        P->>E: poll(task) → 归一化 RemoteStatus
-        E-->>P: 状态
-        P->>DB: updateStatus（幂等）
-        alt 到达终态
-            P-->>COST: recordOnSuccess（ON_SUCCESS 计费，幂等）
-            P-->>SSE: TaskStatusChangedEvent（AFTER_COMMIT）
-            SSE-->>U: SSE 推送 {taskId, status}
+    par 完成通知（按引擎能力分流）
+        B->>P: ComfyUI 完成 → webhook 回调（秒级）
+    and
+        loop Poller 退避轮询（仅 POLL 引擎，2s/5s/30s）
+            P->>DB: 查到期任务（next_poll_at）
+            P->>B: poll(task)
+            P->>DB: updateStatus + 更新 next_poll_at
         end
+    and
+        P->>DB: 对账兜底（60s 低频，回调/轮询丢失时）
+    end
+
+    alt 到达 SUCCESS
+        P->>J: 入队 TASK_FINALIZE（Redis 通知唤醒）
+        J->>F: Worker 领取（行级租约）
+        F->>B: 下载产物（带 X-Comfy-Token）
+        F->>DB: CAS PROCESSING→SUCCESS + artifact 元数据
+        F-->>COST: recordOnSuccess（幂等）
+        F->>R: 刷新 ETA 平均耗时 + Pub/Sub 终态
+        R->>SSE: 跨实例广播
+        SSE-->>U: SSE 推送 {taskId, status} → 前端展示结果
+    else 到达 FAILED
+        P->>DB: 落 FAILED + errorMsg
+        P->>R: Pub/Sub 终态
+        R->>SSE: 跨实例广播
+        SSE-->>U: SSE 推送 {taskId, status}
     end
 ```
 
@@ -220,12 +323,15 @@ sequenceDiagram
 
 **配套能力**
 
-- 注册 / 登录（token）+ 邀请码体系 + 按 IP 限流；管理员后台（用户角色、模型开关、API Key）。
+- 注册 / 登录（token 存 Redis，TTL 续期）+ 邀请码体系 + 按 IP 限流；管理员后台（用户角色、模型开关、API Key）。
 - 计费：Seedance 按秒单价 × 时长、ComfyUI 一口价；记账幂等，按 `task.id` 去重。
 - **模型开放闸门**：`ModelAccessService` 为唯一权威，提交时按「实际生效模型」硬校验（防手拼请求绕过），管理员可运行时开 / 关模型。
 - **提示词优化**：后端代理 LLM，系统提示词按模型选模板（`resources/prompts/{model}.md`，可零代码新增风格），LLM Key 仅后端持有。
-- **SSE 实时状态**：`GET /api/video/stream` 替代前端轮询；`GET /task/{id}` 纯读库兜底。
+- **SSE 实时状态**：`GET /api/video/stream` 替代前端轮询；`GET /task/{id}` 纯读库兜底；多实例经 Redis Pub/Sub 跨实例推送。
+- **ETA 预计完成时间**：`GET /api/video/task/{id}/eta` 返回排队位置 / 进度 / 预计剩余（ComfyUI 查真实队列，平均耗时按 model 统计 + Redis 共享缓存）；前端详情页展示。
+- **事件驱动完成通知**：ComfyUI webhook 回调（秒级）+ Seedance 退避轮询 + 对账兜底；作业消费经 Redis 通知唤醒（空闲 30 秒兜底扫描，无忙等）。
 - 产物（视频 / 图片）统一流式转存到阿里云 OSS，数据库保存 `artifact_key` 和媒体元数据；播放/下载接口鉴权后签发短期 OSS URL。历史 `data/videos/` 文件保留兼容读取，OSS Lifecycle 负责正式产物过期清理。
+- **API 接入文档页**：`GET /api/video/api-docs`（登录用户可读）与对外 API 文档同一份 Markdown；前端「API 文档」页面渲染。
 
 ---
 
@@ -248,20 +354,24 @@ sequenceDiagram
 src/main/java/org/example/seedancegenarate/
 ├── engine/               # 提供方层（核心抽象）
 │   ├── VideoEngine       #   接口：provider / submit / poll / models / billingTiming
+│   │                     #   + 能力声明：completionMechanism / etaCapability / needsPolling
 │   ├── VideoEngineRegistry
 │   ├── Impl/SeedanceEngine
 │   ├── Impl/ComfyUiEngine
 │   └── comfyui/          # ComfyUI 支撑：Client / NodeScheduler / WorkflowBuilder 策略集
 │       └── Impl/         #   MiniMaxH3 / T2V / Accel / ZImageTurbo / QwenImageEdit
-├── controller/           # Video / Auth / UserAdmin / InviteCode / GlobalExceptionHandler
+├── controller/           # Video / Auth / UserAdmin / InviteCode / TaskCallback / GlobalExceptionHandler
 ├── service/              # VideoSubmitService（UI/API 共享编排）· Pricing · OSS · PromptOptimize …
+│   └── Impl/             #   TaskEtaServiceImpl · RedisDistributedLock · TokenCacheService …
 ├── interceptor/          # Auth + 限流 + ApiKey（对外 API）
 ├── config/               # 各 @ConfigurationProperties + WebConfig
-├── event/  stream/  task/ # 终态事件 · SSE 管理 · 推进器 / webhook
+├── event/                # 终态领域事件
+├── stream/               # SSE 管理 + Redis Pub/Sub（TaskStatus / JobAvailable）
+├── task/                 # 推进器 / 终态消费 / 流水线消费 / 对账 / webhook
 ├── exception/  dto/  entity/  mapper/  context/  util/
 └── resources/
     ├── application.yaml  # 全部配置支持 ${ENV:默认值}
-    ├── db/migration/     # Flyway 版本化数据库迁移（V1 基线、V2 计费幂等、V3 任务 ID 分离）
+    ├── db/migration/     # Flyway 版本化数据库迁移（V1 基线 → V6 轮询退避）
     ├── schema.sql        # 历史参考：不再启动自动执行
     ├── comfyui/workflows/  # 工作流模板 JSON
     └── prompts/            # 提示词优化模板（{model}.md）
@@ -301,10 +411,18 @@ src/main/java/org/example/seedancegenarate/
 
 | 配置项 | 说明 |
 |---|---|
-| `SPRING_DATASOURCE_*` | MySQL 连接 |
+| `SPRING_DATASOURCE_*` | MySQL 连接（Hikari 池大小按实例数预算） |
+| `SPRING_REDIS_*` | Redis（Token / 限流 / Pub/Sub / 锁 / ETA 缓存；池大小按每请求 2 次 Redis 预算） |
 | `SPRING_FLYWAY_*` / `SPRING_SQL_INIT_MODE` | Flyway 迁移开关 / 旧 SQL 初始化开关 |
 | `SEEDANCE_API_KEY` / `SEEDANCE_MODEL*` | Seedance 密钥与模型 |
 | `COMFYUI_NODE{0,1,3,6}_URL` / `_ENABLED` | ComfyUI 实例节点 |
+| `COMFYUI_ACCESS_TOKEN` | ComfyUI 访问令牌（所有请求带 `X-Comfy-Token`，nginx 入口校验） |
+| `VIDEO_CALLBACK_BASE_URL` / `_SECRET` | ComfyUI 完成回调地址与鉴权 token（未配置自动回退轮询） |
+| `AUTH_TOKEN_*` | 登录 Token 有效期（idle / max lifetime / 续期阈值）与 Redis 前缀 |
+| `FEATURE_REDIS_RATE_LIMIT` / `_TASK_EVENTS` | 分布式限流 / 跨实例 SSE 开关（多实例必须开） |
+| `DISTRIBUTED_LOCK_*` | 全局定时任务锁（多实例必须开） |
+| `ASYNC_JOB_*` | 持久化作业（租约 / 退避 / 兜底扫描间隔 / Redis 通知频道） |
+| `TASK_STATUS_REDIS_CHANNEL` / `ASYNC_JOB_REDIS_CHANNEL` | Pub/Sub 频道（不同环境用不同前缀隔离） |
 | `ALIYUN_OSS_*` | 参考图与生成产物对象存储（须后端可读，ComfyUI 会回源下载）；`ALIYUN_OSS_ARTIFACT_PREFIX` / `ALIYUN_OSS_SIGNED_URL_TTL_SECONDS` 控制产物前缀与签名有效期 |
 | `PROMPT_OPTIMIZE_API_KEY` | 提示词优化 LLM 密钥（仅后端） |
 | `BILLING_*` / `RATE_LIMIT_*` / `VIDEO_POLL_*` | 计费 / 限流 / 推进器参数 |
@@ -316,24 +434,27 @@ src/main/java/org/example/seedancegenarate/
 
 ## 测试
 
-- 37 个单元测试方法，`./mvnw clean test` 全绿。
-- 覆盖：5 个 `WorkflowBuilder`（含「null ratio 不 NPE」等回归用例）、`GenerationMode`、`ModelAccessService`、`PromptOptimizeService`、`VideoEngine.effectiveModel`（闸门修复回归）等。
+- 单元测试 + 可选本地 Redis 集成测试（`RUN_REDIS_INTEGRATION_TESTS=true`），`./mvnw clean test` 全绿。
+- 覆盖：5 个 `WorkflowBuilder`、`GenerationMode`、`ModelAccessService`、`PromptOptimizeService`、`VideoEngine.effectiveModel`（闸门修复回归）、Redis 限流 Lua、Token 缓存、分布式锁、作业入队/领取/重试、终态消费、回调鉴权、Pub/Sub 发布订阅等。
 - 均为纯 JUnit，不依赖 Spring 上下文与数据库（`ApplicationTests` 除外）。
 
 ---
 
 ## 已知事项与演进
 
-- **多实例部署假设**：令牌桶限流已可切 Redis Lua 分布式限流（`feature.redis-rate-limit`），登录 Token 已存 Redis，任务终态可经 Redis Pub/Sub 跨实例推送 SSE（`feature.redis-task-events`）；但任务推进器 / webhook 分发仍建议只在单实例运行，或后续接入分布式锁 / 仅单实例跑 `video.poll.enabled=true`。
-- **ComfyUI 新节点**：加节点 = yaml `nodes[]` 填好 + `enabled:true` + 装对应模型权重；OSS bucket 需后端可读。
-- **演进路线**：月度配额（QUOTA_EXCEEDED）、key 校验缓存、异常 key 自动禁用、OpenAPI 文档、API 独立定价、定时任务集群锁、更多模型（Wan / Hunyuan / LTX）。
-- 实测发现并修复的典型问题（面试可展开）：模型开放闸门绕过（`effectiveModel` 默认实现）、Spring advice 排序吞掉 `ApiException`（`@Order`）、`Map.of` 的 null key NPE（双层修复）。
+- **多实例部署**：核心链路已分布式化（Redis 限流 / Token / Pub/Sub SSE / 全局锁 / 持久化作业 / 事件驱动完成）。部署要点：开启 `FEATURE_REDIS_RATE_LIMIT`、`FEATURE_REDIS_TASK_EVENTS`、`DISTRIBUTED_LOCK_ENABLED`，各 Redis key/channel 使用环境前缀隔离，MySQL/Redis 连接池按实例数预算。
+- **ComfyUI 访问安全**：建议 nginx 入口校验 `X-Comfy-Token`（header 或 `?token=`），ComfyUI 只监听本机；后端所有调用已统一携带 token。
+- **任务推进**：ComfyUI 事件驱动（webhook 回调）+ 对账 60 秒兜底；Seedance 退避轮询（2s/5s/30s）；poller 只查需要轮询的引擎。
+- **演进路线**：任务轮询行级租约（多 Worker 并行推进，PR-09）、流水线多次运行历史、Outbox 可靠事件、API/Worker 角色拆分、Actuator 指标与告警、更多模型（Wan / Hunyuan / LTX）。
+- 实测发现并修复的典型问题（面试可展开）：模型开放闸门绕过（`effectiveModel` 默认实现）、Spring advice 排序吞掉 `ApiException`（`@Order`）、`Map.of` 的 null key NPE、分布式锁开关关闭导致任务不执行（锁未启用需回退直接执行）、对账查询 NULL next_poll_at 不匹配、scoped CSS 对 v-html 内容失效（`:deep()`）。
 
 ---
 
 ## 相关文档
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) —— 架构速览：两层策略、任务生命周期、计费、鉴权限流、数据模型。
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) —— 架构速览：两层策略、任务生命周期、计费、鉴权限流、数据模型、分布式改造。
 - [`API_SERVICE_DESIGN.md`](API_SERVICE_DESIGN.md) —— 对外 API 业务设计与落地偏差。
+- [`DISTRIBUTED_MIGRATION_PLAN.md`](DISTRIBUTED_MIGRATION_PLAN.md) —— 分布式改造阶段实施方案（PR 拆分）。
 - `docs/architecture.mmd` —— 架构图独立文件，可用 [mermaid.live](https://mermaid.live) 渲染 / 导出 PNG 用于演示。
-- 配对前端仓库：`/Users/a1234/WebstormProjects/seedance_generate`（Vue3 + Pinia + Element Plus）。
+- `docs/OSS_URL_RECOVERY.md` —— OSS 裸域名 URL 线上修复指南。
+- 配对前端仓库：`/Users/a1234/WebstormProjects/seedance_generate`（Vue3 + Pinia + Element Plus；`USER_GUIDE.md` 为用户使用手册）。

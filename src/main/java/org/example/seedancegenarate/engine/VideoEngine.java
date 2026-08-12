@@ -87,6 +87,20 @@ public interface VideoEngine {
         throw new UnsupportedOperationException("该提供方不支持回调");
     }
 
+    /**
+     * ETA（预计完成时间）能力声明。默认 {@link EtaCapability#BASIC}：
+     * 基于历史平均耗时做时间估算；能查真实队列的引擎（如自建 ComfyUI）覆写为
+     * {@link EtaCapability#FULL} 并实现 {@link #queuePosition(VideoTask)}。
+     */
+    default EtaCapability etaCapability() {
+        return EtaCapability.BASIC;
+    }
+
+    /** FULL 引擎：查询任务在提供方队列中的位置（0 = 下一个执行）；不在队列返回 null。 */
+    default Integer queuePosition(VideoTask task) throws Exception {
+        throw new UnsupportedOperationException("该提供方不支持队列查询");
+    }
+
     /** CALLBACK 引擎：处理回调，返回归一化状态（通常复用 poll 查询提供方最新状态）。 */
     default RemoteStatus handleCallback(VideoTask task, String payload) throws Exception {
         throw new UnsupportedOperationException("该提供方不支持回调");

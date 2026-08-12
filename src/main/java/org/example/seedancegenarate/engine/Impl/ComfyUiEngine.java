@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.engine.BillingTiming;
 import org.example.seedancegenarate.engine.CompletionMechanism;
+import org.example.seedancegenarate.engine.EtaCapability;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.RemoteStatus;
 import org.example.seedancegenarate.engine.SubmitResult;
@@ -82,6 +83,39 @@ public class ComfyUiEngine implements VideoEngine {
     public boolean needsPolling() {
         return !StringUtils.hasText(completionProperties.getCallbackBaseUrl())
                 || !StringUtils.hasText(completionProperties.getCallbackSecret());
+    }
+
+    /** 自建节点可查真实队列：ETA 给出精确排队位置 */
+    @Override
+    public EtaCapability etaCapability() {
+        return EtaCapability.FULL;
+    }
+
+    /** 在节点队列中定位任务（按 prompt_id），返回排队位置；不在排队返回 null */
+    @Override
+    public Integer queuePosition(VideoTask task) throws Exception {
+        String nodeId = task.getNodeId();
+        if (nodeId == null || nodeId.isBlank()) {
+            return null;
+        }
+        ComfyUiProperties.Node node = properties.findNode(nodeId);
+        if (node == null) {
+            return null;
+        }
+        String providerTaskId = task.remoteTaskId();
+        JsonNode queue = client.getQueue(node.getBaseUrl(), properties.getReadTimeoutMs());
+        JsonNode pending = queue.path("queue_pending");
+        if (!pending.isArray()) {
+            return null;
+        }
+        int index = 0;
+        for (JsonNode item : pending) {
+            if (providerTaskId.equals(item.path("prompt_id").asText())) {
+                return index;
+            }
+            index++;
+        }
+        return null; // 不在排队（已开始执行或已完成）
     }
 
     /** 从 ComfyUI 回调提取 prompt_id（execution_success / execution_error 同构） */
