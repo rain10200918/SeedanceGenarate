@@ -1,10 +1,14 @@
 package org.example.seedancegenarate.service.Impl;
 
+import org.example.seedancegenarate.config.ConfigCacheProperties;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.ModelAccess;
 import org.example.seedancegenarate.mapper.ModelAccessMapper;
+import org.example.seedancegenarate.service.ConfigInvalidationNotifier;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -17,11 +21,19 @@ import static org.mockito.Mockito.when;
 /**
  * 纯单元测试（Mockito mock mapper，不连库）：验证开关裁决逻辑
  * ——默认值、显式覆盖优先、空 model 不拦截、setOpen 的 insert/update 分支。
+ * <p>
+ * 这些用例走 {@code cache.config.enabled=false}（每次直查）路径，锁住加缓存前的原行为；
+ * 快照路径另见 {@link ModelAccessCacheTest}。
  */
 class ModelAccessServiceImplTest {
 
     private ModelAccessServiceImpl newService(boolean defaultOpen, ModelAccessMapper mapper) {
-        ModelAccessServiceImpl service = new ModelAccessServiceImpl(mock(VideoEngineRegistry.class), mapper);
+        ConfigCacheProperties properties = new ConfigCacheProperties();
+        // 关掉快照：这个测试类验证的是「每次直查」的裁决逻辑
+        properties.getConfig().setEnabled(false);
+        ModelAccessServiceImpl service = new ModelAccessServiceImpl(
+                mock(VideoEngineRegistry.class), mapper, properties,
+                mock(ConfigInvalidationNotifier.class));
         ReflectionTestUtils.setField(service, "defaultOpen", defaultOpen);
         return service;
     }
@@ -29,7 +41,7 @@ class ModelAccessServiceImplTest {
     @Test
     void isOpen_noRow_followsDefault() {
         ModelAccessMapper mapper = mock(ModelAccessMapper.class);
-        when(mapper.selectOne(any())).thenReturn(null);
+        when(mapper.selectList(any())).thenReturn(List.of());
         assertTrue(newService(true, mapper).isOpen("minimax-h3-accel"));
         assertFalse(newService(false, mapper).isOpen("minimax-h3-accel"));
     }
@@ -41,13 +53,13 @@ class ModelAccessServiceImplTest {
         ModelAccess disabled = new ModelAccess();
         disabled.setModel("z-image-turbo");
         disabled.setEnabled(false);
-        when(mapper.selectOne(any())).thenReturn(disabled);
+        when(mapper.selectList(any())).thenReturn(List.of(disabled));
         assertFalse(newService(true, mapper).isOpen("z-image-turbo")); // 默认开，显式关胜出
 
         ModelAccess enabled = new ModelAccess();
         enabled.setModel("z-image-turbo");
         enabled.setEnabled(true);
-        when(mapper.selectOne(any())).thenReturn(enabled);
+        when(mapper.selectList(any())).thenReturn(List.of(enabled));
         assertTrue(newService(false, mapper).isOpen("z-image-turbo")); // 默认关，显式开胜出
     }
 
@@ -56,6 +68,8 @@ class ModelAccessServiceImplTest {
         ModelAccessMapper mapper = mock(ModelAccessMapper.class);
         assertTrue(newService(false, mapper).isOpen(null));
         assertTrue(newService(false, mapper).isOpen("  "));
+        // 空 model 直接放行，连查都不查
+        verify(mapper, never()).selectList(any());
         verify(mapper, never()).selectOne(any());
     }
 

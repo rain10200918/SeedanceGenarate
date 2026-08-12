@@ -8,6 +8,8 @@ import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.PriceConfig;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.mapper.PriceConfigMapper;
+import org.example.seedancegenarate.service.ConfigInvalidationNotifier;
+import org.example.seedancegenarate.service.Impl.ConfigPricingService;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
@@ -25,6 +27,8 @@ public class AdminPricingController {
 
     private final PriceConfigMapper priceConfigMapper;
     private final VideoEngineRegistry videoEngineRegistry;
+    private final ConfigPricingService configPricingService;
+    private final ConfigInvalidationNotifier invalidationNotifier;
 
     @GetMapping
     public Result<List<PriceConfig>> list() {
@@ -41,6 +45,7 @@ public class AdminPricingController {
         validate(config);
         config.setId(null);
         priceConfigMapper.insert(config);
+        refreshPricing();
         return Result.success(config);
     }
 
@@ -50,6 +55,7 @@ public class AdminPricingController {
         validate(config);
         config.setId(id);
         priceConfigMapper.updateById(config);
+        refreshPricing();
         return Result.success(priceConfigMapper.selectById(id));
     }
 
@@ -58,7 +64,14 @@ public class AdminPricingController {
     public Result<Void> delete(@PathVariable Long id) {
         requireAdmin();
         priceConfigMapper.deleteById(id);
+        refreshPricing();
         return Result.<Void>success(null);
+    }
+
+    /** 先刷本实例（管理员下一笔计费就该用新价），再广播给其他实例。 */
+    private void refreshPricing() {
+        configPricingService.reload();
+        invalidationNotifier.notifyChanged(ConfigInvalidationNotifier.TYPE_PRICING);
     }
 
     private void validate(PriceConfig config) {

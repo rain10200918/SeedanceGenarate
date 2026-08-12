@@ -35,6 +35,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.IntStream;
 
 
@@ -257,12 +258,15 @@ public class VideoController {
         UserContext.requireUserId();
         // 普通用户只看到开放的模型；管理员看到全部（带 open 标记，便于开放前自测）
         boolean admin = UserContext.isAdmin();
+        // 全量覆盖一次拿完：原先对每个模型调一次 isOpen()，一次 /options 就是七八条单行查询
+        Map<String, Boolean> overrides = modelAccessService.currentOverrides();
+        boolean defaultOpen = modelAccessService.defaultOpen();
         List<VideoOptionsResponse.ProviderOption> providers = videoEngineRegistry.all().stream()
                 .map(engine -> new VideoOptionsResponse.ProviderOption(
                         engine.provider(),
                         engine.displayName(),
                         engine.models().stream()
-                                .map(this::toModelOption)
+                                .map(spec -> toModelOption(spec, overrides, defaultOpen))
                                 .filter(model -> admin || model.open())
                                 .toList()
                 ))
@@ -282,7 +286,9 @@ public class VideoController {
         return Result.success(new VideoOptionsResponse(effectiveDefault, providers));
     }
 
-    private VideoOptionsResponse.ModelOption toModelOption(ModelSpec spec) {
+    private VideoOptionsResponse.ModelOption toModelOption(ModelSpec spec,
+                                                           Map<String, Boolean> overrides,
+                                                           boolean defaultOpen) {
         // durations 为空表示区间可选，展开成离散值供前端直接渲染；图片模型（无时长）则给空列表
         List<Integer> durations;
         if (!spec.durations().isEmpty()) {
@@ -296,7 +302,7 @@ public class VideoController {
                 spec.model(), spec.label(), spec.needImages(),
                 spec.imageMin(), spec.imageMax(), spec.ratios(), durations,
                 spec.outputType().name(), spec.megapixels(),
-                modelAccessService.isOpen(spec.model()),
+                overrides.getOrDefault(spec.model(), defaultOpen),
                 spec.videoMax(), spec.audioMax(), spec.needImageOrVideo()
         );
     }

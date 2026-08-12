@@ -4,6 +4,16 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME}
     password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    # 池上限受 MySQL max_connections（默认 151）约束，不受本机核数约束。
+    # 多实例部署时：单实例池大小 × 实例数 + 运维余量 < max_connections。
+    hikari:
+      maximum-pool-size: ${SPRING_DATASOURCE_POOL_MAX:50}
+      minimum-idle: ${SPRING_DATASOURCE_POOL_MIN_IDLE:10}
+      connection-timeout: ${SPRING_DATASOURCE_CONNECTION_TIMEOUT:10000}
+      max-lifetime: ${SPRING_DATASOURCE_MAX_LIFETIME:1200000}
+      idle-timeout: ${SPRING_DATASOURCE_IDLE_TIMEOUT:300000}
+      keepalive-time: ${SPRING_DATASOURCE_KEEPALIVE:120000}
+      pool-name: SeedanceHikari
   data:
     redis:
       host: ${SPRING_REDIS_HOST:127.0.0.1}
@@ -11,16 +21,26 @@ spring:
       password: ${SPRING_REDIS_PASSWORD:}
       database: ${SPRING_REDIS_DATABASE:0}
       timeout: ${SPRING_REDIS_TIMEOUT:3s}
+      lettuce:
+        # 每个请求都用 Redis（查 token + 限流）；池子小会成为隐形串行点
+        pool:
+          max-active: ${SPRING_REDIS_MAX_ACTIVE:128}
+          max-idle: ${SPRING_REDIS_MAX_IDLE:128}
+          min-idle: ${SPRING_REDIS_MIN_IDLE:16}
+          # 不用 -1ms（无限等待）：池满时要快速失败，不要让请求全部卡住
+          max-wait: ${SPRING_REDIS_MAX_WAIT:2000ms}
   servlet:
     multipart:
       max-file-size: 50MB
       max-request-size: 200MB
   application:
     name: SeedanceGenarate
+  # @Scheduled 现有 8 处（推进器 / 终态消费 / 流水线消费 / 两个对账 /
+  # token 清理 / 视频清理 / webhook 重试），线程数要留余量
   task:
     scheduling:
       pool:
-        size: ${SCHEDULING_POOL_SIZE:4}
+        size: ${SCHEDULING_POOL_SIZE:12}
   sql:
     init:
       # 数据库结构由 Flyway 版本化迁移管理；schema.sql 仅保留为历史参考，不再启动自动执行。
@@ -32,6 +52,22 @@ spring:
     baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
 server:
   port: ${SERVER_PORT:8080}
+  tomcat:
+    threads:
+      # 提交接口同步跑完外部调用链（上传 OSS → 调提供方），单请求可能占线程数十秒，
+      # 所以按「并发提交数」算，不按核数算
+      max: ${SERVER_TOMCAT_MAX_THREADS:800}
+      min-spare: ${SERVER_TOMCAT_MIN_SPARE_THREADS:50}
+    accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:500}
+    max-connections: ${SERVER_TOMCAT_MAX_CONNECTIONS:10000}
+    # SSE 是长连接：默认 100 次 keep-alive 后连接会被回收
+    max-keep-alive-requests: ${SERVER_TOMCAT_MAX_KEEPALIVE:-1}
+    connection-timeout: ${SERVER_TOMCAT_CONNECTION_TIMEOUT:20000}
+  # 只压 JSON。压缩 text/event-stream 会攒缓冲，毁掉 SSE 实时性
+  compression:
+    enabled: ${SERVER_COMPRESSION_ENABLED:true}
+    mime-types: application/json
+    min-response-size: 2048
 auth:
   token:
     ttl-seconds: ${AUTH_TOKEN_TTL_SECONDS:2592000}
@@ -107,9 +143,32 @@ feature:
   redis-rate-limit: ${FEATURE_REDIS_RATE_LIMIT:false}
   # 开启后通过 Redis Pub/Sub 广播任务终态，跨实例 SSE 才能收到通知。
   redis-task-events: ${FEATURE_REDIS_TASK_EVENTS:false}
+  # 开启后模型开关/改价立刻广播给其他实例（毫秒级一致）；
+  # 关闭时各实例靠 cache.config.reload-interval-ms 兜底重载，多实例下开关变更会滞后一个周期。
+  redis-config-invalidation: ${FEATURE_REDIS_CONFIG_INVALIDATION:false}
 
 task-events:
   channel: ${TASK_STATUS_REDIS_CHANNEL:local:seedance:event:task-status}
+
+config-invalidation:
+  channel: ${CONFIG_INVALIDATION_REDIS_CHANNEL:local:seedance:event:config-invalidation}
+
+# ============================================================
+# 请求路径缓存与写合并（全部可单独关掉回退原行为）
+# ============================================================
+cache:
+  activity:
+    # 最后活跃 IP / 最后操作：按用户合并后批量落库，不再每请求一次 UPDATE
+    enabled: ${CACHE_ACTIVITY_ENABLED:true}
+    flush-interval-ms: ${CACHE_ACTIVITY_FLUSH_INTERVAL_MS:5000}
+  config:
+    # 模型开关与计价配置的进程内快照
+    enabled: ${CACHE_CONFIG_ENABLED:true}
+    reload-interval-ms: ${CACHE_CONFIG_RELOAD_INTERVAL_MS:60000}
+  stats:
+    # 管理端聚合统计（dashboard 会把整张 video_task 读进内存聚合）
+    enabled: ${CACHE_STATS_ENABLED:true}
+    ttl-ms: ${CACHE_STATS_TTL_MS:30000}
 
 distributed:
   lock:

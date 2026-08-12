@@ -3,6 +3,7 @@ package org.example.seedancegenarate.service.Impl;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.example.seedancegenarate.config.ConfigCacheProperties;
 import org.example.seedancegenarate.dto.AdminDashboardResponse;
 import org.example.seedancegenarate.dto.ApiCallLogView;
 import org.example.seedancegenarate.dto.ApiCallSummary;
@@ -31,11 +32,20 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
- * 管理端统计实现。看板与汇总均内存聚合现算（数据量小），不建计数器表。
+ * 管理端统计实现。看板与汇总均内存聚合现算（不建计数器表，避免与明细漂移）。
+ * <p>
+ * 代价是这些方法很贵：{@code dashboard()} 把整张 {@code video_task} 读进内存聚合，
+ * {@code api_call_log} 上是 {@code COUNT(*)} + {@code GROUP BY} 全表扫，而这两张表只增不减。
+ * 后台看的数字不需要秒级精确，所以整个结果按短 TTL 缓存（{@code cache.stats.ttl-ms}）——
+ * 多个管理员同时刷新、或一个人反复刷新，都只在 TTL 到期后真正算一次。
+ * <p>
+ * {@code apiCalls()} 分页明细不缓存：参数组合多、命中率低，且管理员翻页时期望看到实时数据。
  */
 @Service
 @RequiredArgsConstructor
@@ -48,9 +58,39 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     private final ApiCallLogMapper apiCallLogMapper;
     private final ApiKeyMapper apiKeyMapper;
     private final VideoEngineRegistry videoEngineRegistry;
+    private final ConfigCacheProperties cacheProperties;
+
+    /** 聚合结果缓存：key → (算出来的值, 算的时刻)。同一 key 并发只是重复算，不会错。 */
+    private final Map<String, Cached<?>> statsCache = new ConcurrentHashMap<>();
 
     @Override
     public AdminDashboardResponse dashboard() {
+        return cached("dashboard", this::computeDashboard);
+    }
+
+    /**
+     * 取缓存，过期或未启用则现算。
+     * 不加锁：并发时最坏是几个请求各算一次（结果相同），比让请求互相等锁便宜。
+     */
+    @SuppressWarnings("unchecked")
+    private <T> T cached(String key, Supplier<T> compute) {
+        if (!cacheProperties.getStats().isEnabled()) {
+            return compute.get();
+        }
+        long ttlMs = cacheProperties.getStats().getTtlMs();
+        Cached<?> hit = statsCache.get(key);
+        if (hit != null && System.currentTimeMillis() - hit.at() < ttlMs) {
+            return (T) hit.value();
+        }
+        T value = compute.get();
+        statsCache.put(key, new Cached<>(value, System.currentTimeMillis()));
+        return value;
+    }
+
+    private record Cached<T>(T value, long at) {
+    }
+
+    private AdminDashboardResponse computeDashboard() {
         List<VideoTask> tasks = videoTaskService.list();
         long totalTask = tasks.size();
         long totalSuccess = tasks.stream().filter(t -> "SUCCESS".equals(t.getStatus())).count();
@@ -176,6 +216,11 @@ public class AdminStatsServiceImpl implements AdminStatsService {
 
     @Override
     public ApiCallSummary apiCallSummary(Long apiKeyId) {
+        // 按钥匙分别缓存：不同 apiKeyId 是不同结果，不能共用一个 key
+        return cached("apiCallSummary:" + apiKeyId, () -> computeApiCallSummary(apiKeyId));
+    }
+
+    private ApiCallSummary computeApiCallSummary(Long apiKeyId) {
         List<ApiCallLog> logs = apiCallLogMapper.selectList(
                 Wrappers.<ApiCallLog>lambdaQuery().eq(apiKeyId != null, ApiCallLog::getApiKeyId, apiKeyId));
         long total = logs.size();
@@ -194,6 +239,10 @@ public class AdminStatsServiceImpl implements AdminStatsService {
 
     @Override
     public UserSummary userSummary() {
+        return cached("userSummary", this::computeUserSummary);
+    }
+
+    private UserSummary computeUserSummary() {
         long total = appUserService.count();
         long adminCount = appUserService.count(Wrappers.<AppUser>lambdaQuery().eq(AppUser::getRole, "ADMIN"));
         long todayNew = appUserService.count(Wrappers.<AppUser>lambdaQuery()

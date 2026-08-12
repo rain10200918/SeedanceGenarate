@@ -18,4 +18,9 @@ public class DistributedFeatureProperties {
     private boolean redisRateLimit = false;
     /** 是否启用 Redis Pub/Sub 跨实例任务状态通知；关闭时只走本机 SSE。 */
     private boolean redisTaskEvents = false;
+    /**
+     * 是否启用配置失效广播（模型开关 / 计价改动后通知其他实例重载快照）。
+     * 关闭时各实例靠定时兜底重载，单实例部署无需开启（改动方自己已刷新本地快照）。
+     */
+    private boolean redisConfigInvalidation = false;
 }
