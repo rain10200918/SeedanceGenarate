@@ -341,7 +341,12 @@ public class VideoController {
                     value = "size",
                     defaultValue = "10"
             )
-            Long size
+            Long size,
+            @RequestParam(
+                    value = "status",
+                    required = false
+            )
+            String status
     ) {
         long pageCurrent = Math.max(current, 1L);
         long pageSize = Math.min(
@@ -355,6 +360,9 @@ public class VideoController {
         LambdaQueryWrapper<VideoTask> wrapper = new LambdaQueryWrapper<>();
         if (!UserContext.isAdmin()) {
             wrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
+        }
+        if (StringUtils.hasText(status)) {
+            wrapper.eq(VideoTask::getStatus, status.trim());
         }
         wrapper.orderByDesc(VideoTask::getUpdateTime)
                 .orderByDesc(VideoTask::getId);
