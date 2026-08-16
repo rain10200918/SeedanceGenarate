@@ -29,6 +29,8 @@ public class ConfigInvalidationNotifier {
     public static final String TYPE_MODEL_ACCESS = "MODEL_ACCESS";
     /** 计价配置变了。 */
     public static final String TYPE_PRICING = "PRICING";
+    /** 公告发布/下线/编辑了。 */
+    public static final String TYPE_ANNOUNCEMENT = "ANNOUNCEMENT";
 
     private final StringRedisTemplate redisTemplate;
     private final ConfigInvalidationProperties properties;
