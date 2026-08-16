@@ -104,6 +104,8 @@ video:
   timeout-retry-max: ${VIDEO_TIMEOUT_RETRY_MAX:2}
   # 提交断裂判定：PROCESSING 且 provider_task_id 为空超过该时长 → 终止
   submit-stall-minutes: ${VIDEO_SUBMIT_STALL_MINUTES:10}
+  # ETA 样本时长上限（分钟）：对账补终态的历史卡死任务时长虚大，超过上限的样本剔除
+  eta-max-sample-minutes: ${VIDEO_ETA_MAX_SAMPLE_MINUTES:90}
   cleanup:
     # OSS 产物由 Bucket Lifecycle 清理；仅打开此项才清理迁移前的本地 data/videos 文件。
     local-enabled: ${VIDEO_CLEANUP_LOCAL_ENABLED:false}

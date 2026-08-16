@@ -11,6 +11,7 @@ import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.TaskEtaService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -44,6 +45,11 @@ public class TaskEtaServiceImpl implements TaskEtaService {
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final RateLimitConfig rateLimitConfig;
+
+    /** 样本时长上限（分钟）：对账补终态的历史卡死任务（引擎完成早、终态晚）时长虚大，
+     *  不能代表真实生成耗时，超过上限的样本剔除。 */
+    @Value("${video.eta-max-sample-minutes:90}")
+    private long maxSampleMinutes;
 
     @Override
     public TaskEta estimate(VideoTask task) {
@@ -173,7 +179,9 @@ public class TaskEtaServiceImpl implements TaskEtaService {
                 continue;
             }
             long seconds = Duration.between(t.getCreateTime(), t.getUpdateTime()).getSeconds();
-            if (seconds > 0 && seconds < 24 * 3600) { // 过滤异常长/短样本
+            // 上限过滤：历史卡死补终态的任务时长 12~15 天，混入会把平均耗时拉爆
+            long maxSeconds = Math.max(maxSampleMinutes, 1) * 60;
+            if (seconds > 0 && seconds < maxSeconds) {
                 totalSeconds += seconds;
                 counted++;
             }
