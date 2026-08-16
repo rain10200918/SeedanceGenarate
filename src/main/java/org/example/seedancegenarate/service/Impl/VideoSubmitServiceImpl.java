@@ -1,5 +1,6 @@
 package org.example.seedancegenarate.service.Impl;
 
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +17,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.event.TaskSubmittedEvent;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.ModelAccessService;
+import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,6 +25,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -40,6 +43,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final VideoTaskService videoTaskService;
     private final CostRecordService costRecordService;
     private final ModelAccessService modelAccessService;
+    private final TaskStatusTransitioner taskStatusTransitioner;
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final VideoCompletionProperties completionProperties;
@@ -92,6 +96,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setModel(effectiveModel);
         task.setOutputType(outputType.name());
         task.setApiKeyId(request.apiKeyId());
+        // 超时判定基准：本轮尝试起点（首次 = 创建时间）
+        task.setLastAttemptAt(LocalDateTime.now());
         videoTaskService.save(task);
 
         GenerateCommand command = GenerateCommand.builder()
@@ -113,11 +119,9 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         try {
             submit = engine.submit(command);
         } catch (Exception e) {
-            // 提交失败：把刚 INSERT 的 PROCESSING 行落 FAILED。否则会留下「PROCESSING + 空
+            // 提交失败：统一走终态唯一入口（CAS + 幂等 + SSE）。否则会留下「PROCESSING + 空
             // provider_task_id」的僵尸行，且 poller 只轮询已提交任务时永远不会碰它（清理不到）。
-            task.setStatus("FAILED");
-            task.setErrorMsg(e.getMessage());
-            videoTaskService.updateById(task);
+            taskStatusTransitioner.markFailed(task.getId(), e.getMessage());
             throw e;
         }
         task.setProviderTaskId(submit.getProviderTaskId());
@@ -129,6 +133,79 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 任务提交成功事件：异步提交
         applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
+    }
+
+    /**
+     * 超时自动重试：从已落库任务反推参数重新提交引擎（仅 ON_SUCCESS 计费引擎调用，
+     * 免费重跑不产生费用；ON_SUBMIT 引擎的决策树已排除，不会走到这里）。
+     * <p>
+     * 并发安全：提交后 CAS 抢占 retry_count（{@code WHERE status='PROCESSING' AND retry_count=?}），
+     * 多实例 Worker 竞争时只有一方回写成功，另一方返回 false 收工。
+     *
+     * @return true=本次执行了重提交；false=被其他实例抢先或任务已终态
+     */
+    public boolean resubmit(VideoTask task) throws Exception {
+        if (task == null || task.getId() == null || !"PROCESSING".equals(task.getStatus())) {
+            return false;
+        }
+        String provider = task.getProvider() == null || task.getProvider().isBlank()
+                ? defaultProvider : task.getProvider().trim();
+        VideoEngine engine = videoEngineRegistry.get(provider);
+        String effectiveModel = task.getModel();
+        // 重试时模型可能已被管理员关闭 → 不再重试，走失败
+        assertModelOpen(effectiveModel);
+
+        List<String> imageUrls = parseJsonList(task.getImages());
+        List<String> videoUrls = parseJsonList(task.getReferenceVideos());
+        List<String> audioUrls = parseJsonList(task.getReferenceAudios());
+        boolean hasImages = !imageUrls.isEmpty();
+        GenerationMode mode = GenerationMode.of(hasImages, engine.outputType(effectiveModel));
+
+        GenerateCommand command = GenerateCommand.builder()
+                .mode(mode)
+                .imageUrls(imageUrls)
+                .videoUrls(videoUrls)
+                .audioUrls(audioUrls)
+                .prompt(task.getPrompt())
+                .duration(task.getDuration())
+                .ratio(task.getRatio())
+                .model(effectiveModel)
+                .webhookUrl(resolveWebhookUrl(engine, provider))
+                .build();
+        int currentRetry = task.getRetryCount() == null ? 0 : task.getRetryCount();
+        log.info("超时自动重试提交: taskId={}, provider={}, model={}, 第 {} 次重试",
+                task.businessTaskId(), provider, effectiveModel, currentRetry + 1);
+        SubmitResult submit = engine.submit(command);
+
+        // CAS 抢占：仍 PROCESSING 且 retry_count 未被他人加过才回写；换新 provider_task_id 后
+        // 旧 id 的迟到回调/轮询自然失效（按 provider_task_id 匹配查不到），无需额外清理。
+        boolean updated = videoTaskService.update(new LambdaUpdateWrapper<VideoTask>()
+                .eq(VideoTask::getId, task.getId())
+                .eq(VideoTask::getStatus, "PROCESSING")
+                .eq(VideoTask::getRetryCount, currentRetry)
+                .set(VideoTask::getProviderTaskId, submit.getProviderTaskId())
+                .set(VideoTask::getNodeId, submit.getNodeId())
+                .set(VideoTask::getRetryCount, currentRetry + 1)
+                .set(VideoTask::getLastAttemptAt, LocalDateTime.now())
+                .set(VideoTask::getNextPollAt, null)); // NULL=立即可查，poller/对账立即接管新 id
+        if (!updated) {
+            log.warn("重试回写被抢先（任务已终态或已被重试），本次重试作废: taskId={}", task.businessTaskId());
+            return false;
+        }
+        return true;
+    }
+
+    private List<String> parseJsonList(String json) {
+        if (!StringUtils.hasText(json)) {
+            return Collections.emptyList();
+        }
+        try {
+            return objectMapper.readValue(json, objectMapper.getTypeFactory()
+                    .constructCollectionType(List.class, String.class));
+        } catch (Exception e) {
+            log.warn("解析任务参考素材失败（按空处理）: {}", e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
     private String resolveProvider(String provider) {

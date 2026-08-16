@@ -426,9 +426,34 @@ src/main/java/org/example/seedancegenarate/
 | `ALIYUN_OSS_*` | 参考图与生成产物对象存储（须后端可读，ComfyUI 会回源下载）；`ALIYUN_OSS_ARTIFACT_PREFIX` / `ALIYUN_OSS_SIGNED_URL_TTL_SECONDS` 控制产物前缀与签名有效期 |
 | `PROMPT_OPTIMIZE_API_KEY` | 提示词优化 LLM 密钥（仅后端） |
 | `BILLING_*` / `RATE_LIMIT_*` / `VIDEO_POLL_*` | 计费 / 限流 / 推进器参数 |
+| `VIDEO_TASK_TIMEOUT_MINUTES` / `VIDEO_TIMEOUT_RETRY_MAX` / `VIDEO_SUBMIT_STALL_MINUTES` | 任务超时自动处理：超龄强制终态 / ComfyUI 免费自动重试上限（0=不重试）/ 提交断裂判定 |
 | `VIDEO_MODEL_ACCESS_DEFAULT_OPEN` | 新模型默认是否开放 |
 
 > ⚠️ **安全**：仓库内 `application.yaml` 的默认值含真实样式的密钥，**仅供本地开发**；务必用环境变量覆盖真实密钥，切勿把真实密钥提交进仓库。
+
+---
+
+## 可观测性
+
+后端暴露 `/actuator/prometheus`（JVM / HTTP / 线程池 + 自定义业务指标），业务指标由 `MetricsExportTask` 每 30s 从 DB 现查导出：
+
+| 指标 | 含义 |
+|---|---|
+| `task_processing_count{provider}` | 生成中任务数（按引擎） |
+| `task_stuck_count` | 卡死数：超过超时阈值仍 PROCESSING（正常应接近 0） |
+| `task_success_total` / `task_failed_total` | 近 5 分钟成功 / 失败（成功率窗口） |
+| `async_job_dead_count` | 死信作业数（重试耗尽，需人工介入） |
+| `node_up{node_id}` / `node_queue_load{node_id}` | ComfyUI 节点在线状态与队列深度 |
+
+一键起监控栈（Prometheus + Grafana + Alertmanager）：
+
+```bash
+docker compose -f compose/docker-compose.yml up -d
+# Prometheus: http://localhost:9090   Grafana: http://localhost:3000 (admin/admin)
+# 后端地址在 compose/prometheus.yml targets 里配置
+```
+
+告警规则（`compose/rules.yml`）：卡死任务（10 分钟即触发，不再等用户发现）、作业死信、成功率低于 90%、节点掉线。告警出口接入钉钉 / 企业微信机器人见 `compose/alertmanager.yml`。
 
 ---
 

@@ -1,7 +1,7 @@
 package org.example.seedancegenarate.service.Impl;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.service.PromptContext;
+import org.example.seedancegenarate.service.llm.LlmChatClient;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -13,14 +13,14 @@ import static org.junit.jupiter.api.Assertions.*;
 class PromptOptimizeServiceImplTest {
 
     private final PromptOptimizeServiceImpl service =
-            new PromptOptimizeServiceImpl(null, new ObjectMapper());
+            new PromptOptimizeServiceImpl(null, null);
 
     @Test
     void ref2vaTemplateSelectedAndImageCountInjected() {
         String sys = service.buildSystemPrompt(new PromptContext("minimax-h3", 3, 0, 0, 8, "16:9"));
 
         assertTrue(sys.contains("参考生视频"), "应命中 minimax-h3 专用模板");
-        assertTrue(sys.contains("<Picture 3>"), "{imageCount} 应被替换为 3");
+        assertTrue(sys.contains("用户接入了 3 张参考图"), "{imageCount} 应被替换为 3");
         assertFalse(sys.contains("{imageCount}"), "占位符不应残留");
         assertTrue(sys.contains("只输出"), "应追加通用输出铁律");
     }

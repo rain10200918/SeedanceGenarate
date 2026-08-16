@@ -1,14 +1,13 @@
 package org.example.seedancegenarate.service.Impl;
 
-import cn.hutool.http.HttpRequest;
-import cn.hutool.http.HttpResponse;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.PromptOptimizeConfig;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
+import org.example.seedancegenarate.service.llm.LlmCallMeta;
+import org.example.seedancegenarate.service.llm.LlmChatClient;
+import org.example.seedancegenarate.service.llm.LlmChatResponse;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
@@ -33,7 +32,7 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
             "你是 AI 生成提示词专家，请把用户的粗略描述改写成一条高质量、结构清晰的提示词。";
 
     private final PromptOptimizeConfig config;
-    private final ObjectMapper objectMapper;
+    private final LlmChatClient llmChatClient;
 
     @Override
     public String optimize(String prompt, PromptContext context) throws Exception {
@@ -47,33 +46,12 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
         messages.add(message("system", buildSystemPrompt(context)));
         messages.add(message("user", prompt));
 
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", config.getModel());
-        body.put("messages", messages);
-        body.put("temperature", config.getTemperature());
-        body.put("max_tokens", config.getMaxTokens());
-        body.put("stream", false);
+        // LLM 调用统一走 LlmChatClient（TokenUsageAspect 在此切面记录 token 消耗）
+        String targetModel = context == null ? null : context.model();
+        LlmChatResponse response = llmChatClient.chat(config.getModel(), messages,
+                new LlmCallMeta(LlmCallMeta.SCENE_PROMPT_OPTIMIZE, targetModel));
 
-        String json = objectMapper.writeValueAsString(body);
-
-        HttpResponse response = HttpRequest.post(config.getUrl())
-                .header("Authorization", "Bearer " + config.getApiKey())
-                .header("Content-Type", "application/json")
-                .timeout(config.getTimeoutMs())
-                .body(json)
-                .execute();
-
-        if (!response.isOk()) {
-            // 仅记录状态码，避免把密钥或完整请求写进日志
-            log.error("提示词优化调用失败，状态码:{}", response.getStatus());
-            throw new RuntimeException("提示词优化失败，请稍后再试");
-        }
-
-        JsonNode node = objectMapper.readTree(response.body());
-        JsonNode contentNode = node.path("choices").path(0).path("message").path("content");
-        String optimized = contentNode.isMissingNode() ? "" : contentNode.asText("").trim();
-        // 去掉模型可能附带的成对引号
-        optimized = stripWrappingQuotes(optimized);
+        String optimized = stripWrappingQuotes(response.content());
         if (optimized.isEmpty()) {
             throw new RuntimeException("提示词优化失败，请稍后再试");
         }

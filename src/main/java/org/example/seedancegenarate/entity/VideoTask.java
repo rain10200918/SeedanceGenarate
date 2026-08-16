@@ -55,6 +55,10 @@ public class VideoTask {
     private String provider;
     /** 处理该任务的 ComfyUI 节点 ID */
     private String nodeId;
+    /** 超时自动重试次数（ON_SUCCESS 计费引擎免费重跑；V9 新增） */
+    private Integer retryCount;
+    /** 本轮尝试起点（首次=create_time，重试后=now；V9 新增） */
+    private LocalDateTime lastAttemptAt;
     /** 对外 API 来源判别列（api_key.id）；空 = UI 提交 */
     private Long apiKeyId;
     /** 模型 / 工作流标识 */

@@ -9,6 +9,7 @@ import org.example.seedancegenarate.config.AsyncJobProperties;
 import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.AsyncJobService;
+import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -38,7 +39,7 @@ class TaskFinalizeConsumerTest {
         AsyncJob job = claimedJob(1L, 0, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
         when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
                 .thenReturn(List.of(job));
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, properties(), new ObjectMapper());
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, mock(TaskStatusTransitioner.class), properties(), new ObjectMapper());
 
         consumer.consumePendingFinalizes();
 
@@ -55,12 +56,13 @@ class TaskFinalizeConsumerTest {
         AsyncJob job = claimedJob(1L, 4, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
         when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
                 .thenReturn(List.of(job));
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, properties(), new ObjectMapper());
+        TaskStatusTransitioner transitioner = mock(TaskStatusTransitioner.class);
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, transitioner, properties(), new ObjectMapper());
 
         consumer.consumePendingFinalizes();
 
         verify(jobs).failAndRetry(eq(1L), eq("token"), any());
-        verify(tasks).update(any(Wrapper.class));
+        verify(transitioner).markFailed(eq(10L), any());
     }
 
     @Test
@@ -71,7 +73,7 @@ class TaskFinalizeConsumerTest {
         AsyncJob job = claimedJob(1L, 0, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
         when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
                 .thenReturn(List.of(job));
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, properties(), new ObjectMapper());
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, mock(TaskStatusTransitioner.class), properties(), new ObjectMapper());
 
         consumer.consumePendingFinalizes();
 

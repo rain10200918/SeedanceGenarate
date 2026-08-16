@@ -6,6 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.task.PipelineNodeSubmitConsumer;
 import org.example.seedancegenarate.task.TaskFinalizeConsumer;
+import org.example.seedancegenarate.task.TaskRetryConsumer;
+import org.example.seedancegenarate.service.Impl.VideoTaskServiceImpl;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
 import org.springframework.stereotype.Component;
@@ -18,6 +20,7 @@ public class JobAvailableSubscriber implements MessageListener {
     private final ObjectMapper objectMapper;
     private final PipelineNodeSubmitConsumer pipelineNodeSubmitConsumer;
     private final TaskFinalizeConsumer taskFinalizeConsumer;
+    private final TaskRetryConsumer taskRetryConsumer;
 
     @Override
     public void onMessage(Message message, byte[] pattern) {
@@ -27,8 +30,10 @@ public class JobAvailableSubscriber implements MessageListener {
             log.info("收到作业可用通知: jobType={}", jobType);
             if ("PIPELINE_NODE_SUBMIT".equals(jobType)) {
                 pipelineNodeSubmitConsumer.consumeNow();
-            } else if ("TASK_FINALIZE".equals(jobType)) {
+            } else if (VideoTaskServiceImpl.JOB_TYPE_TASK_FINALIZE.equals(jobType)) {
                 taskFinalizeConsumer.consumeNow();
+            } else if (VideoTaskServiceImpl.JOB_TYPE_TASK_RETRY.equals(jobType)) {
+                taskRetryConsumer.consumeNow();
             }
         } catch (Exception e) {
             log.warn("解析作业通知失败: reason={}", e.getMessage());

@@ -11,6 +11,7 @@ import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.TaskEtaService;
+import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoDownloadService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.context.ApplicationEventPublisher;
@@ -31,11 +32,15 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final ApplicationEventPublisher eventPublisher;
     private final AsyncJobService asyncJobService;
     private final TaskEtaService taskEtaService;
+    private final TaskStatusTransitioner taskStatusTransitioner;
 
     /** 终态作业幂等键。 */
     public static String finalizeJobKey(Long videoTaskId) {
         return "task:" + videoTaskId;
     }
+
+    /** 超时自动重试作业类型（幂等键同为 task:{id}，与终态作业共用 biz_key 无冲突——唯一键是 job_type+biz_key） */
+    public static final String JOB_TYPE_TASK_RETRY = "TASK_RETRY";
 
     @Override
     public VideoTask getByProviderTaskId(String providerTaskId) {
@@ -66,17 +71,8 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
                         task.businessTaskId(), task.getProvider(), status.getRemoteVideoUrl());
             }
             case FAILED -> {
-                String message = toUserErrorMessage(status.getErrorMsg());
-                task.setStatus("FAILED");
-                task.setErrorMsg(message);
-                LambdaUpdateWrapper<VideoTask> wrapper = new LambdaUpdateWrapper<>();
-                wrapper.eq(VideoTask::getId, task.getId())
-                        .set(VideoTask::getStatus, "FAILED")
-                        .set(VideoTask::getErrorMsg, message);
-                this.update(wrapper);
-                publishStatusChanged(task);
-                log.warn("任务失败: taskId={}, provider={}, reason={}",
-                        task.businessTaskId(), task.getProvider(), message);
+                // 统一走终态唯一入口：CAS PROCESSING→FAILED + SSE 通知（幂等，已终态不覆盖）
+                taskStatusTransitioner.markFailed(task.getId(), status.getErrorMsg());
             }
             default -> {
                 // PROCESSING：任务初始即为 PROCESSING，无需落库

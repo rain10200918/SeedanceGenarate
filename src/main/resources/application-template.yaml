@@ -98,6 +98,12 @@ video:
     initial-delay-ms: ${VIDEO_POLL_INITIAL_DELAY_MS:5000}
     max-age-hours: ${VIDEO_POLL_MAX_AGE_HOURS:24}
     batch-size: ${VIDEO_POLL_BATCH_SIZE:200}
+  # 任务超时自动处理（对账兜底）：本轮尝试超过阈值仍 PROCESSING → 最后确认 → 决策
+  task-timeout-minutes: ${VIDEO_TASK_TIMEOUT_MINUTES:60}
+  # 自动重试上限：仅 ON_SUCCESS 计费引擎（ComfyUI 免费重跑）生效；0 = 只失败不重试
+  timeout-retry-max: ${VIDEO_TIMEOUT_RETRY_MAX:2}
+  # 提交断裂判定：PROCESSING 且 provider_task_id 为空超过该时长 → 终止
+  submit-stall-minutes: ${VIDEO_SUBMIT_STALL_MINUTES:10}
   cleanup:
     # OSS 产物由 Bucket Lifecycle 清理；仅打开此项才清理迁移前的本地 data/videos 文件。
     local-enabled: ${VIDEO_CLEANUP_LOCAL_ENABLED:false}
@@ -246,3 +252,12 @@ aliyun:
     artifact-prefix: ${ALIYUN_OSS_ARTIFACT_PREFIX:outputs}
     # 后端鉴权后签发的播放/下载 URL 有效期（秒）。
     signed-url-ttl-seconds: ${ALIYUN_OSS_SIGNED_URL_TTL_SECONDS:300}
+# 可观测性：/actuator/prometheus 暴露 Prometheus 指标（业务指标见 MetricsExportTask）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${SPRING_APPLICATION_NAME:seedance-backend}

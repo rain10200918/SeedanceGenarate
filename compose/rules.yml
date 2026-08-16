@@ -1,0 +1,45 @@
+# 告警规则（配合 MetricsExportTask 导出的业务指标）。
+# 生效条件：Prometheus rule_files 引用本文件；告警出口（Alertmanager → 钉钉/企业微信）见 README「可观测性」。
+groups:
+  - name: seedance-task
+    rules:
+      # 卡死任务：超过超时阈值仍 PROCESSING（决策每 30s 处理，正常应接近 0）。
+      # 本次线上"任务 16 小时卡在加载中"的告警源：此处 10 分钟即触发。
+      - alert: TaskStuck
+        expr: task_stuck_count > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: '存在卡死任务（超时阈值内未出结果）'
+          description: '{{ $value }} 个任务超过超时阈值仍 PROCESSING，对账决策应已介入，检查节点与对账日志。'
+
+      # 作业死信：重试耗尽的作业（终态转存 / 超时重试），需要人工介入。
+      - alert: TaskDeadJob
+        expr: async_job_dead_count > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '存在死信作业'
+          description: '{{ $value }} 个 async_job 重试耗尽进入 DEAD，查看 async_job 表确认原因。'
+
+      # 成功率下降：近 5 分钟窗口成功率低于 90%（引擎批量故障信号）。
+      - alert: TaskSuccessRateLow
+        expr: task_success_total / (task_success_total + task_failed_total) < 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: '任务成功率低于 90%'
+          description: '近 5 分钟成功率 {{ $value | humanizePercentage }}，检查引擎/节点状态。'
+
+      # 节点掉线：ComfyUI 节点连续 5 分钟不可达。
+      - alert: ComfyNodeDown
+        expr: node_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'ComfyUI 节点 {{ $labels.node_id }} 掉线'
+          description: '节点连续 5 分钟不可达，该节点的生成任务将积压直至超时。'

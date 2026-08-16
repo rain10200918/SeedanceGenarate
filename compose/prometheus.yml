@@ -1,0 +1,17 @@
+# Prometheus 采集配置（配合 seedance-backend 的 /actuator/prometheus）。
+# 使用：docker compose -f compose/docker-compose.yml up -d
+# targets 里的地址按部署环境改：后端跑在本机用 host.docker.internal，跑在容器/其他机器填实际 IP:端口。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  - job_name: seedance-backend
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: [ 'host.docker.internal:8080' ]
+        labels:
+          instance: backend-1

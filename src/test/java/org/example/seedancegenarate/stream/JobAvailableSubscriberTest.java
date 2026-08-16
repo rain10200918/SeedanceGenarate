@@ -3,6 +3,7 @@ package org.example.seedancegenarate.stream;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.task.PipelineNodeSubmitConsumer;
 import org.example.seedancegenarate.task.TaskFinalizeConsumer;
+import org.example.seedancegenarate.task.TaskRetryConsumer;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.connection.DefaultMessage;
 
@@ -18,7 +19,7 @@ class JobAvailableSubscriberTest {
     void wakesPipelineConsumerForPipelineJobType() throws Exception {
         PipelineNodeSubmitConsumer pipeline = mock(PipelineNodeSubmitConsumer.class);
         TaskFinalizeConsumer finalize = mock(TaskFinalizeConsumer.class);
-        JobAvailableSubscriber subscriber = new JobAvailableSubscriber(new ObjectMapper(), pipeline, finalize);
+        JobAvailableSubscriber subscriber = new JobAvailableSubscriber(new ObjectMapper(), pipeline, finalize, mock(TaskRetryConsumer.class));
 
         subscriber.onMessage(message("{\"jobType\":\"PIPELINE_NODE_SUBMIT\"}"), null);
 
@@ -30,7 +31,7 @@ class JobAvailableSubscriberTest {
     void wakesFinalizeConsumerForFinalizeJobType() throws Exception {
         PipelineNodeSubmitConsumer pipeline = mock(PipelineNodeSubmitConsumer.class);
         TaskFinalizeConsumer finalize = mock(TaskFinalizeConsumer.class);
-        JobAvailableSubscriber subscriber = new JobAvailableSubscriber(new ObjectMapper(), pipeline, finalize);
+        JobAvailableSubscriber subscriber = new JobAvailableSubscriber(new ObjectMapper(), pipeline, finalize, mock(TaskRetryConsumer.class));
 
         subscriber.onMessage(message("{\"jobType\":\"TASK_FINALIZE\"}"), null);
 
