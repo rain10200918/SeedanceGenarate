@@ -15,6 +15,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 
 /**
@@ -57,10 +60,19 @@ public class VideoDownloadServiceImpl extends ServiceImpl<VideoTaskMapper, Video
             String extension = resolveExtension(remoteUrl, connection.getContentType());
             String contentType = normalizeContentType(connection.getContentType(), extension);
             String objectKey = artifactObjectKey(bizTaskId, extension);
+            // 先落临时文件再传 OSS：直传网络流在弱网下连接中断后 OSS SDK 重试要 reset 流，
+            // HttpURLConnection 的流不支持 mark/reset → "Failed to reset the request input stream"。
+            // 文件可 seek，重试无忧；大视频也不占内存。
+            Path tempFile = Files.createTempFile("dl-", extension);
             try (InputStream input = connection.getInputStream()) {
+                Files.copy(input, tempFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+            try (InputStream fileInput = Files.newInputStream(tempFile)) {
                 ArtifactStorage.StoredArtifact artifact = artifactStorage.put(
-                        objectKey, input, contentType, connection.getContentLengthLong());
+                        objectKey, fileInput, contentType, Files.size(tempFile));
                 return new DownloadedArtifact(bizTaskId + extension, artifact);
+            } finally {
+                Files.deleteIfExists(tempFile);
             }
         } finally {
             connection.disconnect();
