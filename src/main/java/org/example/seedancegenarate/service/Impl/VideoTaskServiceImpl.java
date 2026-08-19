@@ -10,14 +10,17 @@ import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
+import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskEtaService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoDownloadService;
 import org.example.seedancegenarate.service.VideoTaskService;
+import org.example.seedancegenarate.service.WalletService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.util.Locale;
 
 @Slf4j
@@ -33,6 +36,8 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final AsyncJobService asyncJobService;
     private final TaskEtaService taskEtaService;
     private final TaskStatusTransitioner taskStatusTransitioner;
+    private final WalletService walletService;
+    private final PricingService pricingService;
 
     /** 终态作业幂等键。 */
     public static String finalizeJobKey(Long videoTaskId) {
@@ -41,6 +46,11 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
 
     /** 超时自动重试作业类型（幂等键同为 task:{id}，与终态作业共用 biz_key 无冲突——唯一键是 job_type+biz_key） */
     public static final String JOB_TYPE_TASK_RETRY = "TASK_RETRY";
+
+    @Override
+    public java.util.List<VideoTask> findTerminalMissingWalletTransition(int limit) {
+        return baseMapper.findTerminalMissingWalletTransition(Math.min(Math.max(limit, 1), 500));
+    }
 
     @Override
     public VideoTask getByProviderTaskId(String providerTaskId) {
@@ -119,6 +129,11 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         }
         // 成功计费：仅「成功才计费」的提供方（如 ComfyUI）真正落账，且幂等
         costRecordService.recordOnSuccess(task);
+        // 成功结算（预授权扣款）：冻结转消费，动 frozen 永不失败；幂等（biz_key=task:{id}:settle）。
+        // 金额用提交时快照（freeze_amount），不用实时价——价格可变、冻结是历史事实
+        BigDecimal settleAmount = task.getFreezeAmount() != null ? task.getFreezeAmount()
+                : pricingService.price(task).amount();
+        walletService.settle(task.getUserId(), settleAmount, task.getId());
         publishStatusChanged(task);
         // 刷新该模型平均耗时缓存（ETA 统计）
         taskEtaService.refreshAvgDuration(task.getModel());

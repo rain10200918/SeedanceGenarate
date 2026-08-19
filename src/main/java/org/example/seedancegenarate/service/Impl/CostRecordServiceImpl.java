@@ -2,8 +2,6 @@ package org.example.seedancegenarate.service.Impl;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
-import org.example.seedancegenarate.engine.BillingTiming;
-import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.CostRecord;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.AppUserMapper;
@@ -24,44 +22,18 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
     private final AppUserMapper appUserMapper;
     private final VideoTaskService videoTaskService;
     private final PricingService pricingService;
-    private final VideoEngineRegistry videoEngineRegistry;
 
     public CostRecordServiceImpl(AppUserMapper appUserMapper, @Lazy VideoTaskService videoTaskService,
-                                 PricingService pricingService, VideoEngineRegistry videoEngineRegistry) {
+                                 PricingService pricingService) {
         this.appUserMapper = appUserMapper;
         this.videoTaskService = videoTaskService;
         this.pricingService = pricingService;
-        this.videoEngineRegistry = videoEngineRegistry;
-    }
-
-    @Override
-    @Transactional
-    public void recordOnSubmit(VideoTask task) {
-        if (billingTiming(task) == BillingTiming.ON_SUBMIT) {
-            doRecord(task);
-        }
     }
 
     @Override
     @Transactional
     public void recordOnSuccess(VideoTask task) {
-        if (billingTiming(task) == BillingTiming.ON_SUCCESS) {
-            doRecord(task);
-        }
-    }
-
-    /** 解析该任务提供方的计费时机；provider 缺失（历史数据）或未知时按提交即计费处理 */
-    private BillingTiming billingTiming(VideoTask task) {
-        String provider = task == null ? null : task.getProvider();
-        if (provider == null || provider.isBlank()) {
-            return BillingTiming.ON_SUBMIT;
-        }
-        try {
-            return videoEngineRegistry.get(provider).billingTiming();
-        } catch (RuntimeException e) {
-            log.warn("未知提供方 {}，计费按 ON_SUBMIT 处理", provider);
-            return BillingTiming.ON_SUBMIT;
-        }
+        doRecord(task);
     }
 
     /** 真正落账：幂等（唯一键兜底），写 cost_record + 回写 task.costAmount + 原子累加用户消费 */
@@ -70,8 +42,13 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
             return;
         }
 
-        PricingService.Price price = pricingService.price(task);
-        BigDecimal amount = price.amount();
+        // 用户账务使用提交时快照；旧任务没有快照时才回退到当前价格（仅兼容历史数据）。
+        PricingService.Price currentPrice = pricingService.price(task);
+        BigDecimal amount = task.getFreezeAmount() != null ? task.getFreezeAmount() : currentPrice.amount();
+        BigDecimal unitPrice = task.getFreezeUnitPrice() != null
+                ? task.getFreezeUnitPrice() : currentPrice.unitPrice();
+        String currency = task.getFreezeCurrency() == null || task.getFreezeCurrency().isBlank()
+                ? currentPrice.currency() : task.getFreezeCurrency();
 
         boolean hasReferenceImage = hasReferenceImage(task);
         CostRecord record = new CostRecord();
@@ -80,9 +57,9 @@ public class CostRecordServiceImpl extends ServiceImpl<CostRecordMapper, CostRec
         record.setSeedanceTaskId(task.remoteTaskId());
         record.setProvider(task.getProvider());
         record.setDuration(task.getDuration());
-        record.setUnitPrice(price.unitPrice());
+        record.setUnitPrice(unitPrice);
         record.setAmount(amount);
-        record.setCurrency(price.currency());
+        record.setCurrency(currency);
         record.setBizType(hasReferenceImage ? "IMAGE_TO_VIDEO" : "TEXT_TO_VIDEO");
         record.setRemark(providerLabel(task.getProvider()) + (hasReferenceImage ? " 图生视频生成费用" : " 文生视频生成费用"));
         try {

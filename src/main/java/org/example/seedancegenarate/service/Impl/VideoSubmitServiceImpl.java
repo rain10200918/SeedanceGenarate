@@ -1,6 +1,7 @@
 package org.example.seedancegenarate.service.Impl;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,16 +16,18 @@ import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.event.TaskSubmittedEvent;
-import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.ModelAccessService;
+import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
+import org.example.seedancegenarate.service.WalletService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -41,9 +44,10 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
     private final VideoEngineRegistry videoEngineRegistry;
     private final VideoTaskService videoTaskService;
-    private final CostRecordService costRecordService;
     private final ModelAccessService modelAccessService;
     private final TaskStatusTransitioner taskStatusTransitioner;
+    private final WalletService walletService;
+    private final PricingService pricingService;
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final VideoCompletionProperties completionProperties;
@@ -51,6 +55,17 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
     private String defaultProvider;
+
+    @Override
+    public VideoTask findByRequestId(Long userId, String requestId) {
+        if (userId == null || !StringUtils.hasText(requestId)) {
+            return null;
+        }
+        return videoTaskService.getOne(Wrappers.<VideoTask>lambdaQuery()
+                .eq(VideoTask::getUserId, userId)
+                .eq(VideoTask::getRequestId, requestId.trim())
+                .last("limit 1"), false);
+    }
 
     @Override
     public void validate(String provider, String model) {
@@ -78,6 +93,24 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         OutputType outputType = engine.outputType(effectiveModel);
         GenerationMode mode = GenerationMode.of(hasImages, outputType);
 
+        // 幂等键由调用方在重试时复用；未提供时生成一次性键（UI 单次点击仍安全）。
+        String requestId = StringUtils.hasText(request.requestId())
+                ? request.requestId().trim()
+                : "req_" + UUID.randomUUID().toString().replace("-", "");
+        if (requestId.length() > 128) {
+            throw new IllegalArgumentException("生成请求幂等键过长");
+        }
+        if (request.userId() != null) {
+            VideoTask existing = videoTaskService.getOne(
+                    com.baomidou.mybatisplus.core.toolkit.Wrappers.<VideoTask>lambdaQuery()
+                            .eq(VideoTask::getUserId, request.userId())
+                            .eq(VideoTask::getRequestId, requestId)
+                            .last("limit 1"), false);
+            if (existing != null) {
+                return existing;
+            }
+        }
+
         // 业务 ID 在调用外部提供方之前生成：后续异步 Worker 即使尚未拿到 providerTaskId，
         // 也能立即对外返回稳定的任务标识。taskId 暂作为兼容别名，保持现有 UI/API 契约。
         String bizTaskId = "tsk_" + UUID.randomUUID().toString().replace("-", "");
@@ -96,9 +129,25 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setModel(effectiveModel);
         task.setOutputType(outputType.name());
         task.setApiKeyId(request.apiKeyId());
+        task.setRequestId(requestId);
         // 超时判定基准：本轮尝试起点（首次 = 创建时间）
         task.setLastAttemptAt(LocalDateTime.now());
+        // 冻结金额先快照到任务再落库（结算/解冻用快照，防管理员改价后金额漂移）
+        PricingService.Price freezePrice = pricingService.price(task);
+        BigDecimal freezeAmount = freezePrice.amount();
+        task.setFreezeAmount(freezeAmount);
+        task.setFreezeUnitPrice(freezePrice.unitPrice());
+        task.setFreezeCurrency(freezePrice.currency());
         videoTaskService.save(task);
+
+        // 预授权冻结（提交即占用额度）：余额不足 → 删除刚建的任务行并拒绝，不产生任务。
+        // 冻结幂等（biz_key=task:{id}），超时重试不重复冻结；成功结算/失败解冻在终态入口统一处理。
+        try {
+            walletService.freeze(request.userId(), freezeAmount, task.getId());
+        } catch (WalletServiceImpl.InsufficientBalanceException e) {
+            videoTaskService.removeById(task.getId());
+            throw e;
+        }
 
         GenerateCommand command = GenerateCommand.builder()
                 .mode(mode)
@@ -127,17 +176,15 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setProviderTaskId(submit.getProviderTaskId());
         task.setNodeId(submit.getNodeId());
         videoTaskService.updateById(task);
-        // 提交即计费仅对 ON_SUBMIT 提供方生效（如 Seedance），幂等。
-        // 原由控制器 AOP 切面触发，现收进共享提交路径——UI 与对外 API 两条入口都走这里，都会计费。
-        costRecordService.recordOnSubmit(task);
+        // 这里只完成冻结；用户消费记录和 SETTLE 必须等成功终态，不因提交成功而提前扣费。
         // 任务提交成功事件：异步提交
         applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
     }
 
     /**
-     * 超时自动重试：从已落库任务反推参数重新提交引擎（仅 ON_SUCCESS 计费引擎调用，
-     * 免费重跑不产生费用；ON_SUBMIT 引擎的决策树已排除，不会走到这里）。
+     * 超时自动重试：从已落库任务反推参数重新提交引擎。
+     * 同一任务沿用原冻结金额，自动重跑不重复冻结；最终只成功结算一次。
      * <p>
      * 并发安全：提交后 CAS 抢占 retry_count（{@code WHERE status='PROCESSING' AND retry_count=?}），
      * 多实例 Worker 竞争时只有一方回写成功，另一方返回 false 收工。

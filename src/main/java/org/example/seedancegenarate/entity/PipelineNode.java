@@ -28,6 +28,8 @@ public class PipelineNode {
     private String model;
     /** 最近一次运行的任务；终态事件回填反查键 */
     private String taskId;
+    /** 本次节点提交幂等键；重试/实例重启不能重复创建任务 */
+    private String submitRequestId;
     /** PENDING/PROCESSING/SUCCESS/FAILED */
     private String status;
     /** 终态回填的生成结果（本地转存地址；刷新后仍可预览） */

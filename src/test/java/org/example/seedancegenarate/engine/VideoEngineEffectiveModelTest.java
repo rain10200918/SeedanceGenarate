@@ -79,6 +79,13 @@ class VideoEngineEffectiveModelTest {
     }
 
     @Test
+    void userBillingDefaultsToSuccessWithoutEnablingTimeoutRetry() {
+        VideoEngine engine = stubEngine();
+        assertEquals(BillingTiming.ON_SUCCESS, engine.billingTiming());
+        org.junit.jupiter.api.Assertions.assertFalse(engine.timeoutRetrySupported());
+    }
+
+    @Test
     void defaultResolution_prefersExplicitTrimmedModel() {
         VideoEngine engine = stubEngine();
         assertEquals("minimax-h3", engine.effectiveModel(" minimax-h3 "));

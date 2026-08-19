@@ -1,12 +1,9 @@
 package org.example.seedancegenarate.engine;
 
 /**
- * 计费时机。由各 {@link VideoEngine} 声明，计费逻辑据此决定何时落账：
- * <ul>
- *   <li>{@link #ON_SUBMIT}：提交即计费。云端 API（Seedance）接受任务即消耗额度，无论后续成败。</li>
- *   <li>{@link #ON_SUCCESS}：成功才计费。自建 ComfyUI 仅在生成成功时向用户计费。</li>
- * </ul>
- * 新增提供方只需在自己的引擎里覆写 {@link VideoEngine#billingTiming()}，计费调用点零改动。
+ * 用户计费时机。当前所有提供方统一采用 {@link #ON_SUCCESS}：提交只冻结，成功结算，失败释放。
+ * {@link #ON_SUBMIT} 保留为兼容枚举值，但不应再用于用户消费账务。
+ * 新增提供方默认继承 {@link VideoEngine#billingTiming()}，无需自行决定用户扣费时机。
  */
 public enum BillingTiming {
     ON_SUBMIT,

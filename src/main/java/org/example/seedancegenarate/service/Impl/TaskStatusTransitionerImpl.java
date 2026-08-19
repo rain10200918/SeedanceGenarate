@@ -6,10 +6,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
+import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
+import org.example.seedancegenarate.service.WalletService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.util.Locale;
 
 /**
@@ -23,6 +26,8 @@ public class TaskStatusTransitionerImpl implements TaskStatusTransitioner {
 
     private final VideoTaskMapper videoTaskMapper;
     private final ApplicationEventPublisher eventPublisher;
+    private final WalletService walletService;
+    private final PricingService pricingService;
 
     @Override
     public boolean markFailed(Long videoTaskId, String message) {
@@ -64,6 +69,17 @@ public class TaskStatusTransitionerImpl implements TaskStatusTransitioner {
         }
         task.setStatus("FAILED");
         task.setErrorMsg(userMsg);
+        // 失败统一解冻（预授权退回）：提交时冻结的金额退还可用户。幂等（biz_key=task:{id}:release），
+        // 0 元任务自动跳过；金额用提交时快照（freeze_amount）；这里在 CAS 落 FAILED 成功后才执行。
+        try {
+            BigDecimal releaseAmount = task.getFreezeAmount() != null ? task.getFreezeAmount()
+                    : pricingService.price(task).amount();
+            walletService.release(task.getUserId(), releaseAmount, task.getId());
+        } catch (Exception e) {
+            // 失败状态已经落库；补偿扫描会按缺失 RELEASE 流水重放，不能吞掉账务错误。
+            log.warn("任务失败解冻暂未完成，等待账务补偿: taskId={}, err={}",
+                    task.businessTaskId(), e.getMessage());
+        }
         eventPublisher.publishEvent(new TaskStatusChangedEvent(
                 task.getUserId(),
                 new TaskStatusChangedEvent.Message(

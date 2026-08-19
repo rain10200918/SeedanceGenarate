@@ -1,0 +1,246 @@
+package org.example.seedancegenarate.service.Impl;
+
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import org.example.seedancegenarate.dto.WalletSpendingDailyRow;
+import org.example.seedancegenarate.dto.WalletSpendingModelRow;
+import org.example.seedancegenarate.dto.WalletSpendingSummary;
+import org.example.seedancegenarate.dto.WalletSpendingTotals;
+import org.example.seedancegenarate.dto.WalletSpendingView;
+import org.example.seedancegenarate.entity.BalanceTransaction;
+import org.example.seedancegenarate.entity.Wallet;
+import org.example.seedancegenarate.mapper.BalanceTransactionMapper;
+import org.example.seedancegenarate.mapper.WalletMapper;
+import org.example.seedancegenarate.service.WalletService;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+
+/**
+ * 钱包账务实现。核心不变量：
+ * <ol>
+ *   <li>入账/冻结/结算/解冻全部「先 INSERT 流水（撞唯一键 = 已处理，幂等跳过）→ 再 UPDATE wallet」同事务</li>
+ *   <li>并发正确性靠 DB 行锁 + CAS 条件更新（balance &gt;= X / frozen &gt;= X），余额不可能变负</li>
+ *   <li>流水 balance_after 在余额更新后回填，SUM(流水) 永远可与 wallet.balance 对账</li>
+ * </ol>
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class WalletServiceImpl implements WalletService {
+
+    private final WalletMapper walletMapper;
+    private final BalanceTransactionMapper balanceTransactionMapper;
+
+    @Override
+    @Transactional
+    public void credit(Long userId, BigDecimal amount, CreditContext ctx) {
+        if (amount == null || amount.signum() <= 0) {
+            throw new IllegalArgumentException("入账金额必须大于 0");
+        }
+        // ① 先插流水：biz_key 唯一约束挡住重复入账（撞键 = 已处理，静默返回，绝不双倍）
+        BalanceTransaction bt = new BalanceTransaction();
+        bt.setUserId(userId);
+        bt.setType(ctx.type());
+        bt.setAmount(amount);
+        bt.setBizKey(ctx.bizKey());
+        bt.setTaskId(ctx.taskId());
+        bt.setRefOrderNo(ctx.refOrderNo());
+        bt.setOperatorId(ctx.operatorId());
+        bt.setOperatorName(ctx.operatorName());
+        bt.setRemark(ctx.remark());
+        try {
+            balanceTransactionMapper.insert(bt);
+        } catch (DuplicateKeyException e) {
+            log.info("入账幂等跳过（biz_key 已存在）: userId={}, bizKey={}", userId, ctx.bizKey());
+            return;
+        }
+        // ② 懒建钱包 + 余额变更（同一事务）
+        walletMapper.insertIgnore(userId);
+        if (walletMapper.addBalance(userId, amount) != 1) {
+            throw new IllegalStateException("钱包不存在，入账失败");
+        }
+        // ③ 回填 balance_after/frozen_after，保证流水可对账
+        Wallet wallet = walletMapper.selectOne(Wrappers.<Wallet>lambdaQuery().eq(Wallet::getUserId, userId));
+        if (wallet == null) {
+            throw new IllegalStateException("钱包不存在，入账失败");
+        }
+        balanceTransactionMapper.updateBalanceAfter(bt.getId(), wallet.getBalance(), wallet.getFrozen());
+    }
+
+    @Override
+    @Transactional
+    public boolean freeze(Long userId, BigDecimal amount, Long taskId) {
+        if (amount == null || amount.signum() <= 0) {
+            return true; // 0 元任务跳过冻结
+        }
+        String bizKey = "task:" + taskId;
+        // 冻结只是 balance → frozen 的内部转移，不改变账户总资产；流水 amount 必须为 0，
+        // 否则 SUM(流水.amount) 与 wallet.balance + wallet.frozen 会凭空少一笔冻结额。
+        if (!insertLedger(userId, BalanceTransaction.TYPE_FREEZE, BigDecimal.ZERO, amount, bizKey, taskId)) {
+            return true; // 已冻结过（重复提交/重试），视为成功
+        }
+        walletMapper.insertIgnore(userId);
+        int rows = walletMapper.freeze(userId, amount);
+        if (rows == 0) {
+            // 余额不足：抛异常让事务整体回滚（流水一并回滚），调用方转「余额不足拒绝」
+            throw new InsufficientBalanceException();
+        }
+        fillBalanceAfter(walletMapper.selectOne(byUser(userId)), bizKey);
+        return true;
+    }
+
+    @Override
+    @Transactional
+    public void settle(Long userId, BigDecimal amount, Long taskId) {
+        if (amount == null || amount.signum() <= 0) {
+            return; // 0 元任务无冻结可结算
+        }
+        String bizKey = "task:" + taskId + ":settle";
+        if (!insertLedger(userId, BalanceTransaction.TYPE_SETTLE, amount.negate(), amount, bizKey, taskId)) {
+            return; // 已结算过，幂等跳过
+        }
+        int rows = walletMapper.settle(userId, amount);
+        if (rows != 1) {
+            // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
+            throw new IllegalStateException("钱包冻结余额不足，无法结算: userId=" + userId + ", taskId=" + taskId);
+        }
+        fillBalanceAfter(walletOf(userId), bizKey);
+    }
+
+    @Override
+    @Transactional
+    public void release(Long userId, BigDecimal amount, Long taskId) {
+        if (amount == null || amount.signum() <= 0) {
+            return; // 0 元任务无冻结可解
+        }
+        String bizKey = "task:" + taskId + ":release";
+        // 解冻也是 frozen → balance 的内部转移，不改变账户总资产；净额只记 0。
+        if (!insertLedger(userId, BalanceTransaction.TYPE_RELEASE, BigDecimal.ZERO, amount, bizKey, taskId)) {
+            return; // 已解冻过，幂等跳过
+        }
+        int rows = walletMapper.release(userId, amount);
+        if (rows != 1) {
+            // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
+            throw new IllegalStateException("钱包冻结余额不足，无法解冻: userId=" + userId + ", taskId=" + taskId);
+        }
+        fillBalanceAfter(walletOf(userId), bizKey);
+    }
+
+    @Override
+    public Wallet getWallet(Long userId) {
+        walletMapper.insertIgnore(userId);
+        return walletMapper.selectOne(byUser(userId));
+    }
+
+    @Override
+    public Page<BalanceTransaction> pageTransactions(Long userId, long current, long size, String type) {
+        long pageCurrent = Math.max(current, 1L);
+        long pageSize = Math.min(Math.max(size, 1L), 100L);
+        return balanceTransactionMapper.selectUserPage(
+                new Page<>(pageCurrent, pageSize), userId, type);
+    }
+
+    @Override
+    public WalletSpendingSummary spendingSummary(Long userId) {
+        LocalDateTime monthStart = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+        WalletSpendingTotals totals = walletMapper.selectSpendingTotals(userId, monthStart);
+        if (totals == null) {
+            totals = new WalletSpendingTotals();
+        }
+        List<WalletSpendingModelRow> modelRows = walletMapper.selectSpendingByModel(userId);
+        List<WalletSpendingDailyRow> dailyRows = walletMapper.selectSpendingByDay(
+                userId, LocalDate.now().minusDays(6).atStartOfDay());
+        return new WalletSpendingSummary(
+                decimalOrZero(totals.getTotalSpent()),
+                decimalOrZero(totals.getMonthSpent()),
+                longOrZero(totals.getTaskCount()),
+                longOrZero(totals.getSuccessCount()),
+                modelRows.stream()
+                        .map(row -> new WalletSpendingSummary.ModelSpending(
+                                row.getModel(), decimalOrZero(row.getAmount()), longOrZero(row.getTaskCount())))
+                        .toList(),
+                dailyRows.stream()
+                        .map(row -> new WalletSpendingSummary.DailySpending(
+                                row.getDate(), decimalOrZero(row.getAmount())))
+                        .toList());
+    }
+
+    @Override
+    public Page<WalletSpendingView> pageSpending(Long userId, long current, long size) {
+        long pageCurrent = Math.max(current, 1L);
+        long pageSize = Math.min(Math.max(size, 1L), 100L);
+        return balanceTransactionMapper.selectUserSpendingPage(
+                new Page<>(pageCurrent, pageSize), userId);
+    }
+
+    // ---------- 私有 ----------
+
+    /** 尝试插入流水：true=首次写入，false=biz_key 已存在（幂等跳过） */
+    private boolean insertLedger(Long userId, String type, BigDecimal amount,
+                                 BigDecimal holdAmount, String bizKey, Long taskId) {
+        BalanceTransaction bt = new BalanceTransaction();
+        bt.setUserId(userId);
+        bt.setType(type);
+        bt.setAmount(amount);
+        bt.setHoldAmount(holdAmount);
+        bt.setBizKey(bizKey);
+        bt.setTaskId(taskId);
+        try {
+            balanceTransactionMapper.insert(bt);
+            return true;
+        } catch (DuplicateKeyException e) {
+            log.info("流水幂等跳过（biz_key 已存在）: userId={}, bizKey={}", userId, bizKey);
+            return false;
+        }
+    }
+
+    private void fillBalanceAfter(Wallet wallet, String bizKey) {
+        if (wallet == null) {
+            throw new IllegalStateException("钱包不存在，无法回填流水快照");
+        }
+        BalanceTransaction bt = balanceTransactionMapper.selectOne(
+                Wrappers.<BalanceTransaction>lambdaQuery()
+                        .eq(BalanceTransaction::getBizKey, bizKey)
+                        .last("limit 1 for update"));
+        if (bt == null) {
+            throw new IllegalStateException("流水不存在，无法回填余额快照: " + bizKey);
+        }
+        if (balanceTransactionMapper.updateBalanceAfter(bt.getId(), wallet.getBalance(), wallet.getFrozen()) != 1) {
+            throw new IllegalStateException("流水余额快照回填失败: " + bizKey);
+        }
+    }
+
+    private Wallet walletOf(Long userId) {
+        walletMapper.insertIgnore(userId);
+        return walletMapper.selectOne(byUser(userId));
+    }
+
+    private com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Wallet> byUser(Long userId) {
+        return new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Wallet>()
+                .eq(Wallet::getUserId, userId);
+    }
+
+    private BigDecimal decimalOrZero(BigDecimal value) {
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private long longOrZero(Long value) {
+        return value == null ? 0L : value;
+    }
+
+    /** 余额不足：由事务回滚整个冻结操作（含已插流水），调用方捕获后转「余额不足拒绝」 */
+    public static class InsufficientBalanceException extends RuntimeException {
+        public InsufficientBalanceException() {
+            super("余额不足，请先充值");
+        }
+    }
+}

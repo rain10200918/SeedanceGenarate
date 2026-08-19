@@ -38,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.IntStream;
 
 
@@ -103,9 +104,22 @@ public class VideoController {
             @RequestParam(value = "videoUrls", required = false)
             List<String> videoUrls,
             @RequestParam(value = "audioUrls", required = false)
-            List<String> audioUrls
+            List<String> audioUrls,
+            @RequestParam(value = "requestId", required = false)
+            String formRequestId,
+            @RequestHeader(value = "Idempotency-Key", required = false)
+            String idempotencyKey
     ) throws Exception {
         Long userId = UserContext.requireUserId();
+        // Header 优先；multipart 表单字段是浏览器客户端的重试键；两者都没有才生成一次性键。
+        String requestId = StringUtils.hasText(idempotencyKey)
+                ? idempotencyKey.trim()
+                : (StringUtils.hasText(formRequestId) ? formRequestId.trim()
+                : "ui:" + UUID.randomUUID().toString().replace("-", ""));
+        VideoTask existing = videoSubmitService.findByRequestId(userId, requestId);
+        if (existing != null) {
+            return Result.success(existing);
+        }
         // 闸门在传图副作用之前（提交编排内会再校验一次）
         videoSubmitService.validate(provider, model);
         // 本地文件上传；历史 URL 白名单校验后按顺序归并（顺序 = <Picture N>）
@@ -123,7 +137,7 @@ public class VideoController {
         List<String> audioPaths = uploadRefFiles(audios, audioUrls, "音频");
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, provider, model, prompt, imagePaths, videoPaths, audioPaths,
-                duration, ratio, megapixels, null));
+                duration, ratio, megapixels, null, requestId));
         return Result.success(task);
     }
 
@@ -212,9 +226,19 @@ public class VideoController {
      */
     @PostMapping("/text2video")
     public Result<?> text2video(
-            @RequestBody TextToVideoRequest request
+            @RequestBody TextToVideoRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false)
+            String idempotencyKey
     ) throws Exception {
         Long userId = UserContext.requireUserId();
+        String requestId = StringUtils.hasText(idempotencyKey)
+                ? idempotencyKey.trim()
+                : (StringUtils.hasText(request.getRequestId()) ? request.getRequestId().trim()
+                : "ui:" + UUID.randomUUID().toString().replace("-", ""));
+        VideoTask existing = videoSubmitService.findByRequestId(userId, requestId);
+        if (existing != null) {
+            return Result.success(existing);
+        }
         String prompt = request.getPrompt() == null ? "" : request.getPrompt().trim();
         if (prompt.isEmpty()) {
             throw new RuntimeException("提示词不能为空");
@@ -225,7 +249,8 @@ public class VideoController {
                 : request.getRatio();
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, request.getProvider(), request.getModel(), prompt,
-                List.of(), List.of(), List.of(), duration, ratio, null, null));
+                List.of(), List.of(), List.of(), duration, ratio, null, null,
+                requestId));
         return Result.success(task);
     }
 

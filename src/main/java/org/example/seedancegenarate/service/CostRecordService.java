@@ -6,12 +6,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 
 public interface CostRecordService extends IService<CostRecord> {
     /**
-     * 提交时计费。仅对「提交即计费」的提供方（如 Seedance）生效；「成功才计费」的提供方在此为空操作。
-     */
-    void recordOnSubmit(VideoTask task);
-
-    /**
-     * 成功时计费。仅对「成功才计费」的提供方（如 ComfyUI）生效；其余提供方在此为空操作。幂等。
+     * 成功时统一落用户消费记录，金额使用任务提交时的 freeze_amount 快照；幂等。
      */
     void recordOnSuccess(VideoTask task);
 }

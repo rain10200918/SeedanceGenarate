@@ -24,10 +24,18 @@ public interface VideoEngine {
     RemoteStatus poll(VideoTask task) throws Exception;
 
     /**
-     * 计费时机。默认提交即计费（云端 API）；自建、按结果计费的提供方覆写为 {@link BillingTiming#ON_SUCCESS}。
+     * 用户计费时机。统一采用成功结算：提交只冻结用户额度，成功后才形成消费流水，失败释放冻结。
+     * 外部提供方自身的成本结算不属于本接口的用户账务；不要用它决定超时重试策略。
      */
     default BillingTiming billingTiming() {
-        return BillingTiming.ON_SUBMIT;
+        return BillingTiming.ON_SUCCESS;
+    }
+
+    /**
+     * 超时后是否允许框架免费重提交。与用户计费时机故意分离：成功才扣费不代表提供方一定支持自动重试。
+     */
+    default boolean timeoutRetrySupported() {
+        return false;
     }
 
     /** 该提供方对外可选的模型 / 能力清单，供 /options 接口下发前端。 */

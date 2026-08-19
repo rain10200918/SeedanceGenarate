@@ -72,6 +72,12 @@ public class ComfyUiEngine implements VideoEngine {
         return BillingTiming.ON_SUCCESS;
     }
 
+    /** 自建节点允许超时后免费重提交；用户计费仍由成功结算单独控制。 */
+    @Override
+    public boolean timeoutRetrySupported() {
+        return true;
+    }
+
     /** ComfyUI 支持 webhook 回调：事件驱动（epoll 式），轮询仅作对账兜底 */
     @Override
     public CompletionMechanism completionMechanism() {

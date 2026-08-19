@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.seedancegenarate.mapper.BalanceTransactionMapper">
+
+    <!-- 管理端流水分页：一次联查用户名称，避免 N+1 查询。分页由 MyBatis-Plus 拦截器处理。 -->
+    <select id="selectAdminPage"
+            resultType="org.example.seedancegenarate.dto.BalanceTransactionView">
+        SELECT
+            bt.id,
+            bt.user_id AS userId,
+            u.username AS username,
+            bt.type,
+            bt.amount,
+            bt.hold_amount AS holdAmount,
+            bt.balance_after AS balanceAfter,
+            bt.frozen_after AS frozenAfter,
+            bt.biz_key AS bizKey,
+            bt.task_id AS taskId,
+            bt.ref_order_no AS refOrderNo,
+            bt.operator_id AS operatorId,
+            bt.operator_name AS operatorName,
+            bt.coupon_id AS couponId,
+            bt.remark,
+            bt.create_time AS createTime
+        FROM balance_transaction bt
+        LEFT JOIN app_user u ON u.id = bt.user_id
+        <where>
+            <if test="userId != null">
+                AND bt.user_id = #{userId}
+            </if>
+            <if test="type != null and type != ''">
+                AND bt.type = #{type}
+            </if>
+        </where>
+        ORDER BY bt.create_time DESC, bt.id DESC
+    </select>
+
+    <!-- 用户自己的余额流水；userId 由服务端从 UserContext 传入，前端不能越权指定。 -->
+    <select id="selectUserPage"
+            resultType="org.example.seedancegenarate.entity.BalanceTransaction">
+        SELECT
+            bt.id,
+            bt.user_id AS userId,
+            bt.type,
+            bt.amount,
+            bt.hold_amount AS holdAmount,
+            bt.balance_after AS balanceAfter,
+            bt.frozen_after AS frozenAfter,
+            bt.biz_key AS bizKey,
+            bt.task_id AS taskId,
+            bt.ref_order_no AS refOrderNo,
+            bt.operator_id AS operatorId,
+            bt.operator_name AS operatorName,
+            bt.coupon_id AS couponId,
+            bt.remark,
+            bt.create_time AS createTime
+        FROM balance_transaction bt
+        WHERE bt.user_id = #{userId}
+        <if test="type != null and type != ''">
+            AND bt.type = #{type}
+        </if>
+        ORDER BY bt.create_time DESC, bt.id DESC
+    </select>
+
+    <!-- 用户自己的消费明细：账本 SETTLE + 任务信息，金额以账本为准。 -->
+    <select id="selectUserSpendingPage"
+            resultType="org.example.seedancegenarate.dto.WalletSpendingView">
+        SELECT
+            bt.id AS transactionId,
+            bt.task_id AS taskId,
+            v.biz_task_id AS taskBusinessId,
+            v.model,
+            v.provider,
+            v.duration,
+            v.status AS taskStatus,
+            bt.amount,
+            bt.balance_after AS balanceAfter,
+            bt.frozen_after AS frozenAfter,
+            bt.remark,
+            bt.create_time AS createTime
+        FROM balance_transaction bt
+        LEFT JOIN video_task v ON v.id = bt.task_id
+        WHERE bt.user_id = #{userId}
+          AND bt.type = 'SETTLE'
+        ORDER BY bt.create_time DESC, bt.id DESC
+    </select>
+
+</mapper>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.seedancegenarate.mapper.WalletMapper">
+
+    <select id="selectSpendingTotals"
+            resultType="org.example.seedancegenarate.dto.WalletSpendingTotals">
+        SELECT
+            COALESCE(SUM(ABS(bt.amount)), 0) AS totalSpent,
+            COALESCE(SUM(CASE WHEN bt.create_time &gt;= #{monthStart} THEN ABS(bt.amount) ELSE 0 END), 0) AS monthSpent,
+            COUNT(DISTINCT bt.task_id) AS taskCount,
+            COUNT(DISTINCT CASE WHEN v.status = 'SUCCESS' THEN bt.task_id END) AS successCount
+        FROM balance_transaction bt
+        LEFT JOIN video_task v ON v.id = bt.task_id
+        WHERE bt.user_id = #{userId}
+          AND bt.type = 'SETTLE'
+    </select>
+
+    <select id="selectSpendingByModel"
+            resultType="org.example.seedancegenarate.dto.WalletSpendingModelRow">
+        SELECT
+            COALESCE(v.model, '未知') AS model,
+            COALESCE(SUM(ABS(bt.amount)), 0) AS amount,
+            COUNT(DISTINCT bt.task_id) AS taskCount
+        FROM balance_transaction bt
+        LEFT JOIN video_task v ON v.id = bt.task_id
+        WHERE bt.user_id = #{userId}
+          AND bt.type = 'SETTLE'
+        GROUP BY COALESCE(v.model, '未知')
+        ORDER BY amount DESC
+    </select>
+
+    <select id="selectSpendingByDay"
+            resultType="org.example.seedancegenarate.dto.WalletSpendingDailyRow">
+        SELECT
+            DATE_FORMAT(bt.create_time, '%Y-%m-%d') AS date,
+            COALESCE(SUM(ABS(bt.amount)), 0) AS amount
+        FROM balance_transaction bt
+        WHERE bt.user_id = #{userId}
+          AND bt.type = 'SETTLE'
+          AND bt.create_time &gt;= #{startTime}
+        GROUP BY DATE_FORMAT(bt.create_time, '%Y-%m-%d')
+        ORDER BY date
+    </select>
+
+</mapper>

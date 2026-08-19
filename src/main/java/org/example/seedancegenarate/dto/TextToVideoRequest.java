@@ -27,4 +27,6 @@ public class TextToVideoRequest {
      * 模型 / 工作流标识（ComfyUI 必填，Seedance 可忽略）
      */
     private String model;
+    /** 可选幂等键；UI 重试同一请求时复用 */
+    private String requestId;
 }

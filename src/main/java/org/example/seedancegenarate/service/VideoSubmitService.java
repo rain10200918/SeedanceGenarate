@@ -15,10 +15,13 @@ public interface VideoSubmitService {
      */
     void validate(String provider, String model);
 
+    /** 查询当前用户指定幂等键对应的任务；用于在上传参考素材前短路重复 UI 请求。 */
+    VideoTask findByRequestId(Long userId, String requestId);
+
     /**
      * 完整提交编排：解析实际生效模型 → 开放闸门 → 生成业务 ID 并落库 PROCESSING
      * → 引擎提交 → 回写 providerTaskId/nodeId。
-     * 提交成功后立即计费（ON_SUBMIT 提供方，如 Seedance；幂等）。
+     * 提交时冻结额度；只有成功终态才结算并记录消费，失败/超时释放冻结；请求幂等键贯穿任务。
      */
     VideoTask submit(SubmitRequest request) throws Exception;
 
@@ -34,7 +37,15 @@ public interface VideoSubmitService {
             Integer duration,
             String ratio,
             Double megapixels,
-            Long apiKeyId
+            Long apiKeyId,
+            String requestId
     ) {
+        /** 兼容旧调用方：没有显式幂等键时由提交服务生成一次性键。 */
+        public SubmitRequest(Long userId, String provider, String model, String prompt,
+                             List<String> imageUrls, List<String> videoUrls, List<String> audioUrls,
+                             Integer duration, String ratio, Double megapixels, Long apiKeyId) {
+            this(userId, provider, model, prompt, imageUrls, videoUrls, audioUrls,
+                    duration, ratio, megapixels, apiKeyId, null);
+        }
     }
 }

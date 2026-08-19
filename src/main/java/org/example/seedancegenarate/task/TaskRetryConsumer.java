@@ -21,7 +21,7 @@ import java.util.List;
 
 /**
  * 超时自动重试消费：领取 TASK_RETRY 作业 → 从已落库任务反推参数重提交引擎
- * （仅 ON_SUCCESS 计费引擎入队，免费重跑）→ CAS 回写新 provider_task_id。
+ * （仅引擎声明支持时入队，免费重跑）→ CAS 回写新 provider_task_id。
  * <p>
  * 与 TASK_FINALIZE 同构：行级租约多实例竞争安全；失败退避重试，超限任务标 FAILED
  * （用户可重试）并产生告警指标；biz_key 幂等防重复入队。

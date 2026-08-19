@@ -23,8 +23,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.concurrent.Executor;
-
 import java.util.ArrayList;
+import java.util.UUID;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -186,9 +186,7 @@ public class PipelineServiceImpl implements PipelineService {
             }
             // 每个分镜节点入队持久化作业；biz_key 幂等，重复 run 会重置为 READY
             for (PipelineNode node : scenes) {
-                asyncJobService.enqueue("PIPELINE_NODE_SUBMIT",
-                        jobKey(pipelineId, node.getId()),
-                        "{\"pipelineNodeId\":" + node.getId() + "}");
+                enqueueNodeSubmit(node, true);
             }
             return pipeline;
         }
@@ -204,9 +202,28 @@ public class PipelineServiceImpl implements PipelineService {
         return pipeline;
     }
 
-    /** 节点提交作业的业务幂等键。 */
+    /** 节点提交作业的业务幂等键；同一次运行只入队一次，节点重试会生成新的 runId。 */
     public static String jobKey(Long pipelineId, Long nodeId) {
         return "pipeline:" + pipelineId + ":node:" + nodeId;
+    }
+
+    private void enqueueNodeSubmit(PipelineNode node, boolean newRun) {
+        String requestId = newRun || !StringUtils.hasText(node.getSubmitRequestId())
+                ? newSubmitRequestId(node.getId())
+                : node.getSubmitRequestId();
+        if (!requestId.equals(node.getSubmitRequestId())) {
+            PipelineNode update = new PipelineNode();
+            update.setId(node.getId());
+            update.setSubmitRequestId(requestId);
+            pipelineNodeMapper.updateById(update);
+            node.setSubmitRequestId(requestId);
+        }
+        asyncJobService.enqueue("PIPELINE_NODE_SUBMIT", jobKey(node.getPipelineId(), node.getId()),
+                "{\"pipelineNodeId\":" + node.getId() + "}");
+    }
+
+    private String newSubmitRequestId(Long nodeId) {
+        return "pipeline:" + nodeId + ":" + UUID.randomUUID().toString().replace("-", "");
     }
 
     @Override
@@ -232,9 +249,9 @@ public class PipelineServiceImpl implements PipelineService {
             }
             AsyncJob job = asyncJobService.find("PIPELINE_NODE_SUBMIT", jobKey(pipelineId, node.getId()));
             if (job == null) {
-                // 实例重启丢失了内存提交循环后，这里补插作业让 Worker 接管
-                asyncJobService.enqueue("PIPELINE_NODE_SUBMIT", jobKey(pipelineId, node.getId()),
-                        "{\"pipelineNodeId\":" + node.getId() + "}");
+                // 实例重启丢失了内存提交循环后，这里补插作业让 Worker 接管；
+                // 没有提交过的节点才生成一次新的请求键，避免恢复扫描改变在途重试的幂等语义。
+                enqueueNodeSubmit(node, false);
             }
         }
     }
@@ -279,6 +296,16 @@ public class PipelineServiceImpl implements PipelineService {
         if (pipelineNodeMapper.occupyForSubmit(nodeId) != 1) {
             throw new RuntimeException("该分镜正在生成中，请稍候");
         }
+        // 手动重试代表一次新的业务运行：旧失败任务的 requestId 不能继续复用，
+        // 否则统一提交链路会命中旧任务并阻止真正重试。
+        PipelineNode retryRequest = new PipelineNode();
+        retryRequest.setId(nodeId);
+        retryRequest.setSubmitRequestId(newSubmitRequestId(nodeId));
+        retryRequest.setTaskId(null);
+        pipelineNodeMapper.updateById(retryRequest);
+        node.setSubmitRequestId(retryRequest.getSubmitRequestId());
+        node.setTaskId(null);
+        node.setStatus("PROCESSING");
         try {
             submitNodeForJob(nodeId);
         } catch (Exception e) {
@@ -335,10 +362,19 @@ public class PipelineServiceImpl implements PipelineService {
         List<String> urls = resolveAssetUrls(pipeline.getUserId(), assetIds);
         // 分镜独立模型优先，空则跟随流水线模型（统一默认由 submit 链路解析）
         String effectiveModel = StringUtils.hasText(node.getModel()) ? node.getModel() : pipeline.getModel();
+        String requestId = StringUtils.hasText(node.getSubmitRequestId())
+                ? node.getSubmitRequestId()
+                : newSubmitRequestId(node.getId());
+        if (!StringUtils.hasText(node.getSubmitRequestId())) {
+            PipelineNode requestUpdate = new PipelineNode();
+            requestUpdate.setId(nodeId);
+            requestUpdate.setSubmitRequestId(requestId);
+            pipelineNodeMapper.updateById(requestUpdate);
+        }
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 pipeline.getUserId(), pipeline.getProvider(), effectiveModel,
                 node.getPrompt(), urls, List.of(), List.of(),
-                node.getDuration(), node.getRatio(), null, null));
+                node.getDuration(), node.getRatio(), null, null, requestId));
         PipelineNode update = new PipelineNode();
         update.setId(nodeId);
         update.setTaskId(task.businessTaskId());

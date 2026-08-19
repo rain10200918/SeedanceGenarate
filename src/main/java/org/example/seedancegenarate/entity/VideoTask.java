@@ -51,6 +51,11 @@ public class VideoTask {
     /** 轮询退避：下次可查询时间；NULL=立即可查（CALLBACK 机制引擎不更新） */
     private LocalDateTime nextPollAt;
     private BigDecimal costAmount;
+    /** 提交时冻结金额（预授权快照，V13 新增）：结算/解冻用它，不用实时价 */
+    private BigDecimal freezeAmount;
+    /** 提交时单价/币种快照（V15）；消费记录不得读取实时价格 */
+    private BigDecimal freezeUnitPrice;
+    private String freezeCurrency;
     /** 生成提供方 */
     private String provider;
     /** 处理该任务的 ComfyUI 节点 ID */
@@ -61,6 +66,8 @@ public class VideoTask {
     private LocalDateTime lastAttemptAt;
     /** 对外 API 来源判别列（api_key.id）；空 = UI 提交 */
     private Long apiKeyId;
+    /** 用户提交幂等键；V15 与 user_id 组成唯一键 */
+    private String requestId;
     /** 模型 / 工作流标识 */
     private String model;
     /** 产物类型（VIDEO / IMAGE），提交时按模型能力定死，是任务类型的权威输出维度 */
