@@ -25,9 +25,15 @@ public class ComfyUiClient {
     private final ObjectMapper objectMapper;
     private final ComfyUiProperties properties;
 
-    /** 下载字节（参考素材下载；nginx 入口同样要求 token） */
+    /** 下载字节（参考素材下载；nginx 入口同样要求 token）。
+     *  读超时是 SO_TIMEOUT（两次收包之间的静默上限），大文件只要在流动就不会误杀；
+     *  不设超时则对端挂起时线程无限阻塞。 */
     public byte[] downloadBytes(String url) {
-        return withAuth(HttpRequest.get(url)).execute().bodyBytes();
+        return withAuth(HttpRequest.get(url))
+                .setConnectionTimeout(properties.getConnectTimeoutMs())
+                .setReadTimeout(properties.getReadTimeoutMs())
+                .execute()
+                .bodyBytes();
     }
 
     /** 上传文件到 ComfyUI 的 input 目录，返回 LoadImage / LoadAudio / XB_VideoLoader 可用的文件名。

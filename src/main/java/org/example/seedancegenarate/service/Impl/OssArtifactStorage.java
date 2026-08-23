@@ -43,7 +43,7 @@ public class OssArtifactStorage implements ArtifactStorage {
         GeneratePresignedUrlRequest request = new GeneratePresignedUrlRequest(
                 ossConfig.getBucketName(), objectKey);
         request.setExpiration(expiration);
-        return ossClient.generatePresignedUrl(request).toString();
+        return ensureHttps(ossClient.generatePresignedUrl(request).toString());
     }
 
     @Override
@@ -56,7 +56,7 @@ public class OssArtifactStorage implements ArtifactStorage {
         ResponseHeaderOverrides headers = new ResponseHeaderOverrides();
         headers.setContentDisposition("attachment; filename=\"" + safeFileName(fileName) + "\"");
         request.setResponseHeaders(headers);
-        return ossClient.generatePresignedUrl(request).toString();
+        return ensureHttps(ossClient.generatePresignedUrl(request).toString());
     }
 
     @Override
@@ -66,5 +66,13 @@ public class OssArtifactStorage implements ArtifactStorage {
 
     private String safeFileName(String fileName) {
         return (fileName == null ? "artifact" : fileName).replaceAll("[\\\\\"\\r\\n]", "_");
+    }
+
+    /** 强制保证返回给前端/浏览器的链接走安全传输协议 HTTPS，避免线上 HTTPS 站点报 Mixed Content 被浏览器拦截 */
+    private String ensureHttps(String url) {
+        if (url == null || url.isBlank()) {
+            return "";
+        }
+        return url.replaceFirst("(?i)^http://", "https://");
     }
 }

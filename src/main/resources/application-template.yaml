@@ -78,6 +78,9 @@ seedance:
   api-key: ${SEEDANCE_API_KEY}
   model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
   url: ${SEEDANCE_URL:https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks}
+  # 方舟接口超时（元数据接口，秒回）；不设超时会在 Ark 挂起时焊死提交线程与轮询线程
+  connect-timeout-ms: ${SEEDANCE_CONNECT_TIMEOUT_MS:5000}
+  read-timeout-ms: ${SEEDANCE_READ_TIMEOUT_MS:30000}
   models:
     - id: seedance
       name: ${SEEDANCE_MODEL_1:doubao-seedance-2-0-260128}
@@ -244,7 +247,7 @@ mybatis-plus:
   type-aliases-package: org.example.seedancegenarate.entity
 aliyun:
   oss:
-    endpoint: ${ALIYUN_OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+    endpoint: ${ALIYUN_OSS_ENDPOINT:https://oss-cn-beijing.aliyuncs.com}
     access-key-id: ${ALIYUN_OSS_ACCESS_KEY_ID}
     access-key-secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
     bucket-name: ${ALIYUN_OSS_BUCKET_NAME}

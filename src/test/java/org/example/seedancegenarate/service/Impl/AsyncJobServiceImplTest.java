@@ -86,6 +86,31 @@ class AsyncJobServiceImplTest {
         assertNull(service.claim("PIPELINE_NODE_SUBMIT", "pipeline:1:node:2", 60));
     }
 
+    @Test
+    void enqueueDelayedPassesDelaySecondsAndNotifies() {
+        AsyncJobMapper mapper = mock(AsyncJobMapper.class);
+        JobAvailableNotifier notifier = mock(JobAvailableNotifier.class);
+        when(mapper.enqueueDelayed("ORDER_CLOSE", "order:ALP1", "{\"orderNo\":\"ALP1\"}", 5, 600)).thenReturn(1);
+        AsyncJobServiceImpl service = new AsyncJobServiceImpl(mapper, properties(), notifier);
+
+        service.enqueueDelayed("ORDER_CLOSE", "order:ALP1", "{\"orderNo\":\"ALP1\"}", 600);
+
+        verify(mapper).enqueueDelayed("ORDER_CLOSE", "order:ALP1", "{\"orderNo\":\"ALP1\"}", 5, 600);
+        verify(notifier).notify("ORDER_CLOSE");
+    }
+
+    @Test
+    void enqueueDelayedDoesNotNotifyWhenJobAlreadyActive() {
+        AsyncJobMapper mapper = mock(AsyncJobMapper.class);
+        JobAvailableNotifier notifier = mock(JobAvailableNotifier.class);
+        when(mapper.enqueueDelayed("ORDER_CLOSE", "order:ALP1", "{}", 5, 600)).thenReturn(0);
+        AsyncJobServiceImpl service = new AsyncJobServiceImpl(mapper, properties(), notifier);
+
+        service.enqueueDelayed("ORDER_CLOSE", "order:ALP1", "{}", 600);
+
+        org.mockito.Mockito.verifyNoInteractions(notifier);
+    }
+
     private AsyncJob candidate(Long id) {
         AsyncJob job = new AsyncJob();
         job.setId(id);

@@ -1,6 +1,7 @@
 package org.example.seedancegenarate.config;
 
 import lombok.RequiredArgsConstructor;
+import org.example.seedancegenarate.interceptor.AdminRoleInterceptor;
 import org.example.seedancegenarate.interceptor.ApiKeyInterceptor;
 import org.example.seedancegenarate.interceptor.ApiKeyRateLimitInterceptor;
 import org.example.seedancegenarate.interceptor.AuthInterceptor;
@@ -15,6 +16,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @RequiredArgsConstructor
 public class WebConfig implements WebMvcConfigurer {
     private final AuthInterceptor authInterceptor;
+    private final AdminRoleInterceptor adminRoleInterceptor;
     private final ApiKeyInterceptor apiKeyInterceptor;
     private final ApiKeyRateLimitInterceptor apiKeyRateLimitInterceptor;
     private final RateLimitInterceptor rateLimitInterceptor;
@@ -38,8 +40,17 @@ public class WebConfig implements WebMvcConfigurer {
                         "/api/auth/login",
                         "/api/auth/register",
                         "/api/v1/**",
-                        "/api/callback/**"
+                        "/api/callback/**",
+                        // 支付渠道回调：来源是支付宝服务器，没有登录 token，靠 RSA2 验签鉴权
+                        "/api/notify/**"
                 );
+
+        // 管理接口角色强制：必须注册在 authInterceptor 之后（按注册顺序执行，UserContext 已填充）。
+        // 保护清单唯一来源是 AdminPaths，架构测试用同一常量校验覆盖完整性。
+        registry.addInterceptor(adminRoleInterceptor)
+                .addPathPatterns(AdminPaths.PROTECTED_PREFIXES.stream()
+                        .map(prefix -> prefix + "/**")
+                        .toList());
 
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns(

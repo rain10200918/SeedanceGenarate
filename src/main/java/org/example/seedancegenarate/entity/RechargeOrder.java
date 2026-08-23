@@ -19,6 +19,7 @@ import java.time.LocalDateTime;
 public class RechargeOrder {
     public static final String CHANNEL_ADMIN = "admin";
     public static final String CHANNEL_ALIPAY = "alipay";
+    public static final String CHANNEL_WECHAT = "wechat";
 
     public static final String STATUS_PENDING = "PENDING";
     public static final String STATUS_SUCCESS = "SUCCESS";
@@ -39,6 +40,8 @@ public class RechargeOrder {
     private String operatorName;
     private String reason;
     private LocalDateTime paidAt;
+    /** 超时未支付自动关闭时间（PENDING→CLOSED 时写入） */
+    private LocalDateTime closeTime;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)

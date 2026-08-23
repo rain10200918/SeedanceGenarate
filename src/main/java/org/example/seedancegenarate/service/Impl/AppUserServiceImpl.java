@@ -24,6 +24,7 @@ public class AppUserServiceImpl extends ServiceImpl<AppUserMapper, AppUser> impl
     private final UserTokenService userTokenService;
     private final UserActivityService userActivityService;
     private final InviteCodeService inviteCodeService;
+    private final org.example.seedancegenarate.mapper.WalletMapper walletMapper;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     @Override
@@ -43,6 +44,7 @@ public class AppUserServiceImpl extends ServiceImpl<AppUserMapper, AppUser> impl
         user.setRole("USER");
         user.setTotalCost(BigDecimal.ZERO);
         this.save(user);
+        walletMapper.insertIgnore(user.getId());
         inviteCodeService.consume(inviteCode, user.getId());
         userActivityService.recordRegister(user, request);
         return buildAuthResponse(user);

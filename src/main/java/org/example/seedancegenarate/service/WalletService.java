@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.example.seedancegenarate.dto.WalletSpendingSummary;
 import org.example.seedancegenarate.dto.WalletSpendingView;
 import org.example.seedancegenarate.entity.BalanceTransaction;
+import org.example.seedancegenarate.entity.RechargeOrder;
 import org.example.seedancegenarate.entity.Wallet;
 
 import java.math.BigDecimal;
@@ -41,6 +42,9 @@ public interface WalletService {
 
     /** 用户消费明细：只查询当前用户 SETTLE 流水，分页 */
     Page<WalletSpendingView> pageSpending(Long userId, long current, long size);
+
+    /** 用户充值订单（含超时关闭状态）分页，按创建时间倒序 */
+    Page<RechargeOrder> pageRechargeOrders(Long userId, long current, long size);
 
     /** 流水入账上下文 */
     record CreditContext(String type, String bizKey, Long taskId,

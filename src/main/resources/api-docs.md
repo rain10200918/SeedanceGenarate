@@ -1,45 +1,46 @@
 # 视频生成 API 接入文档
 
-> 通过 API Key 调用本服务的视频 / 图片生成能力。生成是**异步**的:提交后立即返回 `task_id`,
+> 通过 API Key 调用本服务的视频 / 图片生成能力。生成是**异步**的：提交后立即返回 `taskId`，
 > 之后轮询状态或配置 webhook 接收完成回调。
 
 ## 1. 获取 API Key
 
-向平台管理员申请。创建后**明文只展示一次**,请立即保存:
+在平台控制台或向管理员申请。创建后**明文只展示一次**，请立即妥善保存：
 
 ```
 sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-调用时放入请求头:
+调用时放入 HTTP 请求头：
 
 ```
 Authorization: Bearer sk-xxxxxxxx...
 ```
 
-> Key 可被管理员随时撤销;撤销后立即失效。Key 绑定一个属主账号,产生的任务与费用都记在该账号名下。
+> Key 可被管理员随时撤销；撤销后立即失效。Key 绑定一个属主账号，产生的任务与费用都记在该账号名下。
 
 ## 2. Base URL 与约定
 
 ```
-http://123.58.111.244:9090/api/v1
+https://api-generate.creator.ascent-ai.cn/api/v1
 ```
 
-- 所有接口均需携带 `Authorization: Bearer <key>` 头;
-- 请求与响应均为 `application/json`(下载接口除外);
-- 失败统一返回错误结构(见 §7);
-- 提交类接口有**按钥匙限流**(默认 10 次/分钟,突发 5),超限返回 `429` 并带 `Retry-After` 响应头。
+- 所有接口均需携带 `Authorization: Bearer <key>` 头；
+- 请求与响应均为 `application/json`（下载接口除外）；
+- 失败统一返回标准错误结构（见 §7）；
+- 提交类接口有**按钥匙限流**（默认 10 次/分钟，突发 5），超限返回 `429` 并带 `Retry-After` 响应头；
+- 全链路支持标准 HTTPS 安全传输。
 
 ## 3. 接口一览
 
-| 方法 | 路径                       | 说明 |
-|---|----------------------------|---|
-| POST | `/videos`                  | 提交生成任务(异步,202) |
-| GET | `/videos/{taskId}`         | 查询任务状态 |
-| GET | `/videos`                  | 任务列表(分页) |
-| GET | `/videos/{taskId}/content` | 下载产物 |
-| GET | `/models`                  | 查询可用模型清单 |
-| GET | `/videos/docs`             | 本文档(原始 Markdown) |
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/videos` | 提交生成任务（异步处理，返回 202 Accepted） |
+| GET | `/videos/{taskId}` | 查询任务状态与产物 URL |
+| GET | `/videos` | 任务列表（支持分页查询） |
+| GET | `/videos/{taskId}/content` | 下载生成的视频/图片产物（重定向至安全签名下载 URL） |
+| GET | `/models` | 查询当前开放可用的模型清单与参数能力 |
+| GET | `/videos/docs` | 本文档（原始 Markdown 格式） |
 
 ## 4. 提交生成任务
 
@@ -47,64 +48,82 @@ http://123.58.111.244:9090/api/v1
 POST /api/v1/videos
 ```
 
-### 请求体
+### 请求体参数
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `prompt` | string | ✅ | 提示词,描述画面/镜头/风格 |
-| `model` | string | ✅ | 模型标识(全局 id,见 §6 `GET /models`) |
-| `images` | string[] | 图生模型必填 | 参考图 URL 列表,后端下载转存 |
-| `duration` | int | 视频模型 | 时长(秒),不传默认 8 |
-| `ratio` | string | 否 | 画面比例,如 `16:9`、`9:16`、`1:1`,不传默认 `16:9` |
-| `megapixels` | number | 否 | 分辨率档位(仅支持该能力的模型) |
+| `prompt` | string | ✅ | 提示词，描述画面、镜头运动、光影风格 |
+| `model` | string | ✅ | 模型标识（见 §6 `GET /models`，如 `minimax-h3-fl2va-hd`） |
+| `mode` | string | 否 | 生成模式：`t2v`(文生视频)、`i2v`(图生视频)、`fl2va`(首尾帧生视频)、`t2i`(文生图)、`i2i`(图像编辑) |
+| `images` | string[] | 图生必填 | 参考图 URL 列表（`fl2va` 模式传 2 张：第 1 张首帧，第 2 张尾帧） |
+| `duration` | int | 视频模型 | 时长（秒），支持 5-15 秒（如 6, 8, 10 等），默认 6 或 8 |
+| `ratio` | string | 否 | 画面比例，如 `16:9`、`9:16`、`1:1`、`4:3`、`3:4`，默认 `16:9` |
+| `megapixels` | number | 否 | 清晰度像素档位（如高清模型支持 `0.3` ~ `0.5`） |
 
 ### 请求头
 
-| 头 | 必填 | 说明 |
+| 头字段 | 必填 | 说明 |
 |---|---|---|
-| `Authorization` | ✅ | `Bearer sk-...` |
+| `Authorization` | ✅ | `Bearer sk-xxxxxxxx...` |
 | `Content-Type` | ✅ | `application/json` |
-| `Idempotency-Key` | 推荐 | 幂等键(见 §5):同一键重复提交只生成一次 |
+| `Idempotency-Key` | 推荐 | 客户端全局唯一幂等键（UUID），防网络抖动重复扣费 |
 
-### 示例
+### 示例 1：文生视频 / 图生视频高清版
 
 ```bash
-curl -X POST https://123.58.111.244:9090/api/v1/videos \
-  -H "Authorization: Bearer sk-xxx" \
+curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/videos \
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: my-unique-key-001" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{
-    "prompt": "一只橘猫在窗台晒太阳,镜头缓慢推近,电影感",
-    "model": "seedance-fast",
-    "duration": 5,
-    "ratio": "16:9"
+    "prompt": "赛博朋克雨夜街道，霓虹灯倒影在积水路面，镜头电影感缓慢推近，4K 超清",
+    "model": "minimax-h3-t2v-hd",
+    "duration": 6,
+    "ratio": "16:9",
+    "megapixels": 0.4
   }'
 ```
 
-### 响应(202 Accepted)
+### 示例 2：首尾帧高清视频生成（`minimax-h3-fl2va-hd`）
+
+```bash
+curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/videos \
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "prompt": "蜘蛛侠从大楼顶端纵身跃下，穿梭在城市高楼之间",
+    "model": "minimax-h3-fl2va-hd",
+    "mode": "fl2va",
+    "images": [
+      "https://your-domain.com/first-frame.jpg",
+      "https://your-domain.com/last-frame.jpg"
+    ],
+    "duration": 6,
+    "ratio": "16:9",
+    "megapixels": 0.3
+  }'
+```
+
+### 响应（202 Accepted）
 
 ```json
 {
-  "taskId": "cgt-20260806110000-xxxxx",
+  "taskId": "tsk_4cbf4eaa9899469592737c2e148702f3",
   "status": "PROCESSING",
-  "requestId": "req_xxxxxxxx"
+  "requestId": "req_19356f622d00495bace8e116d8f94852"
 }
 ```
 
-`requestId` 与请求追踪号一致,报障时提供它可查全链路。
+## 5. 幂等控制（Idempotency）
 
-## 5. 幂等(重要)
-
-提交请求携带 `Idempotency-Key` 头(自定义字符串):
-
-- 同一 Key **重复提交 → 返回同一个 `taskId`**,不会重复生成、不会重复计费;
-- 用于「网络超时后重试」场景,防止双倍扣费;
-- Key 建议 8-64 位字母数字,全局唯一(可用 UUID);
-- 不带该头也能提交,但无法防重。
+提交请求携带 `Idempotency-Key` 请求头（推荐使用标准 UUID）：
+- 同一 Key **在网络超时重试时返回同一个 `taskId`**，不会重复扣费，不会重复创建 GPU 任务；
+- 建议 Key 长度 16~64 位字符。
 
 ## 6. 查询与下载
 
-### 查询状态
+### 查询任务状态
 
 ```
 GET /api/v1/videos/{taskId}
@@ -112,18 +131,19 @@ GET /api/v1/videos/{taskId}
 
 ```json
 {
-  "taskId": "cgt-...",
-  "status": "PROCESSING",
-  "model": "seedance-fast",
-  "costAmount": 9.60,
-  "videoUrl": "data/videos/xxx.mp4",
+  "taskId": "tsk_4cbf4eaa9899469592737c2e148702f3",
+  "status": "SUCCESS",
+  "model": "minimax-h3-t2v-hd",
+  "costAmount": 1.80,
+  "videoUrl": "https://hszs-generate-api.oss-cn-beijing.aliyuncs.com/outputs/tsk_xxx/result.mp4?Expires=...",
   "errorMsg": null
 }
 ```
 
-`status` 取值:`PROCESSING`(生成中)/ `SUCCESS`(完成,`videoUrl` 为后端本地路径)/ `FAILED`(失败,`errorMsg` 为原因)。
-
-> `videoUrl` 是后端内部路径,**不要直接使用**;产物一律通过下载接口获取。
+- `status` 取值：
+  - `PROCESSING`：排队或 GPU 渲染中；
+  - `SUCCESS`：生成成功，`videoUrl` 返回安全签名的 HTTPS 访问链接；
+  - `FAILED`：生成失败，`errorMsg` 为具体错误原因。
 
 ### 下载产物
 
@@ -131,53 +151,30 @@ GET /api/v1/videos/{taskId}
 GET /api/v1/videos/{taskId}/content
 ```
 
-返回文件流(视频 `video/mp4` 或图片 `image/png` 等,按实际类型),凭同一钥匙鉴权:
+自动重定向并下载生成的视频（`video/mp4`）或图片（`image/png`）文件：
 
 ```bash
-curl -s -o result.mp4 https://123.58.111.244:9090/api/v1/videos/{taskId}/content \
-  -H "Authorization: Bearer sk-xxx"
+curl -L -s -o result.mp4 https://api-generate.creator.ascent-ai.cn/api/v1/videos/{taskId}/content \
+  -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
-### 任务列表
-
-```
-GET /api/v1/videos?current=1&size=10
-```
-
-返回该钥匙的分页任务(按创建时间倒序)。
-
-### 模型清单(建议集成时先查一次)
+### 可用模型清单
 
 ```
 GET /api/v1/models
 ```
 
-```json
-[
-  {
-    "model": "seedance-fast",
-    "label": "Seedance 2.0 Fast",
-    "provider": "seedance",
-    "outputType": "VIDEO",
-    "needImages": false,
-    "imageMin": 0,
-    "imageMax": 9,
-    "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4"],
-    "durations": [5, 8, 10, 15],
-    "megapixels": [],
-    "open": true
-  }
-]
-```
+支持的模型矩阵概览：
+- **`minimax-h3-fl2va-hd`**：MiniMax H3 首尾帧生视频高清版（支持 5-15s、清晰度 0.3-0.5）
+- **`minimax-h3-t2v-hd`**：MiniMax H3 文生视频高清版（支持 5-15s、清晰度 0.3-0.5）
+- **`minimax-h3-hd`**：MiniMax H3 图生视频高清版（支持 5-15s、清晰度 0.3-0.5）
+- **`minimax-h3-4step`**：MiniMax H3 极速 4-Step 视频生成
+- **`z-image-turbo`**：Z-Image Turbo 极速文生图
+- **`qwen-image-edit`**：千问图像编辑与精准图生图
 
-- `open:false` 的模型不可提交(平台未开放);
-- `needImages` 为 true 的模型提交时必须带 `images`;
-- `outputType`:`VIDEO` / `IMAGE`,决定产物类型与下载接口返回的文件类型;
-- `durations`/`ratios`/`megapixels` 为空数组表示该模型不支持该参数。
+## 7. 错误响应码
 
-## 7. 错误码
-
-失败统一返回:
+发生错误时统一返回标准结构：
 
 ```json
 {
@@ -189,25 +186,23 @@ GET /api/v1/models
 }
 ```
 
-| HTTP | code | 说明 | 可重试 |
+| HTTP 状态码 | Error Code | 含义与排查说明 | 是否可重试 |
 |---|---|---|---|
-| 400 | `VALIDATION_ERROR` | 参数缺失/非法(如 prompt 为空、参考图下载失败) | ❌ |
-| 400 | `MODEL_NOT_FOUND` | 模型不存在 | ❌ |
-| 400 | `RATIO_NOT_SUPPORTED` / `IMAGE_COUNT_INVALID` | 比例/图片数不符合模型能力 | ❌ |
-| 401 | `INVALID_API_KEY` | Key 无效 | ❌ |
-| 403 | `API_KEY_DISABLED` / `API_KEY_EXPIRED` | Key 被撤销 / 已过期 | ❌ |
-| 403 | `MODEL_NOT_OPEN` | 模型未开放 | ❌ |
-| 404 | `TASK_NOT_FOUND` | 任务不存在(或不属于该钥匙) | ❌ |
-| 409 | `REQUEST_IN_PROGRESS` | 同一幂等键的请求处理中,稍后查询 | ✅ |
-| 429 | `RATE_LIMITED` | 触发限流,按 `Retry-After` 头等待 | ✅ 等 Retry-After |
-| 503 | `PROVIDER_UNAVAILABLE` | 生成提供方暂时不可用(如节点繁忙) | ✅ |
-| 500 | `INTERNAL_ERROR` | 服务内部错误 | ✅ |
+| 400 | `VALIDATION_ERROR` | 参数缺失或非法（如提示词为空、时长超出范围） | ❌ 修改参数后重试 |
+| 400 | `MODEL_NOT_FOUND` | 模型标识不存在 | ❌ |
+| 401 | `INVALID_API_KEY` | API Key 不存在或格式错误 | ❌ |
+| 403 | `API_KEY_DISABLED` | API Key 已被禁用或欠费 | ❌ |
+| 403 | `API_KEY_EXPIRED` | API Key 已过有效期 | ❌ |
+| 403 | `MODEL_NOT_OPEN` | 该模型当前未对您的账号开放 | ❌ |
+| 404 | `TASK_NOT_FOUND` | 任务编号不存在或不属于该 API Key | ❌ |
+| 402 | `INSUFFICIENT_BALANCE` | 账号可用余额不足，请先充值 | ❌ 充值后重试 |
+| 429 | `RATE_LIMITED` | 触发并发或速率限制，请参考 `Retry-After` 头 | ✅ 延迟重试 |
+| 503 | `PROVIDER_UNAVAILABLE` | GPU 节点全忙或渲染集群临时维护 | ✅ 指数退避重试 |
+| 500 | `INTERNAL_ERROR` | 服务器内部未知异常 | ✅ 带幂等键重试 |
 
-**重试建议**:5xx / 429 可安全重试(配合幂等键);4xx 修改参数后再试,重试无意义。
+## 8. Webhook 异步回调通知
 
-## 8. Webhook 回调(可选)
-
-创建 Key 时配置 `callbackUrl`,任务到达终态时平台主动 POST:
+如果您在平台配置了 `callbackUrl`，任务完成时系统会自动向您的服务器发送 POST 通知：
 
 ```
 POST {callbackUrl}
@@ -215,77 +210,69 @@ Content-Type: application/json
 X-Signature: <HMAC-SHA256 十六进制签名>
 ```
 
-Payload:
+回调数据示例：
 
 ```json
 {
-  "task_id": "cgt-...",
+  "task_id": "tsk_4cbf4eaa9899469592737c2e148702f3",
   "status": "SUCCESS",
   "output_type": "VIDEO",
-  "video_url": "data/videos/xxx.mp4",
+  "video_url": "https://hszs-generate-api.oss-cn-beijing.aliyuncs.com/outputs/...",
   "error": null,
-  "cost_amount": 9.60
+  "cost_amount": 1.80
 }
 ```
 
-### 验签
-
-`X-Signature = HMAC-SHA256(webhookSecret, 原始请求体)`,hex 小写编码。`webhookSecret` 在创建 Key 时由平台生成(可在管理页查看 Key 详情后向管理员索取,或后续支持自管)。
-
-Python 验签示例:
+### 签名校验算法（Python 示例）
 
 ```python
-import hmac, hashlib, requests
+import hmac, hashlib, json
 
-payload = requests.request("POST", ...)  # 你的回调入口收到的原始 body 字符串
-expected = hmac.new(webhook_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-assert hmac.compare_digest(payload.headers["X-Signature"], expected)
+def verify_signature(secret: str, raw_body: str, signature: str) -> bool:
+    expected = hmac.new(secret.encode('utf-8'), raw_body.encode('utf-8'), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
 ```
 
-### 投递策略
+## 9. 完整快速接入示例（Python）
 
-- 同一任务同一终态**只投递一次**(幂等);
-- 失败按 30s → 2m → 10m 退避重试,**最多 3 次**;
-- 收到回调后,凭 `task_id` 调下载接口取产物;
-- 建议回调接口:先验签 → 立即返回 2xx → 异步处理(避免超时重试)。
+```python
+import requests
+import time
+import uuid
 
-## 9. 完整调用示例(提交 → 轮询 → 下载)
+BASE_URL = "https://api-generate.creator.ascent-ai.cn/api/v1"
+API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 
-```bash
-KEY="sk-xxx"
+headers = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json",
+    "Idempotency-Key": str(uuid.uuid4())
+}
 
-# 1. 提交
-TASK=$(curl -s -X POST https://123.58.111.244:9090/api/v1/videos \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"prompt":"一只橘猫","model":"seedance-fast","duration":5}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["taskId"])')
+# 1. 提交生成任务
+payload = {
+    "prompt": "赛博朋克跑车在雨夜街道疾驰，车尾霓虹流光，电影画质",
+    "model": "minimax-h3-t2v-hd",
+    "duration": 6,
+    "ratio": "16:9",
+    "megapixels": 0.4
+}
 
-# 2. 轮询直到终态
-for i in $(seq 1 60); do
-  STATUS=$(curl -s https://123.58.111.244:9090/api/v1/videos/$TASK -H "Authorization: Bearer $KEY" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
-  echo "第 ${i} 次: $STATUS"
-  [ "$STATUS" = "SUCCESS" ] && break
-  [ "$STATUS" = "FAILED" ] && break
-  sleep 5
-done
+resp = requests.post(f"{BASE_URL}/videos", headers=headers, json=payload)
+data = resp.json()
+task_id = data["taskId"]
+print(f"任务已提交，任务 ID: {task_id}")
 
-# 3. 下载
-curl -s -o result.mp4 https://your-host:8080/api/v1/videos/$TASK/content -H "Authorization: Bearer $KEY"
+# 2. 轮询任务状态
+while True:
+    status_resp = requests.get(f"{BASE_URL}/videos/{task_id}", headers=headers).json()
+    status = status_resp["status"]
+    print(f"当前任务状态: {status}")
+    if status == "SUCCESS":
+        print(f"生成成功！视频下载链接: {status_resp['videoUrl']}")
+        break
+    elif status == "FAILED":
+        print(f"生成失败: {status_resp.get('errorMsg')}")
+        break
+    time.sleep(5)
 ```
-
-## 10. 计费
-
-- 按模型定价:云端模型按生成时长计费(秒),自建节点按次计费;
-- 费用记在 Key 属主账号名下,可向管理员查询对账;
-- **被拒请求(4xx)与限流(429)不计费**;提交成功即按对应模型规则计费(生成失败会退款/不扣费,具体以平台规则为准)。
-
-## 11. 常见问题
-
-| 问题 | 解答 |
-|---|---|
-| 提交返回 403 MODEL_NOT_OPEN | 该模型未对平台开放,换 `GET /models` 里 `open:true` 的模型 |
-| 轮询一直是 PROCESSING | 生成通常需要 30 秒 ~ 数分钟(视频),耐心轮询或等 webhook |
-| 下载返回 400「任务尚无产物」 | 任务还未到 SUCCESS,先查状态 |
-| 提交偶发 503 | 提供方繁忙,带幂等键重试 |
-| 换环境后 Key 失效 | Key 绑定属主与创建环境,向管理员重新申请 |

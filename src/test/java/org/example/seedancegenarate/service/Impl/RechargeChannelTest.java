@@ -7,7 +7,6 @@ import org.example.seedancegenarate.service.RechargeChannelRegistry;
 import org.example.seedancegenarate.service.RechargeChannelAdapter;
 import org.example.seedancegenarate.service.WalletService;
 import org.junit.jupiter.api.Test;
-import org.springframework.dao.DuplicateKeyException;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -62,6 +61,6 @@ class RechargeChannelTest {
 
         assertSame(admin, registry.get("admin"));
         assertSame(wechat, registry.get("wechat"));
-        assertThrows(IllegalArgumentException.class, () -> registry.get("alipay"));
+        assertThrows(IllegalArgumentException.class, () -> registry.get("unknown_channel"));
     }
 }

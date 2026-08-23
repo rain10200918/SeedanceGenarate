@@ -23,6 +23,15 @@ public class SeedanceConfig {
      */
     private String url;
     /**
+     * 连接超时（毫秒）。方舟创建/查询任务都是元数据接口，正常秒回；
+     * 不设超时 = HttpURLConnection 无限等待，Ark 挂起时会焊死提交线程和轮询线程。
+     */
+    private int connectTimeoutMs = 5000;
+    /**
+     * 读取超时（毫秒）。创建任务是异步接口（立即返回 task id），30s 已极宽裕。
+     */
+    private int readTimeoutMs = 30000;
+    /**
      * 多模型模式：配置后前端可选多个 Seedance 模型。
      * <ul>
      *   <li>{@code id}：注册标识（/options 下发、模型开放闸门的 key，如 "seedance" / "seedance-fast"）</li>

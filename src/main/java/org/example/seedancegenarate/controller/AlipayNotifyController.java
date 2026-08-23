@@ -12,6 +12,7 @@ import org.example.seedancegenarate.service.WalletService;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.annotation.PostConstruct;
@@ -80,6 +81,17 @@ public class AlipayNotifyController {
                 return "failure";
             }
 
+            // 1.5 校验 app_id（官方必做校验：防跨应用重放——同一对密钥被复用在多个应用
+            // （沙箱/生产混用、证书误配）时，别家应用签名合法的通知也能过验签）。
+            // 必须在任何 DB 读写之前拒绝；配置为空跳过，不误伤未配置环境（锚 A9 拍板）。
+            String expectedAppId = alipayProperties.getAppId();
+            if (expectedAppId != null && !expectedAppId.isBlank()
+                    && !expectedAppId.equals(params.get("app_id"))) {
+                log.error("支付宝回调 app_id 不匹配: expected={}, actual={}, outTradeNo={}",
+                    expectedAppId, params.get("app_id"), params.get("out_trade_no"));
+                return "failure";
+            }
+
             // 2. 提取关键参数
             String outTradeNo = params.get("out_trade_no");   // 商户订单号
             String tradeNo = params.get("trade_no");          // 支付宝交易号
@@ -115,8 +127,9 @@ public class AlipayNotifyController {
                 return "success";
             }
 
-            // 6. 状态检查（只有 PENDING 才能转 SUCCESS）
-            if (!RechargeOrder.STATUS_PENDING.equals(order.getStatus())) {
+            // 6. 状态检查（PENDING 正常入账；CLOSED 是「超时关单后用户仍付款」的兜底，必须入账，钱不能丢）
+            if (!RechargeOrder.STATUS_PENDING.equals(order.getStatus())
+                    && !RechargeOrder.STATUS_CLOSED.equals(order.getStatus())) {
                 log.error("支付宝回调订单状态异常: outTradeNo={}, status={}",
                     outTradeNo, order.getStatus());
                 return "failure";
@@ -140,15 +153,25 @@ public class AlipayNotifyController {
             }
 
         } catch (Exception e) {
+            // 事务内异常必须回滚：返回 failure 让支付宝重试，重试时完整重放
+            // （credit 幂等跳过已入账、订单状态成功置 SUCCESS），杜绝「钱到账但订单不 SUCCESS」的半提交。
             log.error("处理支付宝回调异常", e);
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
             return "failure";
         }
     }
 
     /**
-     * 处理支付成功：入账 + 更新订单
+     * 处理支付成功：入账 + 更新订单。
+     * 入账幂等（credit bizKey=orderNo）防重复回调双入账；并发回调先过 SUCCESS 幂等检查，
+     * 后到者 credit 撞唯一键跳过——订单状态 updateById 重复置 SUCCESS 无害。
      */
     private void processSuccessPayment(RechargeOrder order, String tradeNo) {
+        if (RechargeOrder.STATUS_CLOSED.equals(order.getStatus())) {
+            // 关单（超时）后用户仍完成付款：订单已 CLOSED，但钱必须到账
+            log.warn("关单后用户仍完成付款，兜底入账: outTradeNo={}, tradeNo={}",
+                order.getOrderNo(), tradeNo);
+        }
         // 1. 调用钱包服务入账
         walletService.credit(
             order.getUserId(),
@@ -193,16 +216,20 @@ public class AlipayNotifyController {
     }
 
     /**
-     * 加载密钥文件内容
+     * 加载密钥文件内容并规整格式
      */
     private String loadKeyContent(String path) throws IOException {
         try {
+            String raw;
             if (path.startsWith("classpath:")) {
                 Resource resource = resourceLoader.getResource(path);
-                return new String(Files.readAllBytes(Paths.get(resource.getURI())));
+                try (java.io.InputStream is = resource.getInputStream()) {
+                    raw = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                }
             } else {
-                return new String(Files.readAllBytes(Paths.get(path)));
+                raw = new String(Files.readAllBytes(Paths.get(path)), java.nio.charset.StandardCharsets.UTF_8);
             }
+            return org.example.seedancegenarate.service.AlipayPaymentService.normalizeKey(raw);
         } catch (IOException e) {
             log.error("加载密钥文件失败: path={}", path, e);
             throw new IOException("密钥文件加载失败: " + path, e);

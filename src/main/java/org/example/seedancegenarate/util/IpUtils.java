@@ -126,16 +126,28 @@ public class IpUtils {
         return null;
     }
 
-    private static boolean isLocalIp(String ip) {
-        if ("127.0.0.1".equals(ip) || "0:0:0:0:0:0:0:1".equals(ip) || "::1".equals(ip)) {
+    public static boolean isPrivateOrLocalAddress(InetAddress address) {
+        if (address == null) {
+            return true;
+        }
+        return address.isAnyLocalAddress()
+                || address.isLoopbackAddress()
+                || address.isSiteLocalAddress()
+                || address.isLinkLocalAddress()
+                || address.isMulticastAddress()
+                || "169.254.169.254".equals(address.getHostAddress());
+    }
+
+    public static boolean isLocalIp(String ip) {
+        if (!StringUtils.hasText(ip)) {
+            return false;
+        }
+        if ("127.0.0.1".equals(ip) || "0:0:0:0:0:0:0:1".equals(ip) || "::1".equals(ip) || "localhost".equalsIgnoreCase(ip)) {
             return true;
         }
         try {
             InetAddress address = InetAddress.getByName(ip);
-            return address.isAnyLocalAddress()
-                    || address.isLoopbackAddress()
-                    || address.isSiteLocalAddress()
-                    || address.isLinkLocalAddress();
+            return isPrivateOrLocalAddress(address);
         } catch (UnknownHostException e) {
             return false;
         }

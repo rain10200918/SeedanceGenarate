@@ -130,6 +130,8 @@ public class SeedanceServiceImpl implements SeedanceService {
                                 "Content-Type",
                                 "application/json"
                         )
+                        .setConnectionTimeout(seedanceConfig.getConnectTimeoutMs())
+                        .setReadTimeout(seedanceConfig.getReadTimeoutMs())
                         .body(json)
                         .execute();
 
@@ -184,6 +186,8 @@ public class SeedanceServiceImpl implements SeedanceService {
                                 "Content-Type",
                                 "application/json"
                         )
+                        .setConnectionTimeout(seedanceConfig.getConnectTimeoutMs())
+                        .setReadTimeout(seedanceConfig.getReadTimeoutMs())
                         .execute();
         if(!response.isOk()){
             throw new RuntimeException(

@@ -16,6 +16,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.mapper.ApiCallLogMapper;
 import org.example.seedancegenarate.mapper.ApiKeyMapper;
+import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.AdminStatsService;
 import org.example.seedancegenarate.service.AppUserService;
 import org.example.seedancegenarate.service.VideoTaskService;
@@ -54,6 +55,7 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
     private final VideoTaskService videoTaskService;
+    private final VideoTaskMapper videoTaskMapper;
     private final AppUserService appUserService;
     private final ApiCallLogMapper apiCallLogMapper;
     private final ApiKeyMapper apiKeyMapper;
@@ -91,80 +93,65 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     }
 
     private AdminDashboardResponse computeDashboard() {
-        List<VideoTask> tasks = videoTaskService.list();
-        long totalTask = tasks.size();
-        long totalSuccess = tasks.stream().filter(t -> "SUCCESS".equals(t.getStatus())).count();
-        long totalFailed = tasks.stream().filter(t -> "FAILED".equals(t.getStatus())).count();
-        double successRate = totalTask == 0 ? 0 : Math.round(totalSuccess * 10000.0 / totalTask) / 100.0;
-
         LocalDate today = LocalDate.now();
+        LocalDateTime todayStart = today.atStartOfDay();
         LocalDateTime monthStart = today.withDayOfMonth(1).atStartOfDay();
-        long todayTask = 0;
-        long todaySuccess = 0;
-        long todayFailed = 0;
-        BigDecimal todayCost = BigDecimal.ZERO;
-        BigDecimal monthCost = BigDecimal.ZERO;
-        for (VideoTask t : tasks) {
-            LocalDateTime created = t.getCreateTime();
-            if (created == null) {
-                continue;
-            }
-            if (created.toLocalDate().equals(today)) {
-                todayTask++;
-                if ("SUCCESS".equals(t.getStatus())) todaySuccess++;
-                if ("FAILED".equals(t.getStatus())) todayFailed++;
-                todayCost = todayCost.add(costOf(t));
-            }
-            if (!created.isBefore(monthStart)) {
-                monthCost = monthCost.add(costOf(t));
-            }
-        }
 
-        // 近 7 天趋势（补零）
+        // 1. 全局概览汇总（单条 SQL 聚合，避免全表 selectList 拉入堆内存）
+        Map<String, Object> overview = videoTaskMapper.selectDashboardOverview(todayStart, monthStart);
+        long totalTask = longVal(overview != null ? overview.get("totalTasks") : null);
+        long totalSuccess = longVal(overview != null ? overview.get("totalSuccess") : null);
+        long totalFailed = longVal(overview != null ? overview.get("totalFailed") : null);
+        double successRate = totalTask == 0 ? 0 : Math.round(totalSuccess * 10000.0 / totalTask) / 100.0;
+        long todayTask = longVal(overview != null ? overview.get("todayTasks") : null);
+        long todaySuccess = longVal(overview != null ? overview.get("todaySuccess") : null);
+        long todayFailed = longVal(overview != null ? overview.get("todayFailed") : null);
+        BigDecimal todayCost = decimalVal(overview != null ? overview.get("todayCost") : null);
+        BigDecimal monthCost = decimalVal(overview != null ? overview.get("monthCost") : null);
+
+        // 2. 近 7 天趋势（SQL 按日聚合 + 内存补零）
+        LocalDate startDay = today.minusDays(6);
+        List<Map<String, Object>> trendRows = videoTaskMapper.selectDailyTrend(startDay.atStartOfDay());
+        Map<String, Long> trendMap = trendRows == null ? Map.of() : trendRows.stream()
+                .collect(Collectors.toMap(
+                        row -> String.valueOf(row.get("date")),
+                        row -> longVal(row.get("count")),
+                        (a, b) -> a));
         List<AdminDashboardResponse.DailyCount> dailyTrend = new ArrayList<>();
         for (int i = 6; i >= 0; i--) {
             LocalDate day = today.minusDays(i);
-            long count = tasks.stream()
-                    .filter(t -> t.getCreateTime() != null && t.getCreateTime().toLocalDate().equals(day))
-                    .count();
-            dailyTrend.add(new AdminDashboardResponse.DailyCount(day.format(DAY), count));
+            String dateStr = day.format(DAY);
+            dailyTrend.add(new AdminDashboardResponse.DailyCount(dateStr, trendMap.getOrDefault(dateStr, 0L)));
         }
 
-        // 按模型分布
+        // 3. 按模型分布（SQL 按模型聚合）
         Map<String, String> labelMap = ModelLabels.of(videoEngineRegistry);
-        List<AdminDashboardResponse.ModelStat> modelStats = tasks.stream()
-                .collect(Collectors.groupingBy(
-                        t -> t.getModel() == null || t.getModel().isBlank() ? "未知" : t.getModel(),
-                        LinkedHashMap::new,
-                        Collectors.collectingAndThen(Collectors.toList(), group -> {
-                            String model = group.get(0).getModel() == null ? "未知" : group.get(0).getModel();
-                            long count = group.size();
-                            BigDecimal cost = group.stream()
-                                    .map(AdminStatsServiceImpl::costOf)
-                                    .reduce(BigDecimal.ZERO, BigDecimal::add);
-                            return new AdminDashboardResponse.ModelStat(
-                                    model, labelMap.getOrDefault(model, model), count, cost);
-                        })))
-                .values().stream()
-                .sorted(Comparator.comparing(AdminDashboardResponse.ModelStat::count).reversed())
+        List<Map<String, Object>> modelRows = videoTaskMapper.selectModelStats();
+        List<AdminDashboardResponse.ModelStat> modelStats = modelRows == null ? List.of() : modelRows.stream()
+                .map(row -> {
+                    String model = String.valueOf(row.get("model"));
+                    long count = longVal(row.get("count"));
+                    BigDecimal cost = decimalVal(row.get("cost"));
+                    return new AdminDashboardResponse.ModelStat(model, labelMap.getOrDefault(model, model), count, cost);
+                })
                 .toList();
 
-        // 消费 TOP 用户（10）
-        Map<Long, List<VideoTask>> byUser = tasks.stream()
-                .filter(t -> t.getUserId() != null)
-                .collect(Collectors.groupingBy(VideoTask::getUserId));
-        Map<Long, BigDecimal> costByUser = byUser.entrySet().stream()
-                .collect(Collectors.toMap(Map.Entry::getKey,
-                        e -> e.getValue().stream().map(AdminStatsServiceImpl::costOf)
-                                .reduce(BigDecimal.ZERO, BigDecimal::add)));
-        Map<Long, String> usernames = costByUser.keySet().isEmpty() ? Map.of()
-                : appUserService.listByIds(costByUser.keySet()).stream()
-                        .collect(Collectors.toMap(AppUser::getId, AppUser::getUsername, (a, b) -> a));
-        List<AdminDashboardResponse.TopUser> topUsers = costByUser.entrySet().stream()
-                .sorted(Map.Entry.<Long, BigDecimal>comparingByValue().reversed())
-                .limit(10)
-                .map(e -> new AdminDashboardResponse.TopUser(
-                        e.getKey(), usernames.getOrDefault(e.getKey(), String.valueOf(e.getKey())), e.getValue()))
+        // 4. 消费 TOP 用户（SQL 聚合 LIMIT 10 + 批量回填用户名）
+        List<Map<String, Object>> topUserRows = videoTaskMapper.selectTopUsers();
+        List<Long> topUserIds = topUserRows == null ? List.of() : topUserRows.stream()
+                .map(r -> longVal(r.get("userId")))
+                .filter(id -> id > 0)
+                .toList();
+        Map<Long, String> usernames = topUserIds.isEmpty() ? Map.of()
+                : appUserService.listByIds(topUserIds).stream()
+                .collect(Collectors.toMap(AppUser::getId, AppUser::getUsername, (a, b) -> a));
+        List<AdminDashboardResponse.TopUser> topUsers = topUserRows == null ? List.of() : topUserRows.stream()
+                .map(r -> {
+                    long userId = longVal(r.get("userId"));
+                    BigDecimal cost = decimalVal(r.get("totalCost"));
+                    return new AdminDashboardResponse.TopUser(
+                            userId, usernames.getOrDefault(userId, String.valueOf(userId)), cost);
+                })
                 .toList();
 
         return new AdminDashboardResponse(totalTask, totalSuccess, totalFailed, successRate,
@@ -221,19 +208,26 @@ public class AdminStatsServiceImpl implements AdminStatsService {
     }
 
     private ApiCallSummary computeApiCallSummary(Long apiKeyId) {
-        List<ApiCallLog> logs = apiCallLogMapper.selectList(
-                Wrappers.<ApiCallLog>lambdaQuery().eq(apiKeyId != null, ApiCallLog::getApiKeyId, apiKeyId));
-        long total = logs.size();
-        long success = logs.stream().filter(l -> "SUCCESS".equals(l.getStatus())).count();
-        long failed = logs.stream().filter(l -> "FAILED".equals(l.getStatus())).count();
-        long rejected = logs.stream().filter(l -> "REJECTED".equals(l.getStatus())).count();
-        List<ApiCallSummary.ErrorCodeCount> byErrorCode = logs.stream()
-                .filter(l -> l.getErrorCode() != null && !l.getErrorCode().isBlank())
-                .collect(Collectors.groupingBy(ApiCallLog::getErrorCode, LinkedHashMap::new, Collectors.counting()))
-                .entrySet().stream()
-                .map(e -> new ApiCallSummary.ErrorCodeCount(e.getKey(), e.getValue()))
-                .sorted(Comparator.comparing(ApiCallSummary.ErrorCodeCount::count).reversed())
+        List<Map<String, Object>> statusRows = apiCallLogMapper.selectStatusCounts(apiKeyId);
+        long success = 0, failed = 0, rejected = 0, total = 0;
+        if (statusRows != null) {
+            for (Map<String, Object> row : statusRows) {
+                long count = longVal(row.get("count"));
+                total += count;
+                String st = String.valueOf(row.get("status"));
+                if ("SUCCESS".equalsIgnoreCase(st)) success += count;
+                else if ("FAILED".equalsIgnoreCase(st)) failed += count;
+                else if ("REJECTED".equalsIgnoreCase(st)) rejected += count;
+            }
+        }
+
+        List<Map<String, Object>> errorRows = apiCallLogMapper.selectErrorCodeCounts(apiKeyId);
+        List<ApiCallSummary.ErrorCodeCount> byErrorCode = errorRows == null ? List.of() : errorRows.stream()
+                .map(row -> new ApiCallSummary.ErrorCodeCount(
+                        String.valueOf(row.get("errorCode")),
+                        longVal(row.get("count"))))
                 .toList();
+
         return new ApiCallSummary(total, success, failed, rejected, byErrorCode);
     }
 
@@ -317,5 +311,26 @@ public class AdminStatsServiceImpl implements AdminStatsService {
 
     private static BigDecimal costOf(VideoTask task) {
         return task.getCostAmount() == null ? BigDecimal.ZERO : task.getCostAmount();
+    }
+
+    private static long longVal(Object obj) {
+        if (obj == null) return 0L;
+        if (obj instanceof Number n) return n.longValue();
+        try {
+            return Long.parseLong(obj.toString());
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    private static BigDecimal decimalVal(Object obj) {
+        if (obj == null) return BigDecimal.ZERO;
+        if (obj instanceof BigDecimal bd) return bd;
+        if (obj instanceof Number n) return BigDecimal.valueOf(n.doubleValue());
+        try {
+            return new BigDecimal(obj.toString());
+        } catch (Exception e) {
+            return BigDecimal.ZERO;
+        }
     }
 }

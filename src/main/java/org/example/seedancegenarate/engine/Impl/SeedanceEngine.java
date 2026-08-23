@@ -46,7 +46,7 @@ public class SeedanceEngine implements VideoEngine {
 
     @Override
     public String displayName() {
-        return "Seedance（云端）";
+        return "Seedance";
     }
 
     @Override

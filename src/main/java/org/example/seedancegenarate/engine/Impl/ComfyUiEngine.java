@@ -145,7 +145,7 @@ public class ComfyUiEngine implements VideoEngine {
 
     @Override
     public String displayName() {
-        return "ComfyUI（自建）";
+        return "Ascent";
     }
 
     @Override

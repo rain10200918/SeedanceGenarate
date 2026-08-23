@@ -11,8 +11,17 @@ public class OssClientConfig {
 
     @Bean(destroyMethod = "shutdown")
     public OSS ossClient(OssConfig ossConfig) {
+        String endpoint = ossConfig.getEndpoint();
+        if (endpoint != null && !endpoint.isBlank()) {
+            endpoint = endpoint.trim();
+            if (!endpoint.matches("(?i)^https?://.*")) {
+                endpoint = "https://" + endpoint;
+            }
+        } else {
+            endpoint = "https://oss-cn-beijing.aliyuncs.com";
+        }
         return new OSSClientBuilder().build(
-                ossConfig.getEndpoint(),
+                endpoint,
                 ossConfig.getAccessKeyId(),
                 ossConfig.getAccessKeySecret());
     }

@@ -140,11 +140,11 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setFreezeCurrency(freezePrice.currency());
         videoTaskService.save(task);
 
-        // 预授权冻结（提交即占用额度）：余额不足 → 删除刚建的任务行并拒绝，不产生任务。
+        // 预授权冻结（提交即占用额度）：余额不足或发生异常 → 删除刚建的任务行并拒绝，不产生僵尸任务。
         // 冻结幂等（biz_key=task:{id}），超时重试不重复冻结；成功结算/失败解冻在终态入口统一处理。
         try {
             walletService.freeze(request.userId(), freezeAmount, task.getId());
-        } catch (WalletServiceImpl.InsufficientBalanceException e) {
+        } catch (Exception e) {
             videoTaskService.removeById(task.getId());
             throw e;
         }

@@ -7,6 +7,7 @@ import org.example.seedancegenarate.dto.WalletOverview;
 import org.example.seedancegenarate.dto.WalletSpendingSummary;
 import org.example.seedancegenarate.dto.WalletSpendingView;
 import org.example.seedancegenarate.entity.BalanceTransaction;
+import org.example.seedancegenarate.entity.RechargeOrder;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.entity.Wallet;
 import org.example.seedancegenarate.service.WalletService;
@@ -63,5 +64,15 @@ public class WalletController {
             @RequestParam(value = "size", defaultValue = "20") Long size
     ) {
         return Result.success(walletService.pageSpending(UserContext.requireUserId(), current, size));
+    }
+
+    /** 我的充值订单分页（含超时关闭状态）；userId 永远来自登录上下文 */
+    @GetMapping("/recharge-orders")
+    public Result<Page<RechargeOrder>> rechargeOrders(
+            @RequestParam(value = "current", defaultValue = "1") Long current,
+            @RequestParam(value = "size", defaultValue = "20") Long size
+    ) {
+        return Result.success(walletService.pageRechargeOrders(
+                UserContext.requireUserId(), current, size));
     }
 }

@@ -10,8 +10,10 @@ import org.example.seedancegenarate.dto.WalletSpendingSummary;
 import org.example.seedancegenarate.dto.WalletSpendingTotals;
 import org.example.seedancegenarate.dto.WalletSpendingView;
 import org.example.seedancegenarate.entity.BalanceTransaction;
+import org.example.seedancegenarate.entity.RechargeOrder;
 import org.example.seedancegenarate.entity.Wallet;
 import org.example.seedancegenarate.mapper.BalanceTransactionMapper;
+import org.example.seedancegenarate.mapper.RechargeOrderMapper;
 import org.example.seedancegenarate.mapper.WalletMapper;
 import org.example.seedancegenarate.service.WalletService;
 import org.springframework.dao.DuplicateKeyException;
@@ -39,6 +41,7 @@ public class WalletServiceImpl implements WalletService {
 
     private final WalletMapper walletMapper;
     private final BalanceTransactionMapper balanceTransactionMapper;
+    private final RechargeOrderMapper rechargeOrderMapper;
 
     @Override
     @Transactional
@@ -63,13 +66,17 @@ public class WalletServiceImpl implements WalletService {
             log.info("入账幂等跳过（biz_key 已存在）: userId={}, bizKey={}", userId, ctx.bizKey());
             return;
         }
-        // ② 懒建钱包 + 余额变更（同一事务）
-        walletMapper.insertIgnore(userId);
-        if (walletMapper.addBalance(userId, amount) != 1) {
-            throw new IllegalStateException("钱包不存在，入账失败");
+        // ② 余额变更（仅在钱包不存在时按需懒建，避免无谓的 INSERT IGNORE 产生共享锁/间隙锁死锁）
+        int rows = walletMapper.addBalance(userId, amount);
+        if (rows == 0) {
+            walletMapper.insertIgnore(userId);
+            rows = walletMapper.addBalance(userId, amount);
+            if (rows == 0) {
+                throw new IllegalStateException("钱包不存在，入账失败");
+            }
         }
         // ③ 回填 balance_after/frozen_after，保证流水可对账
-        Wallet wallet = walletMapper.selectOne(Wrappers.<Wallet>lambdaQuery().eq(Wallet::getUserId, userId));
+        Wallet wallet = walletMapper.selectOne(byUser(userId));
         if (wallet == null) {
             throw new IllegalStateException("钱包不存在，入账失败");
         }
@@ -85,16 +92,25 @@ public class WalletServiceImpl implements WalletService {
         String bizKey = "task:" + taskId;
         // 冻结只是 balance → frozen 的内部转移，不改变账户总资产；流水 amount 必须为 0，
         // 否则 SUM(流水.amount) 与 wallet.balance + wallet.frozen 会凭空少一笔冻结额。
-        if (!insertLedger(userId, BalanceTransaction.TYPE_FREEZE, BigDecimal.ZERO, amount, bizKey, taskId)) {
+        BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_FREEZE, BigDecimal.ZERO, amount, bizKey, taskId);
+        if (bt == null) {
             return true; // 已冻结过（重复提交/重试），视为成功
         }
-        walletMapper.insertIgnore(userId);
         int rows = walletMapper.freeze(userId, amount);
         if (rows == 0) {
-            // 余额不足：抛异常让事务整体回滚（流水一并回滚），调用方转「余额不足拒绝」
-            throw new InsufficientBalanceException();
+            // 如果钱包行尚未初始化则尝试补建一次后重试，否则为真实余额不足
+            Wallet wallet = walletMapper.selectOne(byUser(userId));
+            if (wallet == null) {
+                walletMapper.insertIgnore(userId);
+                rows = walletMapper.freeze(userId, amount);
+            }
+            if (rows == 0) {
+                // 余额不足：抛异常让事务整体回滚（流水一并回滚），调用方转「余额不足拒绝」
+                throw new InsufficientBalanceException();
+            }
         }
-        fillBalanceAfter(walletMapper.selectOne(byUser(userId)), bizKey);
+        Wallet wallet = walletMapper.selectOne(byUser(userId));
+        fillBalanceAfter(wallet, bt);
         return true;
     }
 
@@ -105,15 +121,32 @@ public class WalletServiceImpl implements WalletService {
             return; // 0 元任务无冻结可结算
         }
         String bizKey = "task:" + taskId + ":settle";
-        if (!insertLedger(userId, BalanceTransaction.TYPE_SETTLE, amount.negate(), amount, bizKey, taskId)) {
+        BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_SETTLE, amount.negate(), amount, bizKey, taskId);
+        if (bt == null) {
             return; // 已结算过，幂等跳过
         }
         int rows = walletMapper.settle(userId, amount);
         if (rows != 1) {
+            // 检查是否从未冻结过（例如提交异常未扣冻结额）
+            Long freezeCount = balanceTransactionMapper.selectCount(
+                    Wrappers.<BalanceTransaction>lambdaQuery()
+                            .eq(BalanceTransaction::getBizKey, "task:" + taskId)
+                            .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
+            if (freezeCount == null || freezeCount == 0) {
+                // 如果从未冻结过但任务成功了，直接从可用余额扣减兜底
+                int deductRows = walletMapper.addBalance(userId, amount.negate());
+                if (deductRows == 1) {
+                    log.warn("任务未曾冻结，直接从可用余额扣除结算: userId={}, taskId={}, amount={}", userId, taskId, amount);
+                    Wallet wallet = walletMapper.selectOne(byUser(userId));
+                    fillBalanceAfter(wallet, bt);
+                    return;
+                }
+            }
             // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
             throw new IllegalStateException("钱包冻结余额不足，无法结算: userId=" + userId + ", taskId=" + taskId);
         }
-        fillBalanceAfter(walletOf(userId), bizKey);
+        Wallet wallet = walletMapper.selectOne(byUser(userId));
+        fillBalanceAfter(wallet, bt);
     }
 
     @Override
@@ -124,21 +157,40 @@ public class WalletServiceImpl implements WalletService {
         }
         String bizKey = "task:" + taskId + ":release";
         // 解冻也是 frozen → balance 的内部转移，不改变账户总资产；净额只记 0。
-        if (!insertLedger(userId, BalanceTransaction.TYPE_RELEASE, BigDecimal.ZERO, amount, bizKey, taskId)) {
+        BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_RELEASE, BigDecimal.ZERO, amount, bizKey, taskId);
+        if (bt == null) {
             return; // 已解冻过，幂等跳过
         }
         int rows = walletMapper.release(userId, amount);
         if (rows != 1) {
+            // 检查该任务是否根本没有成功冻结过（如提交时死锁/异常直接失败，未曾入账 FREEZE）
+            Long freezeCount = balanceTransactionMapper.selectCount(
+                    Wrappers.<BalanceTransaction>lambdaQuery()
+                            .eq(BalanceTransaction::getBizKey, "task:" + taskId)
+                            .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
+            if (freezeCount == null || freezeCount == 0) {
+                log.info("任务从未成功冻结过，跳过解冻退款并完成对账: userId={}, taskId={}, amount={}", userId, taskId, amount);
+                Wallet wallet = walletMapper.selectOne(byUser(userId));
+                if (wallet != null) {
+                    fillBalanceAfter(wallet, bt);
+                }
+                return;
+            }
             // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
             throw new IllegalStateException("钱包冻结余额不足，无法解冻: userId=" + userId + ", taskId=" + taskId);
         }
-        fillBalanceAfter(walletOf(userId), bizKey);
+        Wallet wallet = walletMapper.selectOne(byUser(userId));
+        fillBalanceAfter(wallet, bt);
     }
 
     @Override
     public Wallet getWallet(Long userId) {
-        walletMapper.insertIgnore(userId);
-        return walletMapper.selectOne(byUser(userId));
+        Wallet wallet = walletMapper.selectOne(byUser(userId));
+        if (wallet == null) {
+            walletMapper.insertIgnore(userId);
+            wallet = walletMapper.selectOne(byUser(userId));
+        }
+        return wallet;
     }
 
     @Override
@@ -182,11 +234,20 @@ public class WalletServiceImpl implements WalletService {
                 new Page<>(pageCurrent, pageSize), userId);
     }
 
-    // ---------- 私有 ----------
+    @Override
+    public Page<RechargeOrder> pageRechargeOrders(Long userId, long current, long size) {
+        long pageCurrent = Math.max(current, 1L);
+        long pageSize = Math.min(Math.max(size, 1L), 100L);
+        return rechargeOrderMapper.selectPage(
+                new Page<>(pageCurrent, pageSize),
+                Wrappers.<RechargeOrder>lambdaQuery()
+                        .eq(RechargeOrder::getUserId, userId)
+                        .orderByDesc(RechargeOrder::getCreateTime));
+    }
 
-    /** 尝试插入流水：true=首次写入，false=biz_key 已存在（幂等跳过） */
-    private boolean insertLedger(Long userId, String type, BigDecimal amount,
-                                 BigDecimal holdAmount, String bizKey, Long taskId) {
+    /** 尝试插入流水：返回已插入实体（含生成的自增 id），若 biz_key 已存在则返回 null（幂等跳过） */
+    private BalanceTransaction insertLedger(Long userId, String type, BigDecimal amount,
+                                            BigDecimal holdAmount, String bizKey, Long taskId) {
         BalanceTransaction bt = new BalanceTransaction();
         bt.setUserId(userId);
         bt.setType(type);
@@ -196,26 +257,22 @@ public class WalletServiceImpl implements WalletService {
         bt.setTaskId(taskId);
         try {
             balanceTransactionMapper.insert(bt);
-            return true;
+            return bt;
         } catch (DuplicateKeyException e) {
             log.info("流水幂等跳过（biz_key 已存在）: userId={}, bizKey={}", userId, bizKey);
-            return false;
+            return null;
         }
     }
 
-    private void fillBalanceAfter(Wallet wallet, String bizKey) {
+    private void fillBalanceAfter(Wallet wallet, BalanceTransaction bt) {
         if (wallet == null) {
             throw new IllegalStateException("钱包不存在，无法回填流水快照");
         }
-        BalanceTransaction bt = balanceTransactionMapper.selectOne(
-                Wrappers.<BalanceTransaction>lambdaQuery()
-                        .eq(BalanceTransaction::getBizKey, bizKey)
-                        .last("limit 1 for update"));
-        if (bt == null) {
-            throw new IllegalStateException("流水不存在，无法回填余额快照: " + bizKey);
+        if (bt == null || bt.getId() == null) {
+            return;
         }
         if (balanceTransactionMapper.updateBalanceAfter(bt.getId(), wallet.getBalance(), wallet.getFrozen()) != 1) {
-            throw new IllegalStateException("流水余额快照回填失败: " + bizKey);
+            throw new IllegalStateException("流水余额快照回填失败: id=" + bt.getId() + ", bizKey=" + bt.getBizKey());
         }
     }
 

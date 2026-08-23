@@ -63,6 +63,10 @@ public class ApiException extends RuntimeException {
         return new ApiException("PROVIDER_UNAVAILABLE", HttpStatus.SERVICE_UNAVAILABLE, message);
     }
 
+    public static ApiException insufficientBalance() {
+        return new ApiException("INSUFFICIENT_BALANCE", HttpStatus.PAYMENT_REQUIRED, "余额不足，请先充值");
+    }
+
     public static ApiException internal(String message) {
         return new ApiException("INTERNAL_ERROR", HttpStatus.INTERNAL_SERVER_ERROR, message);
     }

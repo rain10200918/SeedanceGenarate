@@ -16,11 +16,20 @@ import org.example.seedancegenarate.service.ApiVideoService;
 import org.example.seedancegenarate.service.OssService;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
+import org.example.seedancegenarate.util.IpUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -121,6 +130,9 @@ public class ApiVideoServiceImpl implements ApiVideoService {
                 .eq(VideoTask::getApiKeyId, apiKeyId), false);
     }
 
+    private static final int MAX_IMAGE_SIZE_BYTES = 30 * 1024 * 1024; // 30MB
+    private static final int DOWNLOAD_TIMEOUT_MS = 5000; // 5s
+
     /** 图片 URL 下载并转存 OSS；单个失败即整体失败（与 UI 传图失败语义一致） */
     private List<String> uploadRemoteImages(List<String> imageUrls) {
         List<String> urls = new ArrayList<>();
@@ -131,20 +143,98 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             if (!StringUtils.hasText(url)) {
                 continue;
             }
+            byte[] bytes = downloadSafeImage(url.trim());
+            String ext = StrUtil.subAfter(url.substring(0, Math.min(url.length(), 200)), ".", true);
             try {
-                byte[] bytes = HttpUtil.downloadBytes(url.trim());
-                if (bytes == null || bytes.length == 0) {
-                    throw ApiException.validation("参考图下载失败: " + url);
-                }
-                String ext = StrUtil.subAfter(url.substring(0, Math.min(url.length(), 200)), ".", true);
                 urls.add(ossService.upload(bytes, "api." + ext));
-            } catch (ApiException e) {
-                throw e;
             } catch (Exception e) {
-                throw ApiException.validation("参考图下载失败: " + url + "（" + e.getMessage() + "）");
+                log.error("转存参考图到 OSS 失败: url={}, err={}", url, e.getMessage());
+                throw ApiException.internal("转存参考图失败: " + e.getMessage());
             }
         }
         return urls;
+    }
+
+    /**
+     * 安全下载外部参考图：
+     * 1. 协议限制：仅允许 http/https
+     * 2. SSRF 防护：禁止内网、本地、回环、链路本地 IP
+     * 3. 资源保护：设置 5 秒连接/读取超时，单张图片限制最大 30MB，防止 OOM 与慢连接耗尽线程
+     */
+    private byte[] downloadSafeImage(String url) {
+        URI uri;
+        try {
+            uri = new URI(url.trim());
+        } catch (URISyntaxException e) {
+            throw ApiException.validation("参考图地址格式不合法: " + url);
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+            throw ApiException.validation("参考图地址必须为 http 或 https 协议: " + url);
+        }
+        String host = uri.getHost();
+        if (!StringUtils.hasText(host)) {
+            throw ApiException.validation("参考图地址缺少主机名: " + url);
+        }
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            for (InetAddress addr : addresses) {
+                if (IpUtils.isPrivateOrLocalAddress(addr)) {
+                    log.warn("拒绝访问内网参考图地址 (SSRF 防护): url={}, ip={}", url, addr.getHostAddress());
+                    throw ApiException.validation("禁止使用内网或本地参考图地址");
+                }
+            }
+        } catch (UnknownHostException e) {
+            throw ApiException.validation("无法解析参考图域名: " + host);
+        }
+
+        HttpURLConnection conn = null;
+        try {
+            URL targetUrl = uri.toURL();
+            conn = (HttpURLConnection) targetUrl.openConnection();
+            conn.setConnectTimeout(DOWNLOAD_TIMEOUT_MS);
+            conn.setReadTimeout(DOWNLOAD_TIMEOUT_MS);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "SeedanceApi/1.0");
+
+            int responseCode = conn.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                throw ApiException.validation("参考图下载响应异常 (HTTP " + responseCode + "): " + url);
+            }
+
+            long contentLength = conn.getContentLengthLong();
+            if (contentLength > MAX_IMAGE_SIZE_BYTES) {
+                throw ApiException.validation("参考图大小超过限制 (最大 30MB): " + url);
+            }
+
+            try (InputStream in = conn.getInputStream();
+                 ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int total = 0;
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    total += read;
+                    if (total > MAX_IMAGE_SIZE_BYTES) {
+                        throw ApiException.validation("参考图大小超过限制 (最大 30MB): " + url);
+                    }
+                    out.write(buffer, 0, read);
+                }
+                byte[] bytes = out.toByteArray();
+                if (bytes.length == 0) {
+                    throw ApiException.validation("参考图内容为空: " + url);
+                }
+                return bytes;
+            }
+        } catch (ApiException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("下载外部参考图失败: url={}, err={}", url, e.getMessage());
+            throw ApiException.validation("参考图下载失败: " + url + "（" + e.getMessage() + "）");
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
     }
 
     private ApiCallLog buildReceivedLog(CreateContext context, int imageCount) {
@@ -183,16 +273,18 @@ public class ApiVideoServiceImpl implements ApiVideoService {
     /** 统一错误码：提交编排里的 RuntimeException 消息是我们自己的文案，按语义映射 */
     private String resolveErrorCode(Exception e) {
         String msg = e.getMessage() == null ? "" : e.getMessage();
+        if (msg.contains("余额不足")) return "INSUFFICIENT_BALANCE";
         if (msg.contains("未开放")) return "MODEL_NOT_OPEN";
         if (msg.contains("不支持")) return "MODEL_NOT_FOUND";
         if (msg.contains("需要参考图") || msg.contains("数量需为") || msg.contains("不支持的比例")
-                || msg.contains("必须指定 model")) return "VALIDATION_ERROR";
+                || msg.contains("必须指定 model") || msg.contains("参考图")) return "VALIDATION_ERROR";
         if (msg.contains("ComfyUI") || msg.contains("节点")) return "PROVIDER_UNAVAILABLE";
         return "INTERNAL_ERROR";
     }
 
     private HttpStatus resolveHttpCode(Exception e) {
         return switch (resolveErrorCode(e)) {
+            case "INSUFFICIENT_BALANCE" -> HttpStatus.PAYMENT_REQUIRED;
             case "MODEL_NOT_OPEN" -> HttpStatus.FORBIDDEN;
             case "MODEL_NOT_FOUND", "VALIDATION_ERROR" -> HttpStatus.BAD_REQUEST;
             case "PROVIDER_UNAVAILABLE" -> HttpStatus.SERVICE_UNAVAILABLE;
@@ -202,13 +294,16 @@ public class ApiVideoServiceImpl implements ApiVideoService {
 
     private ApiException toApiException(Exception e, String model) {
         String msg = e.getMessage() == null ? "" : e.getMessage();
+        if (msg.contains("余额不足")) {
+            return ApiException.insufficientBalance();
+        }
         if (msg.contains("未开放")) {
             return ApiException.modelNotOpen();
         }
         if (msg.contains("不支持")) {
             return ApiException.modelNotFound(model);
         }
-        if (msg.contains("需要参考图") || msg.contains("数量需为") || msg.contains("不支持的比例")) {
+        if (msg.contains("需要参考图") || msg.contains("数量需为") || msg.contains("不支持的比例") || msg.contains("参考图")) {
             return ApiException.validation(msg);
         }
         if (msg.contains("ComfyUI") || msg.contains("节点")) {

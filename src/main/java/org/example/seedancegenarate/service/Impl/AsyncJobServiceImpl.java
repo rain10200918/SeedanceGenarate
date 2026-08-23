@@ -42,6 +42,18 @@ public class AsyncJobServiceImpl implements AsyncJobService {
     }
 
     @Override
+    public void enqueueDelayed(String jobType, String bizKey, String payload, long delaySeconds) {
+        if (!StringUtils.hasText(jobType) || !StringUtils.hasText(bizKey)) {
+            return;
+        }
+        int rows = asyncJobMapper.enqueueDelayed(jobType.trim(), bizKey.trim(), payload,
+                Math.max(properties.getMaxAttempts(), 1), Math.max(delaySeconds, 0));
+        if (rows > 0) {
+            jobAvailableNotifier.notify(jobType.trim());
+        }
+    }
+
+    @Override
     public List<AsyncJob> claimBatch(String jobType, int batchSize, long leaseSeconds) {
         List<AsyncJob> candidates = asyncJobMapper.selectList(Wrappers.<AsyncJob>lambdaQuery()
                 .eq(AsyncJob::getJobType, jobType)

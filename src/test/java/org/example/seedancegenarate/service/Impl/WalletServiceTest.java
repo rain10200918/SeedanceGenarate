@@ -3,8 +3,10 @@ package org.example.seedancegenarate.service.Impl;
 import org.example.seedancegenarate.entity.BalanceTransaction;
 import org.example.seedancegenarate.entity.Wallet;
 import org.example.seedancegenarate.mapper.BalanceTransactionMapper;
+import org.example.seedancegenarate.mapper.RechargeOrderMapper;
 import org.example.seedancegenarate.mapper.WalletMapper;
 import org.example.seedancegenarate.service.WalletService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DuplicateKeyException;
 
@@ -17,13 +19,25 @@ import static org.mockito.Mockito.*;
 
 /**
  * 钱包账务纯单测（Mockito mock mapper）：幂等（biz_key 撞键跳过）、余额不足拒绝、
- * 冻结/结算/解冻正确性。真实唯一约束由 DB 保证（V12 uk_bt_biz_key），这里验证代码路径。
+ * 冻结/结算/解冻正确性。真实唯一约束由 DB 保证（V12 uk_bt_biz_key），这里验证代码路径与无死锁路径。
  */
 class WalletServiceTest {
 
     private final WalletMapper walletMapper = mock(WalletMapper.class);
     private final BalanceTransactionMapper btMapper = mock(BalanceTransactionMapper.class);
-    private final WalletServiceImpl service = new WalletServiceImpl(walletMapper, btMapper);
+    private final RechargeOrderMapper rechargeOrderMapper = mock(RechargeOrderMapper.class);
+    private final WalletServiceImpl service = new WalletServiceImpl(walletMapper, btMapper, rechargeOrderMapper);
+
+    @BeforeEach
+    void setUp() {
+        // 模拟 MyBatis-Plus insert 自动填充自增 ID
+        when(btMapper.insert(any(BalanceTransaction.class))).thenAnswer(inv -> {
+            BalanceTransaction bt = inv.getArgument(0);
+            bt.setId(1001L);
+            return 1;
+        });
+        when(btMapper.updateBalanceAfter(any(), any(), any())).thenReturn(1);
+    }
 
     private static WalletService.CreditContext adminCtx(String bizKey) {
         return WalletService.CreditContext.adminCredit(bizKey, bizKey, 9L, "admin", "测试加钱");
@@ -31,7 +45,6 @@ class WalletServiceTest {
 
     @Test
     void creditInsertsLedgerThenUpdatesBalance() {
-        when(btMapper.insert(any(BalanceTransaction.class))).thenReturn(1);
         Wallet wallet = new Wallet();
         wallet.setBalance(new BigDecimal("10.00"));
         when(walletMapper.selectOne(any())).thenReturn(wallet);
@@ -39,10 +52,26 @@ class WalletServiceTest {
 
         service.credit(1L, new BigDecimal("10.00"), adminCtx("RC1"));
 
-        verify(walletMapper).insertIgnore(1L);
         verify(walletMapper).addBalance(1L, new BigDecimal("10.00"));
+        // 存在钱包时不产生无谓的 insertIgnore 锁竞争
+        verify(walletMapper, never()).insertIgnore(any());
         // 回填 balance_after
-        verify(btMapper).updateBalanceAfter(any(), eq(new BigDecimal("10.00")), any());
+        verify(btMapper).updateBalanceAfter(eq(1001L), eq(new BigDecimal("10.00")), any());
+    }
+
+    @Test
+    void creditLazyCreatesWalletWhenMissing() {
+        Wallet wallet = new Wallet();
+        wallet.setBalance(new BigDecimal("10.00"));
+        when(walletMapper.selectOne(any())).thenReturn(wallet);
+        // 第一次 addBalance 找不到行返回 0，懒建后第二次返回 1
+        when(walletMapper.addBalance(1L, new BigDecimal("10.00"))).thenReturn(0, 1);
+
+        service.credit(1L, new BigDecimal("10.00"), adminCtx("RC1"));
+
+        verify(walletMapper).insertIgnore(1L);
+        verify(walletMapper, times(2)).addBalance(1L, new BigDecimal("10.00"));
+        verify(btMapper).updateBalanceAfter(eq(1001L), eq(new BigDecimal("10.00")), any());
     }
 
     @Test
@@ -70,10 +99,6 @@ class WalletServiceTest {
         wallet.setBalance(new BigDecimal("5.00"));
         wallet.setFrozen(new BigDecimal("5.00"));
         when(walletMapper.selectOne(any())).thenReturn(wallet);
-        BalanceTransaction ledger = new BalanceTransaction();
-        ledger.setId(1L);
-        when(btMapper.selectOne(any())).thenReturn(ledger);
-        when(btMapper.updateBalanceAfter(any(), any(), any())).thenReturn(1);
 
         assertTrue(service.freeze(1L, new BigDecimal("5.00"), 100L));
 
@@ -86,12 +111,16 @@ class WalletServiceTest {
         assertEquals("task:100", bt.getBizKey());
         assertEquals(100L, bt.getTaskId());
         verify(walletMapper).freeze(1L, new BigDecimal("5.00"));
+        verify(btMapper).updateBalanceAfter(eq(1001L), eq(new BigDecimal("5.00")), eq(new BigDecimal("5.00")));
     }
 
     @Test
     void freezeInsufficientBalanceThrows() {
-        // CAS 条件更新 0 行 = 余额不足 → 异常（事务回滚流水与余额变更）
+        // CAS 条件更新 0 行，且钱包已存在 = 真实余额不足 → 异常（事务回滚流水与余额变更）
         when(walletMapper.freeze(eq(1L), any())).thenReturn(0);
+        Wallet wallet = new Wallet();
+        wallet.setBalance(new BigDecimal("1.00"));
+        when(walletMapper.selectOne(any())).thenReturn(wallet);
 
         assertThrows(WalletServiceImpl.InsufficientBalanceException.class,
                 () -> service.freeze(1L, new BigDecimal("5.00"), 100L));
@@ -119,10 +148,6 @@ class WalletServiceTest {
         wallet.setBalance(new BigDecimal("0.00"));
         wallet.setFrozen(new BigDecimal("0.00"));
         when(walletMapper.selectOne(any())).thenReturn(wallet);
-        BalanceTransaction ledger = new BalanceTransaction();
-        ledger.setId(1L);
-        when(btMapper.selectOne(any())).thenReturn(ledger);
-        when(btMapper.updateBalanceAfter(any(), any(), any())).thenReturn(1);
 
         service.settle(1L, new BigDecimal("5.00"), 100L);
 
@@ -132,6 +157,7 @@ class WalletServiceTest {
         assertEquals(0, new BigDecimal("5.00").compareTo(captor.getValue().getHoldAmount()));
         assertEquals("task:100:settle", captor.getValue().getBizKey());
         verify(walletMapper).settle(1L, new BigDecimal("5.00"));
+        verify(btMapper).updateBalanceAfter(eq(1001L), eq(new BigDecimal("0.00")), eq(new BigDecimal("0.00")));
     }
 
     @Test
@@ -149,10 +175,6 @@ class WalletServiceTest {
         wallet.setBalance(new BigDecimal("5.00"));
         wallet.setFrozen(new BigDecimal("0.00"));
         when(walletMapper.selectOne(any())).thenReturn(wallet);
-        BalanceTransaction ledger = new BalanceTransaction();
-        ledger.setId(1L);
-        when(btMapper.selectOne(any())).thenReturn(ledger);
-        when(btMapper.updateBalanceAfter(any(), any(), any())).thenReturn(1);
 
         service.release(1L, new BigDecimal("5.00"), 100L);
 
@@ -164,6 +186,7 @@ class WalletServiceTest {
         assertEquals(0, new BigDecimal("5.00").compareTo(bt.getHoldAmount()));
         assertEquals("task:100:release", bt.getBizKey());
         verify(walletMapper).release(1L, new BigDecimal("5.00"));
+        verify(btMapper).updateBalanceAfter(eq(1001L), eq(new BigDecimal("5.00")), eq(new BigDecimal("0.00")));
     }
 
     @Test
@@ -176,8 +199,9 @@ class WalletServiceTest {
 
     @Test
     void getWalletCreatesIfMissing() {
+        when(walletMapper.selectOne(any())).thenReturn(null, new Wallet());
         service.getWallet(1L);
         verify(walletMapper).insertIgnore(1L);
-        verify(walletMapper).selectOne(any());
+        verify(walletMapper, times(2)).selectOne(any());
     }
 }

@@ -10,6 +10,9 @@ public interface AsyncJobService {
     /** 入队；同 (jobType, bizKey) 已存在（任意状态）则跳过，保证业务幂等。 */
     void enqueue(String jobType, String bizKey, String payload);
 
+    /** 延迟入队：available_at = now + delaySeconds 后才可领取（替代 RabbitMQ 延迟消息）。 */
+    void enqueueDelayed(String jobType, String bizKey, String payload, long delaySeconds);
+
     /** 领取一批 READY 作业（行级 CAS，多 Worker 并发安全）。 */
     List<AsyncJob> claimBatch(String jobType, int batchSize, long leaseSeconds);
 

@@ -128,3 +128,112 @@ sequenceDiagram
             SSE-->>U: SSE 推送 {taskId, status}
         end
     end
+
+# ============================================================
+# 图 4 · 整体架构总览（含账务/充值链路，2026-08 更新）
+# 注：图 1 已过时（缺 wallet/recharge/Alipay 层），以本图为准
+# 单独文件：docs/architecture-full.mmd · 已渲染 PNG：docs/architecture-full.png
+# ============================================================
+
+flowchart TB
+    subgraph CLIENTS["客户端"]
+        FE["Vue3 前端（用户端 + 管理端）<br/>Pinia + Element Plus + axios + SSE"]
+        DEV["外部开发者<br/>持 sk- API Key"]
+    end
+
+    subgraph BE["Spring Boot 3 后端（Java 17 · API/Worker 一体 · 可多实例）"]
+        IN["拦截器链<br/>Auth(Redis Token) / ApiKey / RateLimit(Redis Lua 令牌桶)"]
+
+        subgraph CTRL["Controller 层（25 个）"]
+            C1["用户侧：Video · Asset · Wallet · Recharge<br/>Announcement · Invite · Auth · PromptOptimize"]
+            C2["管理端：Admin* 8（用户 / 统计 / 钱包 / 定价 / 公告 / 流水）"]
+            C3["开放 API：ApiVideo · ApiModel · ApiDoc"]
+            C4["回调：TaskCallback(ComfyUI webhook)<br/>AlipayNotify(支付宝验签 + 入账)"]
+        end
+
+        subgraph CORE["编排与账务"]
+            SUB["VideoSubmitService<br/>UI / 开放 API / 流水线 共用提交编排"]
+            GATE["ModelAccessService<br/>模型开放闸门 + 缓存"]
+            PRICE["PricingService + CostRecordService<br/>价格快照 · 唯一索引幂等"]
+            WALLET["WalletService（预授权）<br/>冻结 → 结算 / 解冻<br/>CAS + biz_key 幂等"]
+            RECH["RechargeService + ChannelRegistry<br/>alipay / admin 渠道策略 · 订单超时关闭 · 兜底入账"]
+        end
+
+        subgraph ENGINE["提供方层：两层策略 + 注册表"]
+            REG["VideoEngineRegistry"]
+            SE["SeedanceEngine<br/>云端 · 按秒计费 · 退避轮询"]
+            CE["ComfyUiEngine<br/>自建 · 按成功计费 · webhook 回调"]
+            SCHED["ComfyUiNodeScheduler<br/>least-queue / round-robin 选节点"]
+            WB["WorkflowBuilder 集（6 个）<br/>MiniMax-H3 系列 · Z-Image · Qwen-Image"]
+        end
+
+        subgraph ASYNC["异步与后台（async_job + 行级租约 · 多 Worker 并行）"]
+            POLL["VideoTaskPoller<br/>退避轮询 2s / 5s / 30s"]
+            RECON["TaskReconcileTask<br/>低频兜底对账"]
+            FIN["TaskFinalizeConsumer<br/>终态收尾：下载 → OSS → 结算 / 解冻"]
+            PNC["PipelineNodeSubmitConsumer<br/>流水线节点提交"]
+            WH["WebhookDispatcher<br/>HMAC-SHA256 + 退避重试 3 次"]
+        end
+
+        STREAM["TaskStreamManager<br/>终态事件(AFTER_COMMIT) → SSE 推送"]
+    end
+
+    subgraph INFRA["基础设施"]
+        DB[("MySQL（Flyway V1–V17）<br/>user · wallet · balance_transaction · recharge_order<br/>video_task · async_job · cost_record · api_key")]
+        REDIS[("Redis<br/>Lua 限流 · 登录 Token · Pub/Sub<br/>分布式锁 · ETA 统计")]
+        OSS[("阿里云 OSS<br/>参考素材 + 生成产物")]
+    end
+
+    subgraph EXT["外部服务"]
+        SD["Seedance 云端 API（火山方舟）"]
+        NG["nginx（X-Comfy-Token 校验）"]
+        CF["ComfyUI 多实例 GPU 集群<br/>同主机多端口 · 共享一套模型"]
+        ALI["支付宝网关（沙箱 / 生产）"]
+    end
+
+    FE -->|"HTTP + SSE ?token="| IN
+    DEV -->|"POST /api/v1/** · Bearer sk-"| IN
+    ALI -.->|"异步 notify 验签入账"| C4
+    IN --> C1
+    IN --> C2
+    IN --> C3
+    IN --> C4
+    C1 --> SUB
+    C3 --> SUB
+    C1 --> RECH
+    C1 --> WALLET
+    C2 --> WALLET
+    C4 --> RECH
+    SUB --> GATE
+    SUB --> WALLET
+    SUB --> PRICE
+    SUB --> REG
+    SUB --> DB
+    RECH --> ALI
+    RECH --> DB
+    WALLET --> DB
+    REG --> SE
+    REG --> CE
+    CE --> SCHED
+    CE --> WB
+    SE --> SD
+    CE --> NG
+    NG --> CF
+    CE -->|"参考素材上传 / 下载"| OSS
+    POLL --> REG
+    POLL --> DB
+    RECON --> DB
+    FIN --> DB
+    FIN --> OSS
+    PNC --> DB
+    ASYNC -.->|"job-available 即时唤醒"| REDIS
+    POLL -.-> REDIS
+    FIN -.->|"终态事件"| STREAM
+    FIN -.->|"终态事件"| WH
+    STREAM -.->|"SSE 推送"| FE
+    STREAM -.->|"Redis Pub/Sub 跨实例广播"| REDIS
+    WH -.->|"webhook 回调"| DEV
+
+    style CORE fill:#fff7e8,stroke:#e0a83c
+    style ENGINE fill:#eefaf1,stroke:#4fbf6a
+    style ASYNC fill:#eef4ff,stroke:#6b8ef0

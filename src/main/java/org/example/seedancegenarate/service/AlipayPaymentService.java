@@ -169,29 +169,104 @@ public class AlipayPaymentService {
     }
 
     /**
-     * 统一入口：根据订单创建支付链接
-     * 默认使用 H5 支付（兼容移动端和 PC 端）
-     */
-    public String createPaymentUrl(String orderNo, BigDecimal amount, Long userId) {
-        String subject = "Seedance 账户充值";
-        return createWapPayUrl(orderNo, amount, subject);
-    }
-
-    /**
-     * 加载密钥文件内容
+     * 加载密钥文件内容并规整格式（剔除 PEM 头尾、换行符，并自动转换 PKCS#1 为 PKCS#8）
      */
     private String loadKeyContent(String path) throws IOException {
         try {
+            String raw;
             // 支持 classpath: 和绝对路径
             if (path.startsWith("classpath:")) {
                 Resource resource = resourceLoader.getResource(path);
-                return new String(Files.readAllBytes(Paths.get(resource.getURI())));
+                try (java.io.InputStream is = resource.getInputStream()) {
+                    raw = new String(is.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                }
             } else {
-                return new String(Files.readAllBytes(Paths.get(path)));
+                raw = new String(Files.readAllBytes(Paths.get(path)), java.nio.charset.StandardCharsets.UTF_8);
             }
+            return normalizeKey(raw);
         } catch (IOException e) {
             log.error("加载密钥文件失败: path={}", path, e);
             throw new IOException("密钥文件加载失败: " + path, e);
         }
+    }
+
+    /**
+     * 标准化密钥：
+     * 1. 剔除 -----BEGIN ...----- 和 -----END ...-----
+     * 2. 剔除所有空白与换行符
+     * 3. 若为 PKCS#1 格式，自动转换为 Java / 支付宝 SDK 识别的 PKCS#8 格式
+     */
+    public static String normalizeKey(String rawKey) {
+        if (rawKey == null || rawKey.isBlank()) {
+            return "";
+        }
+        boolean isPkcs1 = rawKey.contains("BEGIN RSA PRIVATE KEY");
+        String cleaned = rawKey
+                .replaceAll("-----BEGIN [A-Z0-9_ ]+-----", "")
+                .replaceAll("-----END [A-Z0-9_ ]+-----", "")
+                .replaceAll("\\s+", "")
+                .trim();
+
+        if (isPkcs1) {
+            try {
+                byte[] pkcs1Bytes = java.util.Base64.getDecoder().decode(cleaned);
+                byte[] pkcs8Bytes = convertPkcs1ToPkcs8(pkcs1Bytes);
+                return java.util.Base64.getEncoder().encodeToString(pkcs8Bytes);
+            } catch (Exception e) {
+                log.warn("PKCS#1 自动转 PKCS#8 失败，回退原始内容: {}", e.getMessage());
+                return cleaned;
+            }
+        }
+        return cleaned;
+    }
+
+    /**
+     * 将 PKCS#1 RSA 私钥 DER 字节包装为标准 PKCS#8 PrivateKeyInfo 结构
+     */
+    private static byte[] convertPkcs1ToPkcs8(byte[] pkcs1Bytes) {
+        // RSA AlgorithmIdentifier DER 编码 (OID 1.2.840.113549.1.1.1, NULL)
+        byte[] rsaAlgorithmId = new byte[]{
+                0x30, 0x0d, 0x06, 0x09, 0x2a, (byte) 0x86, 0x48, (byte) 0x86,
+                (byte) 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00
+        };
+
+        // 构造 OCTET STRING (包含 pkcs1Bytes)
+        byte[] octetString = encodeDer(0x04, pkcs1Bytes);
+
+        // 构造 Version (0)
+        byte[] version = new byte[]{0x02, 0x01, 0x00};
+
+        // 拼接 Version + AlgorithmId + OctetString
+        byte[] inner = new byte[version.length + rsaAlgorithmId.length + octetString.length];
+        System.arraycopy(version, 0, inner, 0, version.length);
+        System.arraycopy(rsaAlgorithmId, 0, inner, version.length, rsaAlgorithmId.length);
+        System.arraycopy(octetString, 0, inner, version.length + rsaAlgorithmId.length, octetString.length);
+
+        // 封装为顶级 SEQUENCE
+        return encodeDer(0x30, inner);
+    }
+
+    private static byte[] encodeDer(int tag, byte[] data) {
+        int length = data.length;
+        byte[] lengthBytes;
+        if (length < 128) {
+            lengthBytes = new byte[]{(byte) length};
+        } else if (length < 256) {
+            lengthBytes = new byte[]{(byte) 0x81, (byte) length};
+        } else if (length < 65536) {
+            lengthBytes = new byte[]{(byte) 0x82, (byte) (length >> 8), (byte) (length & 0xff)};
+        } else {
+            lengthBytes = new byte[]{
+                    (byte) 0x83,
+                    (byte) (length >> 16),
+                    (byte) ((length >> 8) & 0xff),
+                    (byte) (length & 0xff)
+            };
+        }
+        byte[] result = new byte[1 + lengthBytes.length + data.length];
+        result[0] = (byte) tag;
+        System.arraycopy(lengthBytes, 0, result, 1, lengthBytes.length);
+        System.arraycopy(data, 0, result, 1 + lengthBytes.length, data.length);
+        return result;
     }
 }

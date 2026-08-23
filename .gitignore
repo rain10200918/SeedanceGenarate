@@ -57,3 +57,7 @@ src/main/resources/application-dev.yaml
 logs/
 src/main/resources/application.yaml
 !src/main/resources/application-template.yaml
+
+# 本地联调用的 mock 密钥与 profile，不入库
+src/main/resources/alipay/mock_*.pem
+src/main/resources/application-local.yaml
