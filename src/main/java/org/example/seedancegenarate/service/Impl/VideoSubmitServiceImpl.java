@@ -74,15 +74,26 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     }
 
     @Override
-    public VideoTask submit(SubmitRequest request) throws Exception {
-        String provider = resolveProvider(request.provider());
-        VideoEngine engine = videoEngineRegistry.get(provider);
-        // 闸门基于「实际生效的模型」而非请求原始值（防不传/乱传 model 绕过）
-        String effectiveModel = engine.effectiveModel(request.model());
-        assertModelOpen(effectiveModel);
+    public PriceEstimate estimate(String provider, String model, Integer duration) {
+        ResolvedSpec spec = resolveSpec(provider, model, duration);
+        // 探针任务只为复用 price() 的字段口径，不落库、无任何副作用
+        VideoTask probe = new VideoTask();
+        probe.setProvider(spec.provider());
+        probe.setModel(spec.effectiveModel());
+        probe.setDuration(spec.duration());
+        probe.setOutputType(spec.outputType().name());
+        PricingService.Price price = pricingService.price(probe);
+        return new PriceEstimate(spec.provider(), spec.effectiveModel(), spec.duration(),
+                spec.outputType().name(), price.unitPrice(), price.amount(), price.currency());
+    }
 
-        // 统一默认值（与 UI 控制器一致）：API 可能不传 duration/ratio，而 ComfyUI builder 的
-        Integer duration = request.duration() == null ? 8 : request.duration();
+    @Override
+    public VideoTask submit(SubmitRequest request) throws Exception {
+        ResolvedSpec spec = resolveSpec(request.provider(), request.model(), request.duration());
+        String provider = spec.provider();
+        VideoEngine engine = spec.engine();
+        String effectiveModel = spec.effectiveModel();
+        Integer duration = spec.duration();
         String ratio = (request.ratio() == null || request.ratio().isBlank()) ? "16:9" : request.ratio();
 
         // 任务类型 = (有无参考图) × (模型输出类型)
@@ -90,7 +101,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         List<String> videoUrls = request.videoUrls() == null ? Collections.emptyList() : request.videoUrls();
         List<String> audioUrls = request.audioUrls() == null ? Collections.emptyList() : request.audioUrls();
         boolean hasImages = !imageUrls.isEmpty();
-        OutputType outputType = engine.outputType(effectiveModel);
+        OutputType outputType = spec.outputType();
         GenerationMode mode = GenerationMode.of(hasImages, outputType);
 
         // 幂等键由调用方在重试时复用；未提供时生成一次性键（UI 单次点击仍安全）。
@@ -253,6 +264,26 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
             log.warn("解析任务参考素材失败（按空处理）: {}", e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * submit 与 estimate 共用的口径解析：提供方默认值 → 生效模型 → 开放闸门 → 时长默认 → 输出类型。
+     * 估价与冻结走同一个方法、同一个 PricingService 入口，「展示价 == 冻结价」在结构上不可漂移。
+     */
+    private ResolvedSpec resolveSpec(String requestProvider, String requestModel, Integer requestDuration) {
+        String provider = resolveProvider(requestProvider);
+        VideoEngine engine = videoEngineRegistry.get(provider);
+        // 闸门基于「实际生效的模型」而非请求原始值（防不传/乱传 model 绕过）
+        String effectiveModel = engine.effectiveModel(requestModel);
+        assertModelOpen(effectiveModel);
+        // 统一默认值（与 UI 控制器一致）：API 可能不传 duration
+        Integer duration = requestDuration == null ? 8 : requestDuration;
+        OutputType outputType = engine.outputType(effectiveModel);
+        return new ResolvedSpec(provider, engine, effectiveModel, duration, outputType);
+    }
+
+    private record ResolvedSpec(String provider, VideoEngine engine, String effectiveModel,
+                                Integer duration, OutputType outputType) {
     }
 
     private String resolveProvider(String provider) {

@@ -55,6 +55,10 @@ public class LlmChatClient {
         } catch (Exception e) {
             // 序列化/连接异常：记录调用场景与错误类别，不写请求体与密钥
             log.warn("LLM 调用异常, scene:{}, model:{}, err:{}", meta == null ? null : meta.scene(), model, e.getMessage());
+            if (isTimeout(e)) {
+                // 和「服务没配」「服务挂了」分开说：超时用户自己能补救（缩短输入），前两者只能找管理员
+                throw new RuntimeException("提示词优化超时：内容较长时模型生成需要更久，请缩短提示词后重试", e);
+            }
             throw new RuntimeException("提示词优化服务调用失败，请稍后再试", e);
         }
 
@@ -76,5 +80,15 @@ public class LlmChatClient {
             log.warn("LLM 响应解析失败, scene:{}, err:{}", meta == null ? null : meta.scene(), e.getMessage());
             throw new RuntimeException("提示词优化服务调用失败，请稍后再试", e);
         }
+    }
+
+    /** Hutool 把 SocketTimeoutException 包在 IORuntimeException 里，只看最外层类型认不出超时 */
+    static boolean isTimeout(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
+            if (t instanceof java.net.SocketTimeoutException) {
+                return true;
+            }
+        }
+        return false;
     }
 }

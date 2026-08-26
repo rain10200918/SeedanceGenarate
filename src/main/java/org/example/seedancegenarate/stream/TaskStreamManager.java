@@ -75,14 +75,18 @@ public class TaskStreamManager {
                 set.forEach(emitter -> send(userId, emitter, SseEmitter.event().comment("ping"))));
     }
 
-    /** 统一发送：单连接串行化（SseEmitter 并发 send 不安全），失败即摘除该连接。 */
+    /** 统一发送：单连接串行化（SseEmitter 并发 send 不安全），失败即摘除并完成该连接。 */
     private void send(Long userId, SseEmitter emitter, SseEmitter.SseEventBuilder event) {
         try {
             synchronized (emitter) {
                 emitter.send(event);
             }
-        } catch (IOException | IllegalStateException e) {
+        } catch (Exception e) {
             remove(userId, emitter);
+            try {
+                emitter.complete();
+            } catch (Exception ignored) {
+            }
         }
     }
 

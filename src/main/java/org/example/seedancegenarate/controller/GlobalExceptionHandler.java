@@ -78,7 +78,27 @@ public class GlobalExceptionHandler {
         return Result.fail(405, "不支持的请求方式: " + e.getMethod());
     }
 
-    /** 8. 未登录兜底与常规运行时异常 */
+    /** 8. 客户端主动断开连接（如用户关闭网页、刷新页面、SSE/下载中断）：正常网络事件，静默处理避免污染日志与二次异常 */
+    @ExceptionHandler({
+            org.apache.catalina.connector.ClientAbortException.class,
+            org.springframework.web.context.request.async.AsyncRequestNotUsableException.class
+    })
+    public void handleClientAbort(Exception e) {
+        log.debug("客户端主动断开连接 (SSE/下载): {}", e.getMessage());
+    }
+
+    /** 9. 网络 IO 异常处理：区分正常 Broken pipe 与真实 IO 故障 */
+    @ExceptionHandler(java.io.IOException.class)
+    public void handleIOException(java.io.IOException e) {
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        if (msg.contains("broken pipe") || msg.contains("connection reset")) {
+            log.debug("网络连接已断开 (Broken pipe / Connection reset): {}", e.getMessage());
+            return;
+        }
+        log.error("系统 IO 异常: {}", e.getMessage(), e);
+    }
+
+    /** 10. 未登录兜底与常规运行时异常 */
     @ExceptionHandler(RuntimeException.class)
     public Result<?> handleRuntimeException(RuntimeException exception) {
         if ("请先登录".equals(exception.getMessage())) {
@@ -88,7 +108,7 @@ public class GlobalExceptionHandler {
         return Result.fail(exception.getMessage());
     }
 
-    /** 9. 系统级未知异常（500 兜底，带堆栈记日志便于排障） */
+    /** 11. 系统级未知异常（500 兜底，带堆栈记日志便于排障） */
     @ExceptionHandler(Exception.class)
     public Result<?> handleException(Exception exception) {
         log.error("系统未知错误: {}", exception.getMessage(), exception);

@@ -24,6 +24,8 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 任务完成对账（兜底，低频）：三分支，分布式锁保证多实例下只有一台执行：
@@ -40,6 +42,15 @@ import java.util.List;
 @RequiredArgsConstructor
 public class TaskReconcileTask {
     private static final Duration LOCK_TTL = Duration.ofSeconds(120);
+
+    /** 账务补偿连续失败到这个次数就升级为 ERROR 点名告警 */
+    private static final int WALLET_COMPENSATION_ALERT_AFTER = 3;
+    /** 升级之后每这么多次再喊一次（30s 一轮 → 约每小时一次），其余静默重试 */
+    private static final int WALLET_COMPENSATION_ALERT_EVERY = 120;
+
+    /** taskId → 连续失败次数。成功即清零；进程重启后重新计数（重启本身就值得再喊一次） */
+    private final Map<Long, Integer> walletCompensationFailures = new ConcurrentHashMap<>();
+
     private final VideoTaskService videoTaskService;
     private final VideoEngineRegistry videoEngineRegistry;
     private final VideoTaskPoller videoTaskPoller;
@@ -118,10 +129,33 @@ public class TaskReconcileTask {
                 } else {
                     walletService.release(task.getUserId(), amount, task.getId());
                 }
+                walletCompensationFailures.remove(task.getId()); // 修好了就清计数
             } catch (Exception e) {
-                log.warn("终态账务补偿失败: taskId={}, status={}, reason={}",
-                        task.businessTaskId(), task.getStatus(), e.getMessage());
+                onWalletCompensationFailed(task, e);
             }
+        }
+    }
+
+    /**
+     * 补偿失败的告警策略：**不能每 30 秒重复喊同一句**。
+     * <p>
+     * 有些失败是自愈不了的（冻结额被历史 bug 挪用，池子里根本没钱可退），
+     * 原来的写法会连喊 7 天两万次 WARN —— 等于没有告警，真问题被自己的噪声埋掉。
+     * 这里：前几次仍按 WARN 重试；到阈值喊一次 ERROR 点名「需人工处理」，此后静默重试，
+     * 每小时才再喊一次。<b>只影响日志与重试节奏，不改任务状态、不放弃补偿</b> ——
+     * 人把数据修好后，下一轮会自动成功并清掉计数。
+     */
+    private void onWalletCompensationFailed(VideoTask task, Exception e) {
+        int count = walletCompensationFailures.merge(task.getId(), 1, Integer::sum);
+        if (count < WALLET_COMPENSATION_ALERT_AFTER) {
+            log.warn("终态账务补偿失败: taskId={}, status={}, reason={}",
+                    task.businessTaskId(), task.getStatus(), e.getMessage());
+        } else if (count == WALLET_COMPENSATION_ALERT_AFTER
+                || count % WALLET_COMPENSATION_ALERT_EVERY == 0) {
+            log.error("终态账务补偿连续失败 {} 次，需人工处理: taskId={}, dbId={}, userId={}, "
+                            + "status={}, freezeAmount={}, reason={}",
+                    count, task.businessTaskId(), task.getId(), task.getUserId(),
+                    task.getStatus(), task.getFreezeAmount(), e.getMessage());
         }
     }
 

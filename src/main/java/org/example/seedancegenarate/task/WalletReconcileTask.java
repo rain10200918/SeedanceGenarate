@@ -40,4 +40,21 @@ public class WalletReconcileTask {
         diffs.forEach(d -> log.error("钱包对账不一致: userId={}, 流水合计={}, 钱包总资产={}",
                 d.getUserId(), d.getLedgerTotal(), d.getWalletTotal()));
     }
+
+    /**
+     * 冻结维度对账：上面那个总资产口径抓不到「用别人的冻结额退款」这类错
+     * （release 的 amount 记 0，总资产不变，永远是平的）。
+     * 2026-08-21 就是这样漏过去的：task 744 未冻结却解冻 1.80，总资产对账全程绿灯。
+     */
+    @Scheduled(cron = "0 10 3 * * ?")
+    public void reconcileFrozen() {
+        List<WalletReconcileDiff> diffs = walletMapper.findFrozenMismatches();
+        if (diffs.isEmpty()) {
+            log.info("钱包冻结额对账通过：frozen 与各笔 hold 净和一致");
+            return;
+        }
+        diffs.forEach(d -> log.error("钱包冻结额对账不一致: userId={}, hold 净和={}, wallet.frozen={} "
+                        + "（有任务的冻结额被挪用或流水虚记 hold，需人工核对）",
+                d.getUserId(), d.getLedgerTotal(), d.getWalletTotal()));
+    }
 }

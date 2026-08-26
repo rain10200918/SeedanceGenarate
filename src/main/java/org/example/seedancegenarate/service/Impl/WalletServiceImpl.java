@@ -121,27 +121,28 @@ public class WalletServiceImpl implements WalletService {
             return; // 0 元任务无冻结可结算
         }
         String bizKey = "task:" + taskId + ":settle";
+        // 前置判定：从未冻结过的任务不能去动 frozen —— frozen 是一个池子、不按任务分格，
+        // 池子里若恰好有别人的钱，settle 会照扣不误（见 everFrozen 的注释）
+        if (!everFrozen(taskId)) {
+            // 任务成功了却没冻结过（提交时异常回滚了 FREEZE）：从可用余额直接扣，hold 记 0
+            BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_SETTLE,
+                    amount.negate(), BigDecimal.ZERO, bizKey, taskId);
+            if (bt == null) {
+                return; // 已结算过，幂等跳过
+            }
+            if (walletMapper.addBalance(userId, amount.negate()) != 1) {
+                throw new IllegalStateException("钱包可用余额不足，无法结算: userId=" + userId + ", taskId=" + taskId);
+            }
+            log.warn("任务未曾冻结，直接从可用余额扣除结算: userId={}, taskId={}, amount={}", userId, taskId, amount);
+            fillBalanceAfter(walletMapper.selectOne(byUser(userId)), bt);
+            return;
+        }
+
         BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_SETTLE, amount.negate(), amount, bizKey, taskId);
         if (bt == null) {
             return; // 已结算过，幂等跳过
         }
-        int rows = walletMapper.settle(userId, amount);
-        if (rows != 1) {
-            // 检查是否从未冻结过（例如提交异常未扣冻结额）
-            Long freezeCount = balanceTransactionMapper.selectCount(
-                    Wrappers.<BalanceTransaction>lambdaQuery()
-                            .eq(BalanceTransaction::getBizKey, "task:" + taskId)
-                            .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
-            if (freezeCount == null || freezeCount == 0) {
-                // 如果从未冻结过但任务成功了，直接从可用余额扣减兜底
-                int deductRows = walletMapper.addBalance(userId, amount.negate());
-                if (deductRows == 1) {
-                    log.warn("任务未曾冻结，直接从可用余额扣除结算: userId={}, taskId={}, amount={}", userId, taskId, amount);
-                    Wallet wallet = walletMapper.selectOne(byUser(userId));
-                    fillBalanceAfter(wallet, bt);
-                    return;
-                }
-            }
+        if (walletMapper.settle(userId, amount) != 1) {
             // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
             throw new IllegalStateException("钱包冻结余额不足，无法结算: userId=" + userId + ", taskId=" + taskId);
         }
@@ -156,31 +157,50 @@ public class WalletServiceImpl implements WalletService {
             return; // 0 元任务无冻结可解
         }
         String bizKey = "task:" + taskId + ":release";
-        // 解冻也是 frozen → balance 的内部转移，不改变账户总资产；净额只记 0。
+        // 前置判定：从未冻结过就没有可退的冻结额。这道检查以前放在「写钱包失败之后」，
+        // 而 frozen 是一个不分格的池子 —— 池子里只要有别的任务的钱够数，
+        // WHERE frozen >= amount 就会通过、rows==1、检查根本执行不到，
+        // 于是把别人的冻结额搬进了 balance。2026-08-21 真实发生（task 744 挪走 1.80）。
+        if (!everFrozen(taskId)) {
+            // hold 记 0：钱包一分未动，流水不能宣称动过 hold，否则 frozen 维度对账会假阳性
+            BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_RELEASE,
+                    BigDecimal.ZERO, BigDecimal.ZERO, bizKey, taskId);
+            if (bt == null) {
+                return; // 已解冻过，幂等跳过
+            }
+            log.warn("任务从未成功冻结过，不退冻结额、只记流水收尾: userId={}, taskId={}, amount={}",
+                    userId, taskId, amount);
+            Wallet wallet = walletMapper.selectOne(byUser(userId));
+            if (wallet != null) {
+                fillBalanceAfter(wallet, bt);
+            }
+            return;
+        }
+
+        // 解冻是 frozen → balance 的内部转移，不改变账户总资产；净额只记 0。
         BalanceTransaction bt = insertLedger(userId, BalanceTransaction.TYPE_RELEASE, BigDecimal.ZERO, amount, bizKey, taskId);
         if (bt == null) {
             return; // 已解冻过，幂等跳过
         }
-        int rows = walletMapper.release(userId, amount);
-        if (rows != 1) {
-            // 检查该任务是否根本没有成功冻结过（如提交时死锁/异常直接失败，未曾入账 FREEZE）
-            Long freezeCount = balanceTransactionMapper.selectCount(
-                    Wrappers.<BalanceTransaction>lambdaQuery()
-                            .eq(BalanceTransaction::getBizKey, "task:" + taskId)
-                            .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
-            if (freezeCount == null || freezeCount == 0) {
-                log.info("任务从未成功冻结过，跳过解冻退款并完成对账: userId={}, taskId={}, amount={}", userId, taskId, amount);
-                Wallet wallet = walletMapper.selectOne(byUser(userId));
-                if (wallet != null) {
-                    fillBalanceAfter(wallet, bt);
-                }
-                return;
-            }
+        if (walletMapper.release(userId, amount) != 1) {
             // 流水与钱包必须同事务；冻结不足/钱包缺失时回滚流水，交给补偿下一轮重试。
             throw new IllegalStateException("钱包冻结余额不足，无法解冻: userId=" + userId + ", taskId=" + taskId);
         }
         Wallet wallet = walletMapper.selectOne(byUser(userId));
         fillBalanceAfter(wallet, bt);
+    }
+
+    /**
+     * 该任务是否真的成功冻结过（FREEZE 流水存在）。
+     * <p>
+     * FREEZE 流水与钱包更新同事务，所以「读得到」等价于「钱真的进了 frozen」。
+     */
+    private boolean everFrozen(Long taskId) {
+        Long count = balanceTransactionMapper.selectCount(
+                Wrappers.<BalanceTransaction>lambdaQuery()
+                        .eq(BalanceTransaction::getBizKey, "task:" + taskId)
+                        .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
+        return count != null && count > 0;
     }
 
     @Override

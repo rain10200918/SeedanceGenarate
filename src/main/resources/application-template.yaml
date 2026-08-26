@@ -242,7 +242,10 @@ rate-limit:
     refill-seconds: ${RATE_LIMIT_API_KEY_REFILL_SECONDS:60}
 mybatis-plus:
   configuration:
-    log-impl: ${MYBATIS_PLUS_LOG_IMPL:org.apache.ibatis.logging.stdout.StdOutImpl}
+    log-impl: ${MYBATIS_PLUS_LOG_IMPL:org.apache.ibatis.logging.nologging.NoLoggingImpl}
+    # 默认关掉 SQL 全量打印：生产开着会把真正的 WARN/ERROR 淹掉（2026-08-26 排查账务异常时
+    # 就是 95% 的日志都是 Preparing/Parameters）。本地排查时设
+    # MYBATIS_PLUS_LOG_IMPL=org.apache.ibatis.logging.stdout.StdOutImpl 打开。
   mapper-locations: classpath:/mapper/**/*.xml
   type-aliases-package: org.example.seedancegenarate.entity
 aliyun:
@@ -266,3 +269,16 @@ management:
   metrics:
     tags:
       application: ${SPRING_APPLICATION_NAME:seedance-backend}
+
+wechat:
+  pay:
+    enabled: ${WECHAT_PAY_ENABLED:true}
+    app-id: ${WECHAT_PAY_APP_ID:wxbdfefbd6cca026e1}
+    mch-id: ${WECHAT_PAY_MCH_ID:1116376414}
+    api-v3-key: ${WECHAT_PAY_API_V3_KEY:fe3c22dbd689b41a943423769e5a55e1}
+    api-v3-key-path: ${WECHAT_PAY_API_V3_KEY_PATH:classpath:wechat/apiv3_key.txt}
+    private-key-path: ${WECHAT_PAY_PRIVATE_KEY_PATH:classpath:wechat/apiclient_key.pem}
+    merchant-cert-path: ${WECHAT_PAY_MERCHANT_CERT_PATH:classpath:wechat/apiclient_cert.pem}
+    merchant-serial-number: ${WECHAT_PAY_SERIAL_NUMBER:17578DB1B6BA6874062E062323BC5559C86A60C6}
+    notify-url: ${WECHAT_PAY_NOTIFY_URL:https://api-generate.creator.ascent-ai.cn/api/notify/wechat}
+

@@ -2,6 +2,7 @@ package org.example.seedancegenarate.service;
 
 import org.example.seedancegenarate.entity.VideoTask;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -14,6 +15,23 @@ public interface VideoSubmitService {
      * 提交前校验（引擎存在 / 模型开放），无副作用。各入口在产生副作用（传参考图）之前调用。
      */
     void validate(String provider, String model);
+
+    /**
+     * 只读估价：按与 {@link #submit} 完全相同的口径（提供方默认值 / 生效模型 / 开放闸门 /
+     * 时长默认 / 输出类型）计算本次提交将冻结的金额，供前端在提交前展示。无任何副作用。
+     */
+    PriceEstimate estimate(String provider, String model, Integer duration);
+
+    /** 估价结果：{@code amount} 即提交后将冻结的金额（与 VideoTask.freezeAmount 同一计价入口） */
+    record PriceEstimate(
+            String provider,
+            String model,
+            Integer duration,
+            String outputType,
+            BigDecimal unitPrice,
+            BigDecimal amount,
+            String currency) {
+    }
 
     /** 查询当前用户指定幂等键对应的任务；用于在上传参考素材前短路重复 UI 请求。 */
     VideoTask findByRequestId(Long userId, String requestId);

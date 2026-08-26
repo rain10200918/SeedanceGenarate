@@ -62,4 +62,21 @@ public interface WalletMapper extends BaseMapper<Wallet> {
             + "GROUP BY w.user_id, w.balance, w.frozen "
             + "HAVING ABS(ledgerTotal - walletTotal) > 0.005")
     java.util.List<WalletReconcileDiff> findMismatches();
+
+    /**
+     * 对账（冻结维度）：wallet.frozen vs 各笔 hold 的净和。
+     * <p>
+     * 上面那个总资产恒等式<b>结构上抓不到冻结额被挪用</b> —— release 的 amount 记 0，
+     * 只是 frozen→balance 的内部转移，总资产不变，所以「用别人的冻结额退款」在那个口径下永远是平的。
+     * 这里按 hold 维度再对一次：freeze +hold，settle / release −hold。
+     */
+    @Select("SELECT w.user_id AS userId, "
+            + "COALESCE(SUM(CASE WHEN b.type = 'FREEZE' THEN b.hold_amount "
+            + "                  WHEN b.type IN ('SETTLE', 'RELEASE') THEN -b.hold_amount "
+            + "                  ELSE 0 END), 0) AS ledgerTotal, "
+            + "w.frozen AS walletTotal "
+            + "FROM wallet w LEFT JOIN balance_transaction b ON b.user_id = w.user_id "
+            + "GROUP BY w.user_id, w.frozen "
+            + "HAVING ABS(ledgerTotal - walletTotal) > 0.005")
+    java.util.List<WalletReconcileDiff> findFrozenMismatches();
 }

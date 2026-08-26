@@ -407,6 +407,19 @@ public class VideoController {
      * GET
      * /api/video/task/{taskId}/eta
      */
+    /** 只读估价：立即生成按钮实时显示本次将冻结的金额（与提交冻结走同一 resolveSpec + PricingService，口径同源） */
+    @GetMapping("/estimate")
+    public Result<VideoSubmitService.PriceEstimate> estimate(
+            @RequestParam(required = false) String provider,
+            @RequestParam(required = false) String model,
+            @RequestParam(required = false) Integer duration) {
+        UserContext.requireUserId();
+        if (duration != null && (duration < 1 || duration > 600)) {
+            throw new RuntimeException("时长参数不合法");
+        }
+        return Result.success(videoSubmitService.estimate(provider, model, duration));
+    }
+
     @GetMapping("/task/{taskId}/eta")
     public Result<TaskEtaService.TaskEta> taskEta(@PathVariable String taskId) {
         UserContext.requireUserId();
