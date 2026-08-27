@@ -52,6 +52,10 @@ public class VideoTaskPoller {
     @Value("${video.default-provider:seedance}")
     private String defaultProvider;
 
+    /** 单轮推进的时间预算（毫秒）。默认取锁 TTL 的一半，留出的另一半是「打断不了已发出的那次 HTTP」的余量 */
+    @Value("${video.poll.round-budget-ms:150000}")
+    private long roundBudgetMs;
+
     @Scheduled(fixedDelayString = "${video.poll.interval-ms:2000}",
             initialDelayString = "${video.poll.initial-delay-ms:5000}")
     public void advanceProcessingTasks() {
@@ -106,7 +110,17 @@ public class VideoTaskPoller {
         if (!tasks.isEmpty()) {
             log.info("轮询推进器扫描到 {} 条任务", tasks.size());
         }
+        // 单轮时间预算：ComfyUI 进来之后这条路径开始发大量 HTTP，一台 hang 住的节点
+        // 能让一轮跑过 300 秒租约——那时另一个实例会拿到锁并发进来。
+        // 只在两条任务之间检查，第一条永远做得成；被跳过的下一轮按 next_poll_at 自然接着做。
+        long deadline = System.nanoTime() + Math.max(roundBudgetMs, 0) * 1_000_000L;
+        int processed = 0;
         for (VideoTask task : tasks) {
+            if (processed > 0 && System.nanoTime() - deadline >= 0) {
+                log.warn("轮询推进超出本轮预算，剩余 {} 条留待下一轮", tasks.size() - processed);
+                break;
+            }
+            processed++;
             try {
                 advanceTask(task);
             } catch (Exception e) {

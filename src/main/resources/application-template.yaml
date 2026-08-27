@@ -101,12 +101,22 @@ video:
     initial-delay-ms: ${VIDEO_POLL_INITIAL_DELAY_MS:5000}
     max-age-hours: ${VIDEO_POLL_MAX_AGE_HOURS:24}
     batch-size: ${VIDEO_POLL_BATCH_SIZE:200}
+    # 单轮推进的时间预算（毫秒）；上限被轮询锁 TTL(300s) 的一半夹死
+    round-budget-ms: ${VIDEO_POLL_ROUND_BUDGET_MS:150000}
   # 任务超时自动处理（对账兜底）：本轮尝试超过阈值仍 PROCESSING → 最后确认 → 决策
   task-timeout-minutes: ${VIDEO_TASK_TIMEOUT_MINUTES:60}
   # 自动重试上限：仅 ON_SUCCESS 计费引擎（ComfyUI 免费重跑）生效；0 = 只失败不重试
   timeout-retry-max: ${VIDEO_TIMEOUT_RETRY_MAX:2}
   # 提交断裂判定：PROCESSING 且 provider_task_id 为空超过该时长 → 终止
   submit-stall-minutes: ${VIDEO_SUBMIT_STALL_MINUTES:10}
+  # 单轮对账的时间预算（毫秒），四个分支平分；上限被对账锁 TTL(120s) 的一半夹死
+  reconcile-round-budget-ms: ${VIDEO_RECONCILE_ROUND_BUDGET_MS:60000}
+  # 产物保留天数：**必须与 OSS 控制台的生命周期规则 outputs-expire 对齐**。
+  # 代码不去读 OSS 的规则（为此加一个跨网依赖不值得），靠启动配置指纹让人一眼对照。
+  # 判定基准是 create_time 而非 update_time：后者会被后续行更新往后推，
+  # 那会让应用说「没过期」而 OSS 已删 —— 用户拿到一个转不出来的播放器。
+  # < 1 表示关闭过期判定（不是「一切立刻过期」）。
+  artifact-retention-days: ${VIDEO_ARTIFACT_RETENTION_DAYS:30}
   # ETA 样本时长上限（分钟）：对账补终态的历史卡死任务时长虚大，超过上限的样本剔除
   eta-max-sample-minutes: ${VIDEO_ETA_MAX_SAMPLE_MINUTES:90}
   cleanup:
@@ -120,7 +130,15 @@ video:
   comfyui:
     scheduling: ${VIDEO_COMFYUI_SCHEDULING:least-queue}
     connect-timeout-ms: ${VIDEO_COMFYUI_CONNECT_TIMEOUT_MS:3000}
+    # 提交 / 上传 / 下载素材：载荷可达几十 MB，必须给足
     read-timeout-ms: ${VIDEO_COMFYUI_READ_TIMEOUT_MS:60000}
+    # 状态查询（/history、/queue）：只读几 KB JSON。别和上面共用——
+    # 共用时一台 hang 住的节点能让对账的单条任务阻塞满 60 秒。下限 1000ms（0 = 无限等待）
+    status-timeout-ms: ${VIDEO_COMFYUI_STATUS_TIMEOUT_MS:5000}
+    # 这台 ComfyUI 是否真的会回调；原生 ComfyUI 不支持，装了 JobNotify 这类扩展才置 true。
+    webhook-supported: ${VIDEO_COMFYUI_WEBHOOK_SUPPORTED:false}
+    # /queue 响应可能几 MB，按节点短缓存（只用于轮询，调度取实时）；0=不缓存。
+    queue-cache-ms: ${VIDEO_COMFYUI_QUEUE_CACHE_MS:3000}
     # 访问令牌：所有请求统一带 X-Comfy-Token（与 nginx 入口校验一致）。
     access-token: ${COMFYUI_ACCESS_TOKEN:}
     nodes:
@@ -159,6 +177,8 @@ feature:
   redis-config-invalidation: ${FEATURE_REDIS_CONFIG_INVALIDATION:false}
 
 task-events:
+  # 跨实例任务状态事件（SSE）频道。事件里带 userId，不同环境共用 Redis 时必须换前缀，
+  # 否则生产的任务完成事件会推给别的环境的 SSE 订阅者。
   channel: ${TASK_STATUS_REDIS_CHANNEL:local:seedance:event:task-status}
 
 config-invalidation:
@@ -282,3 +302,20 @@ wechat:
     merchant-serial-number: ${WECHAT_PAY_SERIAL_NUMBER:17578DB1B6BA6874062E062323BC5559C86A60C6}
     notify-url: ${WECHAT_PAY_NOTIFY_URL:https://api-generate.creator.ascent-ai.cn/api/notify/wechat}
 
+# ============================================================
+# 日志
+# 改动前既没有 logback.xml 也没有这一段：只往 stdout 走，没有文件、没有滚动上限，
+# 也没法在不改代码的情况下临时开某个包的 DEBUG。
+# 2026-08-26 线上被扫描器每秒一发地打 50 行堆栈时，这两件事都很要命。
+# ============================================================
+logging:
+  level:
+    root: ${LOG_LEVEL_ROOT:INFO}
+    # 排查时把这个调成 DEBUG 就能看到 poll 判定、缓存命中这类过程日志，不用改代码重新构建
+    org.example.seedancegenarate: ${LOG_LEVEL_APP:INFO}
+  logback:
+    rollingpolicy:
+      # 仅在设置了 LOG_FILE 时生效；容器里默认只走 stdout，交给 docker 的 log-opts 滚动
+      max-file-size: ${LOG_MAX_FILE_SIZE:100MB}
+      max-history: ${LOG_MAX_HISTORY:14}
+      total-size-cap: ${LOG_TOTAL_SIZE_CAP:5GB}

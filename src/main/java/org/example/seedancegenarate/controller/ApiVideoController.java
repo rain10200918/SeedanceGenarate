@@ -40,6 +40,7 @@ public class ApiVideoController {
     private final ApiDocService apiDocService;
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
+    private final org.example.seedancegenarate.service.ArtifactExpiryPolicy artifactExpiryPolicy;
 
     /** 当前请求的 API Key（ApiKeyInterceptor 注入） */
     private static ApiKey currentKey(HttpServletRequest request) {
@@ -82,7 +83,7 @@ public class ApiVideoController {
     /** 查状态：PROCESSING / SUCCESS（含结果）/ FAILED（含错误） */
     @GetMapping("/{taskId}")
     public VideoTask get(@PathVariable String taskId, HttpServletRequest servletRequest) {
-        return findTask(currentKey(servletRequest).getId(), taskId);
+        return artifactExpiryPolicy.stamp(findTask(currentKey(servletRequest).getId(), taskId));
     }
 
     /** 任务列表（该钥匙的，分页） */
@@ -94,11 +95,11 @@ public class ApiVideoController {
     ) {
         long pageCurrent = Math.max(current, 1L);
         long pageSize = Math.min(Math.max(size, 1L), 100L);
-        return videoTaskService.page(
+        return artifactExpiryPolicy.stampAll(videoTaskService.page(
                 new Page<>(pageCurrent, pageSize),
                 Wrappers.<VideoTask>lambdaQuery()
                         .eq(VideoTask::getApiKeyId, currentKey(servletRequest).getId())
-                        .orderByDesc(VideoTask::getId));
+                        .orderByDesc(VideoTask::getId)));
     }
 
     /** 下载产物（内联，按扩展名定 Content-Type） */
@@ -108,6 +109,11 @@ public class ApiVideoController {
         VideoTask task = findTask(currentKey(servletRequest).getId(), taskId);
         if (task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             throw ApiException.validation("任务尚无产物");
+        }
+        // 过期必须先判：createSignedGetUrl 是纯本地计算、不校验对象是否存在，
+        // 放行下去只会 302 到一个必然 404 的地址，调用方拿不到任何可判断的信号。
+        if (artifactExpiryPolicy.isExpired(task)) {
+            throw ApiException.artifactExpired(artifactExpiryPolicy.expiredMessage());
         }
         if (hasOssArtifact(task)) {
             response.sendRedirect(artifactStorage.createSignedGetUrl(

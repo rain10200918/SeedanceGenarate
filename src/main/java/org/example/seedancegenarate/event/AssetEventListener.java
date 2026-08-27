@@ -19,7 +19,9 @@ public class AssetEventListener {
 
     private final AssetService assetService;
 
-    @Async
+    // 必须带限定符：上下文里有多个 TaskExecutor 且没有叫 taskExecutor 的，
+    // 裸 @Async 会回退到 SimpleAsyncTaskExecutor（每次新建线程、无上限）
+    @Async("eventListenerExecutor")
     @EventListener
     public void onTaskSubmitted(TaskSubmittedEvent event) {
         if (!event.hasImages()) return;

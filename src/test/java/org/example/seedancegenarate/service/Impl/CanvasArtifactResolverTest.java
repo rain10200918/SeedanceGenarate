@@ -41,7 +41,8 @@ class CanvasArtifactResolverTest {
         artifactStorage = mock(ArtifactStorage.class);
         OssConfig ossConfig = new OssConfig();
         ossConfig.setSignedUrlTtlSeconds(300);
-        resolver = new CanvasArtifactResolverImpl(videoTaskService, artifactStorage, ossConfig);
+        resolver = new CanvasArtifactResolverImpl(videoTaskService, artifactStorage, ossConfig,
+                new org.example.seedancegenarate.service.ArtifactExpiryPolicy(30));
     }
 
     private CanvasNode producer(String taskId) {
@@ -122,5 +123,49 @@ class CanvasArtifactResolverTest {
                 resolver.toFetchable(producer("tsk_up"),
                         new ResolvedInputs.PortValue(MediaType.IMAGE, "tsk_up.png")));
         verify(artifactStorage, never()).createSignedGetUrl(any(), any());
+    }
+
+    @Test
+    void expiredUpstreamArtifactIsRejectedBeforeAnyMoneyIsFrozen() throws Exception {
+        // 【测什么】上游产物已被 OSS 生命周期删除时，在**签地址之前**就拒绝
+        // 【怎么算红】不判过期直接签 —— createSignedGetUrl 是纯本地计算、不校验对象存在，
+        //          于是顺序变成：签出地址 → 提交 → **钱先冻结** → 引擎 downloadBytes() 拿到 404
+        //          → markFailed → 退款。钱最终不会错，但用户看到的是一个莫名其妙的失败，
+        //          GPU 排队位也白占了。这正是 D-014 那类事故的翻版（当时 4 条各冻 2.40）
+        VideoTask expired = new VideoTask();
+        expired.setBizTaskId("tsk_old");
+        expired.setStatus("SUCCESS");
+        expired.setArtifactStorageType("OSS");
+        expired.setArtifactKey("outputs/tsk_old/result.mp4");
+        expired.setCreateTime(java.time.LocalDateTime.now().minusDays(45));
+        when(videoTaskService.getOne(any(), anyBoolean())).thenReturn(expired);
+
+        BusinessException thrown = assertThrows(BusinessException.class,
+                () -> resolver.toFetchable(producer("tsk_old"),
+                        new ResolvedInputs.PortValue(MediaType.IMAGE, "tsk_old.png")));
+
+        assertTrue(thrown.getMessage().contains("已过期"), "实际=" + thrown.getMessage());
+        verify(artifactStorage, never()).createSignedGetUrl(any(), any());
+    }
+
+    @Test
+    void freshUpstreamArtifactStillResolves() throws Exception {
+        // 【测什么】保留期内的上游产物行为一字未变
+        // 【怎么算红】过期判定写反 —— 昨天刚生成的产物接给下游就被拒，
+        //          画布这个功能整个不能用了
+        VideoTask fresh = new VideoTask();
+        fresh.setBizTaskId("tsk_new");
+        fresh.setStatus("SUCCESS");
+        fresh.setArtifactStorageType("OSS");
+        fresh.setArtifactKey("outputs/tsk_new/result.png");
+        fresh.setCreateTime(java.time.LocalDateTime.now().minusDays(1));
+        when(videoTaskService.getOne(any(), anyBoolean())).thenReturn(fresh);
+        when(artifactStorage.createSignedGetUrl(eq("outputs/tsk_new/result.png"), any(Duration.class)))
+                .thenReturn("https://oss/signed");
+
+        ResolvedInputs.PortValue out = resolver.toFetchable(producer("tsk_new"),
+                new ResolvedInputs.PortValue(MediaType.IMAGE, "tsk_new.png"));
+
+        assertEquals("https://oss/signed", out.value());
     }
 }

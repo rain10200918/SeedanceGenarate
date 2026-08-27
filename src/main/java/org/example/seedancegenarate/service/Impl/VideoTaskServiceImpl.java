@@ -12,13 +12,14 @@ import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskEtaService;
+import org.example.seedancegenarate.service.TaskRetryPolicy;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoDownloadService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.service.WalletService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.util.Locale;
@@ -36,8 +37,11 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final AsyncJobService asyncJobService;
     private final TaskEtaService taskEtaService;
     private final TaskStatusTransitioner taskStatusTransitioner;
+    private final TaskRetryPolicy taskRetryPolicy;
     private final WalletService walletService;
     private final PricingService pricingService;
+    /** 显式事务：不用 @Transactional 抽方法——同类内自调用会绕过代理，事务会静默消失 */
+    private final TransactionTemplate transactionTemplate;
 
     /** 终态作业幂等键。 */
     public static String finalizeJobKey(Long videoTaskId) {
@@ -48,8 +52,10 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     public static final String JOB_TYPE_TASK_RETRY = "TASK_RETRY";
 
     @Override
-    public java.util.List<VideoTask> findTerminalMissingWalletTransition(int limit) {
-        return baseMapper.findTerminalMissingWalletTransition(Math.min(Math.max(limit, 1), 500));
+    public java.util.List<VideoTask> findTerminalMissingWalletTransition(int limit,
+                                                                        java.util.Collection<Long> excludeIds) {
+        return baseMapper.findTerminalMissingWalletTransition(
+                Math.min(Math.max(limit, 1), 500), excludeIds);
     }
 
     @Override
@@ -84,14 +90,31 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
                 // 统一走终态唯一入口：CAS PROCESSING→FAILED + SSE 通知（幂等，已终态不覆盖）
                 taskStatusTransitioner.markFailed(task.getId(), status.getErrorMsg());
             }
+            case LOST -> {
+                // 作业在远端消失（节点重启清空了内存队列）：不是用户的失败，立刻重投而不是等超龄
+                if ("SUCCESS".equals(task.getStatus()) || "FAILED".equals(task.getStatus())) {
+                    return; // 已终态，忽略迟到的丢失判定
+                }
+                taskRetryPolicy.retryOrFail(task, status.getErrorMsg());
+            }
             default -> {
                 // PROCESSING：任务初始即为 PROCESSING，无需落库
             }
         }
     }
 
+    /**
+     * 终态收尾。<b>下载/转存在事务之外，落库+计费+结算+事件在一个短事务里。</b>
+     * <p>
+     * 改动前整个方法一个 {@code @Transactional}：一个大视频几十秒的「HTTP 拉取 → 落临时文件
+     * → 上传 OSS」全程占着一条数据库连接什么也不干，MySQL 侧还挂着一条长事务（拖住 undo/purge）。
+     * 消费是串行的所以现在只占 1 条连接（池上限 50）—— 它是随实例数与并发度线性恶化的隐患，
+     * 不是当前故障。
+     * <p>
+     * 用 {@link TransactionTemplate} 而不是把后半段抽成 {@code @Transactional} 方法：
+     * 同类内自调用会绕过代理，<b>事务会静默消失</b>——那是这条路径上最不能出的错。
+     */
     @Override
-    @Transactional
     public void finalizeTask(Long videoTaskId, String remoteVideoUrl) throws Exception {
         VideoTask task = this.getById(videoTaskId);
         if (task == null || !"PROCESSING".equals(task.getStatus())) {
@@ -100,8 +123,29 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         }
         log.info("开始终态收尾（下载 → OSS）: videoTaskId={}, url={}", videoTaskId, remoteVideoUrl);
         // 两类提供方统一转存 OSS：Seedance 地址会过期，ComfyUI /view 又是内网节点地址。
+        // 并发安全：objectKey 由 bizTaskId 决定，两个 Worker 同时下载会覆盖同一个对象；
+        // 谁能落库由下面的 CAS 决定，只有一个赢。
         VideoDownloadService.DownloadedArtifact downloaded = videoDownloadService.download(
                 remoteVideoUrl, task.businessTaskId());
+        Boolean committed = transactionTemplate.execute(status -> commitTerminal(task, downloaded));
+        if (!Boolean.TRUE.equals(committed)) {
+            return; // 其他 Worker 已落终态，幂等跳过
+        }
+        // 事务外：只是刷该模型平均耗时的 Redis 缓存（ETA 用）。
+        // 它失败不该把一笔已经结算完的成功任务回滚掉。
+        try {
+            taskEtaService.refreshAvgDuration(task.getModel());
+        } catch (Exception e) {
+            log.warn("刷新模型平均耗时缓存失败（不影响任务终态）: model={}, reason={}",
+                    task.getModel(), e.getMessage());
+        }
+        log.info("任务终态落库成功: taskId={}, mediaName={}, size={}",
+                task.businessTaskId(), downloaded.mediaName(), downloaded.artifact().contentLength());
+    }
+
+    /** 落库 + 计费 + 结算 + 事件：必须同事务。返回 false = CAS 抢输，本 Worker 什么都不做。 */
+    private boolean commitTerminal(VideoTask task, VideoDownloadService.DownloadedArtifact downloaded) {
+        Long videoTaskId = task.getId();
         String mediaName = downloaded.mediaName();
         task.setStatus("SUCCESS");
         // 保持既有前端契约：videoUrl 是后端媒体路由的文件标识，而非 OSS key/签名 URL。
@@ -125,7 +169,7 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
                 .set(VideoTask::getArtifactEtag, downloaded.artifact().etag())
                 .set(VideoTask::getErrorMsg, null);
         if (!this.update(wrapper)) {
-            return; // 其他 Worker 已落终态，幂等跳过
+            return false; // 其他 Worker 已落终态，幂等跳过
         }
         // 成功计费：仅「成功才计费」的提供方（如 ComfyUI）真正落账，且幂等
         costRecordService.recordOnSuccess(task);
@@ -134,11 +178,10 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         BigDecimal settleAmount = task.getFreezeAmount() != null ? task.getFreezeAmount()
                 : pricingService.price(task).amount();
         walletService.settle(task.getUserId(), settleAmount, task.getId());
+        // 留在事务内：CanvasEventListener / PipelineEventListener 是裸 @EventListener（同步立即执行），
+        // 它们的节点回填写入现在就在这个事务里，挪出去会改变画布回填与终态的原子性。
         publishStatusChanged(task);
-        // 刷新该模型平均耗时缓存（ETA 统计）
-        taskEtaService.refreshAvgDuration(task.getModel());
-        log.info("任务终态落库成功: taskId={}, mediaName={}, size={}",
-                task.businessTaskId(), mediaName, downloaded.artifact().contentLength());
+        return true;
     }
 
     /**

@@ -13,19 +13,31 @@ import java.util.Map;
 @Mapper
 public interface VideoTaskMapper extends BaseMapper<VideoTask> {
 
-    /** 终态账务补偿候选：缺少对应 SETTLE/RELEASE 流水；限制最近天数范围，配合 idx_bt_task_type 索引消除全表扫描。 */
-    @Select("SELECT v.* FROM video_task v "
+    /**
+     * 终态账务补偿候选：缺少对应 SETTLE/RELEASE 流水；限制最近天数范围，配合 idx_bt_task_type 索引消除全表扫描。
+     * <p>
+     * {@code excludeIds} 是「补不好、已隔离」的任务。<b>必须在 SQL 里排除，不能只在循环里跳过</b>：
+     * 这是个 {@code ORDER BY id ASC LIMIT} 的队列，毒行 id 最小、永远排在队头，
+     * 攒够 limit 条就再也查不出新任务——队头出不去就整条堵死。
+     */
+    @Select("<script>SELECT v.* FROM video_task v "
             + "WHERE v.status IN ('SUCCESS', 'FAILED') "
             + "AND v.freeze_amount IS NOT NULL AND v.freeze_amount > 0 "
             + "AND v.create_time >= #{since} "
             + "AND NOT EXISTS (SELECT 1 FROM balance_transaction b "
             + "WHERE b.task_id = v.id AND b.type = CASE WHEN v.status = 'SUCCESS' THEN 'SETTLE' ELSE 'RELEASE' END) "
-            + "ORDER BY v.id ASC LIMIT #{limit}")
-    List<VideoTask> findTerminalMissingWalletTransitionSince(@Param("since") LocalDateTime since, @Param("limit") int limit);
+            // 空集合必须整段不拼：NOT IN () 是 SQL 语法错，会把整个补偿分支打瘫
+            + "<if test='excludeIds != null and excludeIds.size() > 0'>"
+            + "AND v.id NOT IN <foreach item='id' collection='excludeIds' open='(' separator=',' close=')'>#{id}</foreach>"
+            + "</if> "
+            + "ORDER BY v.id ASC LIMIT #{limit}</script>")
+    List<VideoTask> findTerminalMissingWalletTransitionSince(@Param("since") LocalDateTime since,
+                                                            @Param("limit") int limit,
+                                                            @Param("excludeIds") java.util.Collection<Long> excludeIds);
 
     /** 默认重载：扫描最近 7 天内任务 */
-    default List<VideoTask> findTerminalMissingWalletTransition(int limit) {
-        return findTerminalMissingWalletTransitionSince(LocalDateTime.now().minusDays(7), limit);
+    default List<VideoTask> findTerminalMissingWalletTransition(int limit, java.util.Collection<Long> excludeIds) {
+        return findTerminalMissingWalletTransitionSince(LocalDateTime.now().minusDays(7), limit, excludeIds);
     }
 
     /** 管理端看板：总数/今日/本月概览汇总（单条 SQL 聚合，避免全表拉取到内存） */

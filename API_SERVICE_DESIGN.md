@@ -55,7 +55,7 @@ POST /api/v1/videos  {prompt, model, images?[url], duration?, ratio?, megapixels
   → 幂等检查:Idempotency-Key 已存在?→ 返回原 task_id(不重复扣费)
   → 落 video_task(PROCESSING, 带 api_key_id 判别列)
   → engine.submit(图片 URL → 下载 → OSS → 复用现有链路)
-  → 202 {task_id, status:"PROCESSING", request_id}
+  → 202 {taskId, status:"PROCESSING", requestId}   ← 响应体是驼峰;request_id 是库表列名,别混
 ```
 
 **交付平面(异步,分钟级)**:
@@ -76,7 +76,7 @@ VideoTaskPoller(现有)→ updateStatus 幂等落库
 统一结构(所有失败):
 
 ```json
-{ "error": { "code": "MODEL_NOT_FOUND", "message": "模型不存在", "request_id": "req_8f3a..." } }
+{ "error": { "code": "MODEL_NOT_FOUND", "message": "模型不存在", "requestId": "req_8f3a..." } }
 ```
 
 | 场景 | HTTP | code | 可重试 |
@@ -88,10 +88,16 @@ VideoTaskPoller(现有)→ updateStatus 幂等落库
 | key 禁用 / 过期 | 403 | API_KEY_DISABLED / API_KEY_EXPIRED | ❌ |
 | 限流 | 429 | RATE_LIMITED(带 Retry-After 头) | ✅ 等 Retry-After |
 | 配额超限(v2) | 429 | QUOTA_EXCEEDED | ❌ |
+| 产物已过保留期(30 天) | 410 | ARTIFACT_EXPIRED | ❌ 需重新生成 |
 | 提供方不可用 | 503 | PROVIDER_UNAVAILABLE | ✅ |
 | 内部错误 | 500 | INTERNAL_ERROR | ✅ |
 
-提交成功 = **202**(异步):`{task_id, status:"PROCESSING", request_id}`。
+提交成功 = **202**(异步):`{taskId, status:"PROCESSING", requestId}`(驼峰;项目未配 snake_case 策略)。
+
+**产物保留期**:OSS 侧生命周期规则 `outputs-expire` 30 天删除,应用侧由
+`video.artifact-retention-days` 推导(基准 create_time,见 D-029)。任务响应带派生字段
+`artifactExpired`;过期后 `/content` 返回 410,任务记录本身不删。
+**改 OSS 那边的天数必须同步改这个配置**——两个数在启动配置指纹里对照。
 
 ## 6. 鉴权与安全
 

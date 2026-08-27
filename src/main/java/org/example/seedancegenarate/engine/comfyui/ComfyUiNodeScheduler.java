@@ -37,6 +37,8 @@ public class ComfyUiNodeScheduler {
         int bestLoad = Integer.MAX_VALUE;
         for (ComfyUiProperties.Node node : nodes) {
             try {
+                // 这里刻意用更紧的 connectTimeoutMs（3s）而不是 statusTimeoutMs：选节点在提交路径上、
+                // 用户正等着，宁可跳过一台反应慢的节点，也不能让每次提交多等几秒。
                 int load = client.queueLoad(node.getBaseUrl(), properties.getConnectTimeoutMs());
                 if (load < bestLoad) {
                     bestLoad = load;

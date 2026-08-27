@@ -77,6 +77,17 @@ public class VideoTask {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
 
+    /**
+     * 产物是否已被 OSS 生命周期规则删除（派生字段，不落库）。
+     * <p>
+     * 由 {@link org.example.seedancegenarate.service.ArtifactExpiryPolicy} 在接口返回前打标。
+     * 前端据此把封面/播放按钮渲染成「视频已过期」，不必等用户点击才发现播放器转不出来。
+     * <p>
+     * <b>不查询时为 null，前端按「非 true 即未过期」处理</b>——只增不改，老客户端忽略即可。
+     */
+    @TableField(exist = false)
+    private Boolean artifactExpired;
+
     /** 对外 / 领域事件使用的稳定任务 ID；旧数据回退到历史 task_id。 */
     public String businessTaskId() {
         return bizTaskId == null || bizTaskId.isBlank() ? taskId : bizTaskId;

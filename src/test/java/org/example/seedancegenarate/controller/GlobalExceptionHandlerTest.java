@@ -24,7 +24,7 @@ class GlobalExceptionHandlerTest {
     @Test
     void handleIllegalArgumentExceptionReturns400() {
         IllegalArgumentException ex = new IllegalArgumentException("时长必须在 5 到 15 秒之间");
-        Result<?> res = handler.handleIllegalException(ex);
+        Result<?> res = handler.handleIllegalArgument(ex);
         assertEquals(400, res.getCode());
         assertEquals("时长必须在 5 到 15 秒之间", res.getMessage());
     }

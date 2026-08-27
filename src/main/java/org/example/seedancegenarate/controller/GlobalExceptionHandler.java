@@ -3,6 +3,7 @@ package org.example.seedancegenarate.controller;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.exception.BusinessException;
+import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -30,11 +31,32 @@ public class GlobalExceptionHandler {
         return Result.fail(e.getCode(), e.getMessage());
     }
 
-    /** 2. 合法性断言/参数非法异常（IllegalArgumentException / IllegalStateException）：记录 WARN */
-    @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
-    public Result<?> handleIllegalException(RuntimeException e) {
+    /** 2. 参数非法：记录 WARN */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public Result<?> handleIllegalArgument(IllegalArgumentException e) {
         log.warn("参数或状态校验失败: {}", e.getMessage());
         return Result.fail(400, e.getMessage());
+    }
+
+    /**
+     * 2.5 状态非法。绝大多数是业务断言（如「钱包冻结余额不足」），照旧返回 Result；
+     * 但 SSE / 异步请求的生命周期事件必须单独摘出来。
+     * <p>
+     * 2026-08-26 线上实测：客户端断开重连导致 {@code Cannot start async}，落到这里后
+     * 处理器往一个 Content-Type 已经是 {@code text/event-stream} 的响应里写 Result ——
+     * <b>没有对应的转换器，异常处理器自己再炸一次</b>，一次客户端抖动打出 4 条日志、3 份堆栈。
+     * 这类事件和 {@code ClientAbortException} 同性质：是客户端行为，不是服务端错误。
+     */
+    @ExceptionHandler(IllegalStateException.class)
+    public ResponseEntity<?> handleIllegalState(IllegalStateException e) {
+        String message = e.getMessage() == null ? "" : e.getMessage();
+        if (message.contains("Cannot start async") || message.contains("AsyncContext")) {
+            log.debug("异步请求已不可用（SSE 断开 / 重连）: {}", message);
+            // 不写 body：响应可能已被钉成 text/event-stream，写什么都会二次抛异常
+            return ResponseEntity.noContent().build();
+        }
+        log.warn("参数或状态校验失败: {}", message);
+        return ResponseEntity.ok(Result.fail(400, message));
     }
 
     /** 3. Spring MVC @RequestBody 参数校验异常（@Valid / @Validated） */
@@ -87,6 +109,26 @@ public class GlobalExceptionHandler {
         log.debug("客户端主动断开连接 (SSE/下载): {}", e.getMessage());
     }
 
+    /**
+     * 8.5 异步请求到期：SSE 的 emitter 有 30 分钟上限（{@code TaskStreamManager.EMITTER_TIMEOUT_MS}），
+     * 到期即抛，客户端随后重连。这是<b>设计内的正常事件</b>，不是服务端错误。
+     * <p>
+     * 2026-08-26 线上实测：它是 {@code RuntimeException} 的子类且 {@code getMessage()} 返回
+     * {@code null}，所以既躲过了上面按 message 判定的异步分支，也躲过了 ClientAbort 那一组，
+     * 一路掉进 #10 打出 ~20 行 ERROR 堆栈，接着 #10 往一个 Content-Type 已是
+     * {@code text/event-stream} 的响应里写 {@code Result} —— <b>处理器自己再炸一次</b>
+     * （{@code No converter for [Result] with preset Content-Type 'text/event-stream'}）。
+     * <p>
+     * 每条 SSE 连接每 30 分钟贡献一次，是当前 ERROR 级噪音的最大来源。
+     * 返回 void = 不写 body，交给容器按已提交的响应收尾（Spring 自己的
+     * {@code DefaultHandlerExceptionResolver} 本来就会正确处理成 503）。
+     */
+    @ExceptionHandler(org.springframework.web.context.request.async.AsyncRequestTimeoutException.class)
+    public void handleAsyncRequestTimeout(
+            org.springframework.web.context.request.async.AsyncRequestTimeoutException e) {
+        log.debug("异步请求到期（SSE emitter 超时，客户端会重连）");
+    }
+
     /** 9. 网络 IO 异常处理：区分正常 Broken pipe 与真实 IO 故障 */
     @ExceptionHandler(java.io.IOException.class)
     public void handleIOException(java.io.IOException e) {
@@ -96,6 +138,23 @@ public class GlobalExceptionHandler {
             return;
         }
         log.error("系统 IO 异常: {}", e.getMessage(), e);
+    }
+
+    /**
+     * 9.5 路径不存在：这是 404，不是系统错误。
+     * <p>
+     * 2026-08-26 线上实测：机器正被批量扫描 VPN/邮件网关漏洞
+     * （{@code global-protect/login.esp}、{@code remote/login}、{@code mifs/login.jsp}、{@code owa} …），
+     * 每秒一发。改动前每一发都落到 #11，打一份 ~50 行 ERROR 堆栈并返回 200 ——
+     * <b>日志被淹（真错误埋在里面找不到），而且对扫描器来说每条路径都"存在"</b>。
+     * 这里降到 DEBUG 并返回真正的 404。
+     */
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.NOT_FOUND)
+    public Result<?> handleNoResourceFound(
+            org.springframework.web.servlet.resource.NoResourceFoundException e) {
+        log.debug("路径不存在: {}", e.getResourcePath());
+        return Result.fail(404, "资源不存在");
     }
 
     /** 10. 未登录兜底与常规运行时异常 */

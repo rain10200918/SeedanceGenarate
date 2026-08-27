@@ -54,11 +54,14 @@ POST /api/v1/videos
 |---|---|---|---|
 | `prompt` | string | ✅ | 提示词，描述画面、镜头运动、光影风格 |
 | `model` | string | ✅ | 模型标识（见 §6 `GET /models`，如 `minimax-h3-fl2va-hd`） |
-| `mode` | string | 否 | 生成模式：`t2v`(文生视频)、`i2v`(图生视频)、`fl2va`(首尾帧生视频)、`t2i`(文生图)、`i2i`(图像编辑) |
 | `images` | string[] | 图生必填 | 参考图 URL 列表（`fl2va` 模式传 2 张：第 1 张首帧，第 2 张尾帧） |
 | `duration` | int | 视频模型 | 时长（秒），支持 5-15 秒（如 6, 8, 10 等），默认 6 或 8 |
 | `ratio` | string | 否 | 画面比例，如 `16:9`、`9:16`、`1:1`、`4:3`、`3:4`，默认 `16:9` |
 | `megapixels` | number | 否 | 清晰度像素档位（如高清模型支持 `0.3` ~ `0.5`） |
+
+> **没有 `mode` 字段。** 生成模式由「所选模型的能力 + 是否传了 `images`」共同决定：
+> 文生类模型不传图，参考生成类模型按模型要求的张数传图（`minimax-h3-fl2va-hd` 传 2 张，
+> 第 1 张首帧、第 2 张尾帧）。请求里多传的字段会被忽略。
 
 ### 请求头
 
@@ -135,15 +138,28 @@ GET /api/v1/videos/{taskId}
   "status": "SUCCESS",
   "model": "minimax-h3-t2v-hd",
   "costAmount": 1.80,
-  "videoUrl": "https://hszs-generate-api.oss-cn-beijing.aliyuncs.com/outputs/tsk_xxx/result.mp4?Expires=...",
+  "videoUrl": "tsk_4cbf4eaa9899469592737c2e148702f3.mp4",
+  "artifactExpired": false,
   "errorMsg": null
 }
 ```
 
 - `status` 取值：
   - `PROCESSING`：排队或 GPU 渲染中；
-  - `SUCCESS`：生成成功，`videoUrl` 返回安全签名的 HTTPS 访问链接；
+  - `SUCCESS`：生成成功，请用下方「下载产物」接口取文件；
   - `FAILED`：生成失败，`errorMsg` 为具体错误原因。
+- `videoUrl` 是**产物文件名，不是可直接访问的地址**。取文件一律走
+  `GET /api/v1/videos/{taskId}/content`（该接口会 302 到一条短期签名链接）。
+- `artifactExpired`：产物是否已过保留期（见下方「产物保留期」）。`true` 时不要再请求
+  `/content`，它会返回 `410`。
+
+### 产物保留期
+
+**生成的产物只保留 30 天**，到期后由对象存储自动删除，**不可恢复**。
+
+- 需要长期留存的，请在拿到结果后**尽快下载到自己这边**；
+- 过期后 `GET /api/v1/videos/{taskId}/content` 返回 `410 GONE` / `ARTIFACT_EXPIRED`；
+- 任务记录本身不删除，`GET /api/v1/videos/{taskId}` 仍可查到，只是 `artifactExpired` 为 `true`。
 
 ### 下载产物
 
@@ -164,13 +180,24 @@ curl -L -s -o result.mp4 https://api-generate.creator.ascent-ai.cn/api/v1/videos
 GET /api/v1/models
 ```
 
-支持的模型矩阵概览：
-- **`minimax-h3-fl2va-hd`**：MiniMax H3 首尾帧生视频高清版（支持 5-15s、清晰度 0.3-0.5）
-- **`minimax-h3-t2v-hd`**：MiniMax H3 文生视频高清版（支持 5-15s、清晰度 0.3-0.5）
-- **`minimax-h3-hd`**：MiniMax H3 图生视频高清版（支持 5-15s、清晰度 0.3-0.5）
-- **`minimax-h3-4step`**：MiniMax H3 极速 4-Step 视频生成
-- **`z-image-turbo`**：Z-Image Turbo 极速文生图
-- **`qwen-image-edit`**：千问图像编辑与精准图生图
+**以该接口的实时返回为准** —— 模型是否对您的 Key 开放由平台侧配置，下表只是当前内置清单。
+
+| 模型标识 | 名称 | 产物 |
+|---|---|---|
+| `minimax-h3-t2v` | MiniMax-H3 文生视频 | 视频 |
+| `minimax-h3-t2v-hd` | MiniMax-H3 文生视频 高清版 | 视频 |
+| `minimax-h3` | MiniMax-H3 参考生视频 | 视频 |
+| `minimax-h3-accel` | MiniMax-H3 参考生视频 官方加速 | 视频 |
+| `minimax-h3-4step` | MiniMax-H3 4-step 多参考生视频 | 视频 |
+| `minimax-h3-opt` | MiniMax-H3 多参生视频 优化版 | 视频 |
+| `minimax-h3-hd` | MiniMax-H3 多参生视频 高清优化版 | 视频 |
+| `minimax-h3-fl2va-hd` | MiniMax-H3 首尾帧生视频 高清版 | 视频 |
+| `z-image-turbo` | Z-Image-Turbo 文生图 | 图片 |
+| `qwen-image-edit` | Qwen-Image-Edit 图生图 | 图片 |
+| `flux2-image-edit` | Flux 2.0 图像编辑 | 图片 |
+
+每个模型支持的比例、时长范围、参考图张数以 `GET /api/v1/models` 返回的字段为准，
+不要按上表推断——传错会被 `VALIDATION_ERROR` 拒绝。
 
 ## 7. 错误响应码
 
@@ -181,7 +208,7 @@ GET /api/v1/models
   "error": {
     "code": "MODEL_NOT_FOUND",
     "message": "模型不存在: xxx",
-    "request_id": "req_xxxxxxxx"
+    "requestId": "req_xxxxxxxx"
   }
 }
 ```
@@ -195,6 +222,7 @@ GET /api/v1/models
 | 403 | `API_KEY_EXPIRED` | API Key 已过有效期 | ❌ |
 | 403 | `MODEL_NOT_OPEN` | 该模型当前未对您的账号开放 | ❌ |
 | 404 | `TASK_NOT_FOUND` | 任务编号不存在或不属于该 API Key | ❌ |
+| 410 | `ARTIFACT_EXPIRED` | 产物已过 30 天保留期并被删除，**重试无用**，需重新提交生成 | ❌ 重新生成 |
 | 402 | `INSUFFICIENT_BALANCE` | 账号可用余额不足，请先充值 | ❌ 充值后重试 |
 | 429 | `RATE_LIMITED` | 触发并发或速率限制，请参考 `Retry-After` 头 | ✅ 延迟重试 |
 | 503 | `PROVIDER_UNAVAILABLE` | GPU 节点全忙或渲染集群临时维护 | ✅ 指数退避重试 |
@@ -217,11 +245,17 @@ X-Signature: <HMAC-SHA256 十六进制签名>
   "task_id": "tsk_4cbf4eaa9899469592737c2e148702f3",
   "status": "SUCCESS",
   "output_type": "VIDEO",
-  "video_url": "https://hszs-generate-api.oss-cn-beijing.aliyuncs.com/outputs/...",
+  "video_url": "tsk_4cbf4eaa9899469592737c2e148702f3.mp4",
   "error": null,
   "cost_amount": 1.80
 }
 ```
+
+字段说明：
+
+- `video_url` 与查询接口一致，是**产物文件名，不是可直接访问的地址**；
+  收到回调后请用 `GET /api/v1/videos/{task_id}/content` 取文件。
+- `status` 为 `FAILED` 时 `video_url` 为 `null`，失败原因见 `error`。
 
 ### 签名校验算法（Python 示例）
 
@@ -269,7 +303,15 @@ while True:
     status = status_resp["status"]
     print(f"当前任务状态: {status}")
     if status == "SUCCESS":
-        print(f"生成成功！视频下载链接: {status_resp['videoUrl']}")
+        # videoUrl 是文件名，不是地址；取文件走 /content（会 302 到短期签名链接）
+        content = requests.get(f"{BASE_URL}/videos/{task_id}/content",
+                               headers=headers, allow_redirects=True)
+        if content.status_code == 410:
+            print("产物已过期（保留 30 天），需重新生成")
+            break
+        with open("result.mp4", "wb") as f:
+            f.write(content.content)
+        print("生成成功，已保存 result.mp4")
         break
     elif status == "FAILED":
         print(f"生成失败: {status_resp.get('errorMsg')}")

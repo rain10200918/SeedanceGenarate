@@ -56,6 +56,7 @@ public class VideoController {
     private final OssConfig ossConfig;
     private final ApiDocService apiDocService;
     private final TaskEtaService taskEtaService;
+    private final org.example.seedancegenarate.service.ArtifactExpiryPolicy artifactExpiryPolicy;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -396,8 +397,10 @@ public class VideoController {
                 VideoTask::getStatus, VideoTask::getVideoUrl, VideoTask::getImages,
                 VideoTask::getDuration, VideoTask::getRatio, VideoTask::getProvider, VideoTask::getNodeId,
                 VideoTask::getModel, VideoTask::getOutputType, VideoTask::getCostAmount,
-                VideoTask::getPrompt, VideoTask::getCreateTime, VideoTask::getUpdateTime);
-        return Result.success(videoTaskService.page(page, wrapper));
+                VideoTask::getPrompt, VideoTask::getCreateTime, VideoTask::getUpdateTime,
+                // 过期判定要用；@JsonIgnore 不会下发给客户端
+                VideoTask::getArtifactStorageType);
+        return Result.success(artifactExpiryPolicy.stampAll(videoTaskService.page(page, wrapper)));
     }
 
     /**
@@ -452,7 +455,7 @@ public class VideoController {
         }
         // 只读库：远端轮询已由后台推进器（VideoTaskPoller）统一负责并落库，实时变化经 SSE
         // （GET /api/video/stream）推送给前端。此处不再触发远端轮询，避免每次客户端查询都打远端。
-        return Result.success(task);
+        return Result.success(artifactExpiryPolicy.stamp(task));
     }
 
     /**
@@ -471,6 +474,10 @@ public class VideoController {
         VideoTask task = findOwnedTask(taskId);
         if (task == null || task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        if (artifactExpiryPolicy.isExpired(task)) {
+            writeGone(response);
             return;
         }
         if (hasOssArtifact(task)) {
@@ -502,6 +509,10 @@ public class VideoController {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
+        if (artifactExpiryPolicy.isExpired(task)) {
+            writeGone(response);
+            return;
+        }
         if (hasOssArtifact(task)) {
             response.sendRedirect(artifactStorage.createSignedGetUrl(
                     task.getArtifactKey(), java.time.Duration.ofSeconds(ossConfig.getSignedUrlTtlSeconds())));
@@ -520,6 +531,21 @@ public class VideoController {
             wrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
         }
         return videoTaskService.getOne(wrapper, false);
+    }
+
+    /**
+     * 产物已过期：410 Gone + JSON。
+     * <p>
+     * 不能放行去签地址——{@code createSignedGetUrl} 是纯本地计算、<b>不校验对象是否存在</b>，
+     * 签出来照样 302，浏览器那边才 404，播放器只会转圈，前端拿不到任何可判断的信号。
+     * 410 而不是 404：资源确实存在过，只是不再可得。
+     */
+    private void writeGone(HttpServletResponse response) throws java.io.IOException {
+        response.setStatus(HttpServletResponse.SC_GONE);
+        response.setContentType("application/json;charset=UTF-8");
+        response.getWriter().write(new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(Result.fail(HttpServletResponse.SC_GONE,
+                        artifactExpiryPolicy.expiredMessage())));
     }
 
     private boolean hasOssArtifact(VideoTask task) {

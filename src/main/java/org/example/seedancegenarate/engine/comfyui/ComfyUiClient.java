@@ -109,7 +109,37 @@ public class ComfyUiClient {
         return n.path("queue_running").size() + n.path("queue_pending").size();
     }
 
-    /** 完整队列（running + pending 的 prompt_id 列表），ETA 排队定位用 */
+    /**
+     * 带短缓存的队列查询，<b>只给轮询/丢失判定用</b>。
+     * <p>
+     * {@code /queue} 的响应里带着队列中<b>每个 prompt 的完整工作流 JSON</b>，可能几 MB。
+     * 丢失判定会对每个 history 为空的任务查一次队列，同一轮里同节点上的多条任务拿到的
+     * 必然是同一份 —— 各取一遍纯属浪费带宽。
+     * <p>
+     * <b>调度选节点绝不能用这个</b>：那是提交路径，缓存会让一批提交按过期负载全压到同一台。
+     */
+    public JsonNode getQueueCached(String baseUrl, int timeoutMs) throws Exception {
+        long ttl = Math.max(properties.getQueueCacheMs(), 0);
+        if (ttl == 0) {
+            return getQueue(baseUrl, timeoutMs);
+        }
+        long now = System.nanoTime();
+        CachedQueue cached = queueCache.get(baseUrl);
+        if (cached != null && now - cached.fetchedAtNanos < ttl * 1_000_000L) {
+            return cached.queue;
+        }
+        JsonNode fresh = getQueue(baseUrl, timeoutMs);
+        // 并发 miss 时可能多取几次，结果一致，不值得为它上锁
+        queueCache.put(baseUrl, new CachedQueue(fresh, now));
+        return fresh;
+    }
+
+    private record CachedQueue(JsonNode queue, long fetchedAtNanos) {
+    }
+
+    private final java.util.Map<String, CachedQueue> queueCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 完整队列（running + pending 的 prompt_id 列表），实时、不走缓存；调度与 ETA 用 */
     public JsonNode getQueue(String baseUrl, int timeoutMs) throws Exception {
         HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/queue"))
                 .timeout(timeoutMs)

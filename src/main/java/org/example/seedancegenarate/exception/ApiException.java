@@ -55,6 +55,14 @@ public class ApiException extends RuntimeException {
         return new ApiException("TASK_NOT_FOUND", HttpStatus.NOT_FOUND, "任务不存在");
     }
 
+    /**
+     * 产物已被 OSS 生命周期规则删除。410 而不是 404：资源确实存在过，只是不再可得，
+     * 调用方据此知道「不用重试，重新生成才行」。
+     */
+    public static ApiException artifactExpired(String message) {
+        return new ApiException("ARTIFACT_EXPIRED", HttpStatus.GONE, message);
+    }
+
     public static ApiException rateLimited() {
         return new ApiException("RATE_LIMITED", HttpStatus.TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试");
     }

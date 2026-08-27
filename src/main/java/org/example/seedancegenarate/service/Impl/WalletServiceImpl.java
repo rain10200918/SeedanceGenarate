@@ -294,6 +294,13 @@ public class WalletServiceImpl implements WalletService {
         if (balanceTransactionMapper.updateBalanceAfter(bt.getId(), wallet.getBalance(), wallet.getFrozen()) != 1) {
             throw new IllegalStateException("流水余额快照回填失败: id=" + bt.getId() + ", bizKey=" + bt.getBizKey());
         }
+        // 每一笔钱的变动都留一行。这里是 credit / freeze / settle / release 四条路径的共同收尾，
+        // 一处就能覆盖全部。改动前钱的**正常路径一个字都不打**，只有异常和幂等分支有声音 ——
+        // 2026-08 排查 task 764 的冻结额被挪用时，只能靠翻数据库逐行对，日志里什么线索都没有。
+        // 一个任务最多产生 2 行（冻结 + 结算/解冻），量可以忽略。
+        log.info("钱包变动: userId={}, type={}, amount={}, hold={}, bizKey={}, 变动后 balance={}, frozen={}",
+                bt.getUserId(), bt.getType(), bt.getAmount(), bt.getHoldAmount(), bt.getBizKey(),
+                wallet.getBalance(), wallet.getFrozen());
     }
 
     private Wallet walletOf(Long userId) {

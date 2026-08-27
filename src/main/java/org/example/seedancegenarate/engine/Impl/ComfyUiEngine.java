@@ -78,16 +78,21 @@ public class ComfyUiEngine implements VideoEngine {
         return true;
     }
 
-    /** ComfyUI 支持 webhook 回调：事件驱动（epoll 式），轮询仅作对账兜底 */
+    /**
+     * 完成机制以<b>这台 ComfyUI 实际有没有 webhook 能力</b>为准，不是想当然。
+     * 声明成 CALLBACK 会让 {@code resolveWebhookUrl} 把回调地址（含 token）发出去，
+     * 也会让 {@link #needsPolling()} 变 false 把任务踢出轮询器 —— 声明错了两头都错。
+     */
     @Override
     public CompletionMechanism completionMechanism() {
-        return CompletionMechanism.CALLBACK;
+        return properties.isWebhookSupported() ? CompletionMechanism.CALLBACK : CompletionMechanism.POLL;
     }
 
-    /** 未配置回调（开发环境）时回退轮询推进，避免任务无回调也无轮询而卡死 */
+    /** 不会回调（或未配置回调基址/密钥）时一律轮询推进，避免任务既无回调也无轮询而卡死 */
     @Override
     public boolean needsPolling() {
-        return !StringUtils.hasText(completionProperties.getCallbackBaseUrl())
+        return !properties.isWebhookSupported()
+                || !StringUtils.hasText(completionProperties.getCallbackBaseUrl())
                 || !StringUtils.hasText(completionProperties.getCallbackSecret());
     }
 
@@ -109,7 +114,7 @@ public class ComfyUiEngine implements VideoEngine {
             return null;
         }
         String providerTaskId = task.remoteTaskId();
-        JsonNode queue = client.getQueue(node.getBaseUrl(), properties.getReadTimeoutMs());
+        JsonNode queue = client.getQueue(node.getBaseUrl(), properties.getStatusTimeoutMs());
         JsonNode pending = queue.path("queue_pending");
         if (!pending.isArray()) {
             return null;
@@ -137,10 +142,21 @@ public class ComfyUiEngine implements VideoEngine {
         }
     }
 
-    /** 回调到达时任务通常已完成：复用 poll 查 /history 拿产物并归一化 */
+    /**
+     * 回调到达时复用 poll 查 /history 拿产物；<b>但绝不能走丢失判定</b>。
+     * <p>
+     * ComfyUI 的顺序是<b>先发 {@code execution_success} 事件、后把结果写进 history</b>。
+     * 所以回调到达的那一刻很可能是：history 还空 → 作业刚离开队列 → 复查 history 仍空
+     * → 判定 LOST → 把一个<b>刚刚成功</b>的任务重投，GPU 白跑一遍。
+     * <p>
+     * 回调本身已经说明「它结束了」，history 空只代表还没写完，下一轮自然拿到。
+     */
     @Override
     public RemoteStatus handleCallback(VideoTask task, String payload) throws Exception {
-        return poll(task);
+        RemoteStatus status = poll(task);
+        return status.getState() == org.example.seedancegenarate.engine.GenerationState.LOST
+                ? RemoteStatus.processing()
+                : status;
     }
 
     @Override
@@ -208,10 +224,12 @@ public class ComfyUiEngine implements VideoEngine {
             return RemoteStatus.failed("找不到处理该任务的 ComfyUI 节点: " + nodeId);
         }
         String providerTaskId = task.remoteTaskId();
-        JsonNode history = client.getHistory(node.getBaseUrl(), providerTaskId, properties.getReadTimeoutMs());
+        JsonNode history = client.getHistory(node.getBaseUrl(), providerTaskId, properties.getStatusTimeoutMs());
         JsonNode entry = history.path(providerTaskId);
         if (entry.isMissingNode() || entry.isEmpty()) {
-            return RemoteStatus.processing();   // 尚未进入 history，仍在排队 / 执行
+            // history 空有两种可能，且响应完全相同：还在排队/执行，或者作业已经没了
+            // （ComfyUI 队列是内存态，进程重启即清空）。只有交叉查队列才分得开。
+            return probeQueueOrLost(node, providerTaskId);
         }
         JsonNode status = entry.path("status");
         String statusStr = status.path("status_str").asText("");
@@ -224,6 +242,63 @@ public class ComfyUiEngine implements VideoEngine {
         }
         String videoUrl = extractVideoUrl(node.getBaseUrl(), entry.path("outputs"));
         return videoUrl == null ? RemoteStatus.failed("任务完成但未找到视频输出") : RemoteStatus.success(videoUrl);
+    }
+
+    /**
+     * history 为空时判定：还在排队，还是作业已经丢了。
+     * <p>
+     * <b>判定顺序是本方法的全部要点</b>：history(已空) → queue → <b>history 再读一次</b>。
+     * 危险的交错是「我们读完 history，作业恰好完成、离开队列并写入 history，我们才去读队列」——
+     * 那样只查队列会误判成丢失。而完成必然伴随写 history，所以再读一次 history 就能兜住：
+     * 只有当队列里没有、且第二次 history 依然空时，作业才真的不存在了
+     * （运行中的作业一定在 queue_running 里，排队中的一定在 queue_pending 里）。
+     * <p>
+     * 因此不需要 sleep、不需要连续观测计数器、不需要任何持久化状态。
+     * <p>
+     * 队列查询本身失败时返回 processing：<b>异常 ≠ 空</b>，信息不足就不下结论，
+     * 交给既有的超龄兜底，行为与改动前一致。
+     */
+    private RemoteStatus probeQueueOrLost(ComfyUiProperties.Node node, String providerTaskId) {
+        boolean queued;
+        try {
+            // 走缓存：一轮里同节点上的多条任务共用同一份队列快照（响应可能几 MB）
+            queued = isQueued(client.getQueueCached(node.getBaseUrl(), properties.getStatusTimeoutMs()),
+                    providerTaskId);
+        } catch (Exception e) {
+            log.warn("查询 ComfyUI 队列失败，本轮不判定丢失: node={}, promptId={}, err={}",
+                    node.getId(), providerTaskId, e.getMessage());
+            return RemoteStatus.processing();
+        }
+        if (queued) {
+            return RemoteStatus.processing();
+        }
+        try {
+            JsonNode recheck = client.getHistory(node.getBaseUrl(), providerTaskId, properties.getStatusTimeoutMs())
+                    .path(providerTaskId);
+            if (!recheck.isMissingNode() && !recheck.isEmpty()) {
+                return RemoteStatus.processing(); // 刚好在两次查询之间完成，下一轮按正常终态处理
+            }
+        } catch (Exception e) {
+            log.warn("复查 ComfyUI history 失败，本轮不判定丢失: node={}, err={}", node.getId(), e.getMessage());
+            return RemoteStatus.processing();
+        }
+        log.warn("ComfyUI 作业已从节点消失（队列与产物均无），判定丢失待重投: node={}, promptId={}",
+                node.getId(), providerTaskId);
+        return RemoteStatus.lost("生成节点 " + node.getId() + " 上的作业已丢失（节点可能重启过）");
+    }
+
+    /** prompt 是否还在该节点的队列里（运行中或排队中） */
+    private boolean isQueued(JsonNode queue, String providerTaskId) {
+        for (String key : new String[]{"queue_running", "queue_pending"}) {
+            for (JsonNode item : queue.path(key)) {
+                // ComfyUI 队列项形如 [序号, promptId, {...}]，promptId 固定在下标 1
+                if (item.isArray() && item.size() > 1
+                        && providerTaskId.equals(item.get(1).asText(null))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private WorkflowBuilder resolveBuilder(String model) {

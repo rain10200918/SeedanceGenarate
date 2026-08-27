@@ -61,3 +61,16 @@ src/main/resources/application.yaml
 # 本地联调用的 mock 密钥与 profile，不入库
 src/main/resources/alipay/mock_*.pem
 src/main/resources/application-local.yaml
+
+# 支付渠道密钥：任何情况下都不入库（2026-08-26 排查时发现 wechat/ 下的商户私钥
+# 已被 git add 进索引——只差一次 commit 就进历史了，历史里的密钥只能靠改写历史清除）
+src/main/resources/wechat/
+src/main/resources/alipay/
+*.pem
+*.p12
+!src/main/resources/**/*_example.pem
+
+# 环境变量文件：装的就是全套线上密钥，比单个 pem 更值钱。
+# docs/线上env完整版.env 当时处于「未跟踪且未忽略」状态，一次 git add . 就进索引了。
+*.env
+!*.env.example

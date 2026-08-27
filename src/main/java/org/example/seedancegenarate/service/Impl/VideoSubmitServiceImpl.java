@@ -174,7 +174,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                 .build();
         log.info("提交生成任务: provider={}, model={}, taskId={}, webhookUrl={}",
                 provider, effectiveModel, task.businessTaskId(),
-                command.getWebhookUrl() == null ? "无（轮询推进）" : command.getWebhookUrl());
+                maskToken(command.getWebhookUrl()));
         SubmitResult submit;
         try {
             submit = engine.submit(command);
@@ -314,4 +314,17 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
             throw new RuntimeException("该模型未开放");
         }
     }
+
+    /**
+     * 回调地址里带着 {@code ?token=<回调密钥>}，整条打进日志等于把密钥写进 docker logs ——
+     * 而这个密钥线上与 {@code COMFYUI_ACCESS_TOKEN} 是同一个串，拿到它就能穿过 nginx 直接用 GPU。
+     * 日志要能看出「回调配没配、发到哪台」，但不需要看到密钥本身。
+     */
+    private String maskToken(String url) {
+        if (url == null || url.isBlank()) {
+            return "无（轮询推进）";
+        }
+        return url.replaceAll("(?i)([?&]token=)[^&]*", "$1***");
+    }
+
 }

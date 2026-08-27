@@ -27,4 +27,9 @@ public class RemoteStatus {
     public static RemoteStatus failed(String errorMsg) {
         return new RemoteStatus(GenerationState.FAILED, null, errorMsg);
     }
+
+    /** 远端查不到这个作业（既不在队列也无产出）：交给重试策略重投，不是判用户失败 */
+    public static RemoteStatus lost(String reason) {
+        return new RemoteStatus(GenerationState.LOST, null, reason);
+    }
 }
