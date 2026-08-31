@@ -13,6 +13,7 @@ import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiClient;
+import org.example.seedancegenarate.engine.comfyui.ComfyUiFleet;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiNodeScheduler;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
 import org.example.seedancegenarate.engine.ModelSpec;
@@ -45,16 +46,20 @@ public class ComfyUiEngine implements VideoEngine {
     private final ComfyUiProperties properties;
     private final ComfyUiClient client;
     private final ComfyUiNodeScheduler scheduler;
+    /** 按 node_id 找回处理该任务的机器。清单的真相在 comfy_node 表，经探测器进到快照 */
+    private final ComfyUiFleet fleet;
     private final Map<String, WorkflowBuilder> builders;
     private final ObjectMapper objectMapper;
     private final VideoCompletionProperties completionProperties;
 
     public ComfyUiEngine(ComfyUiProperties properties, ComfyUiClient client,
-                         ComfyUiNodeScheduler scheduler, List<WorkflowBuilder> builderList,
+                         ComfyUiNodeScheduler scheduler, ComfyUiFleet fleet,
+                         List<WorkflowBuilder> builderList,
                          ObjectMapper objectMapper, VideoCompletionProperties completionProperties) {
         this.properties = properties;
         this.client = client;
         this.scheduler = scheduler;
+        this.fleet = fleet;
         this.builders = builderList.stream()
                 .collect(Collectors.toMap(WorkflowBuilder::model, Function.identity()));
         this.objectMapper = objectMapper;
@@ -109,7 +114,7 @@ public class ComfyUiEngine implements VideoEngine {
         if (nodeId == null || nodeId.isBlank()) {
             return null;
         }
-        ComfyUiProperties.Node node = properties.findNode(nodeId);
+        ComfyUiProperties.Node node = fleet.findNode(nodeId);
         if (node == null) {
             return null;
         }
@@ -179,24 +184,34 @@ public class ComfyUiEngine implements VideoEngine {
         List<String> audioUrls = command.getAudioUrls() == null ? Collections.emptyList() : command.getAudioUrls();
         validate(builder.spec(), imageUrls, videoUrls, audioUrls, command);
 
-        // 1. 选节点
-        ComfyUiProperties.Node node = scheduler.pick();
+        // 1. 选节点。带上 model：装不齐这个工作流的插件、或者显存装不下的机器，
+        //    在这里就被排除，而不是提交过去等它报 missing_node_type / OOM
+        ComfyUiNodeScheduler.NodeSelection selection = scheduler.pick(command.getModel(), command.getNodeId());
+        ComfyUiProperties.Node node = selection.node();
         log.info("ComfyUI 选中节点 {} 处理任务, model={}", node.getId(), command.getModel());
 
-        // 2. 上传参考素材到该节点（各类内顺序保持，对应 <Picture 1..N> / <Video 1..N> / <Audio 1..N>）
-        // 文件名内容 hash 化：同素材幂等，防止 ComfyUI input 目录无限增长
-        ReferenceFiles files = new ReferenceFiles(
-                uploadRefs(node, imageUrls, ".png"),
-                uploadRefs(node, videoUrls, ".mp4"),
-                uploadRefs(node, audioUrls, ".wav"));
+        // pick() 已经把这台的待发计数 +1（让并发的下一次提交立刻看得见），
+        // 所以从这里往下任何一条失败路径都必须归还，否则这台节点在整个老化窗口里
+        // 都显得比实际忙 —— 而节点出问题时提交失败往往是连续的。
+        try {
+            // 2. 上传参考素材到该节点（各类内顺序保持，对应 <Picture 1..N> / <Video 1..N> / <Audio 1..N>）
+            // 文件名内容 hash 化：同素材幂等，防止 ComfyUI input 目录无限增长
+            ReferenceFiles files = new ReferenceFiles(
+                    uploadRefs(node, imageUrls, ".png"),
+                    uploadRefs(node, videoUrls, ".mp4"),
+                    uploadRefs(node, audioUrls, ".wav"));
 
-        // 3. 构建工作流并提交（附 webhook_url 时事件驱动，完成/失败主动回调）
-        JsonNode workflow = builder.build(command, files);
-        String clientId = UUID.randomUUID().toString();
-        String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId,
-                command.getWebhookUrl(), properties.getReadTimeoutMs());
+            // 3. 构建工作流并提交（附 webhook_url 时事件驱动，完成/失败主动回调）
+            JsonNode workflow = builder.build(command, files);
+            String clientId = UUID.randomUUID().toString();
+            String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId,
+                    command.getWebhookUrl(), properties.getReadTimeoutMs());
 
-        return SubmitResult.of(promptId, node.getId());
+            return SubmitResult.of(promptId, node.getId());
+        } catch (Exception e) {
+            scheduler.releaseDispatch(selection);
+            throw e;
+        }
     }
 
     /** 下载 OSS URL → 上传到节点 input 目录，返回 LoadImage/LoadAudio/XB_VideoLoader 可用的文件名（内容 hash 幂等） */
@@ -219,7 +234,7 @@ public class ComfyUiEngine implements VideoEngine {
             // 绝不能判失败——那是「节点已被移除」这类配置错误才该报的。
             return RemoteStatus.processing();
         }
-        ComfyUiProperties.Node node = properties.findNode(nodeId);
+        ComfyUiProperties.Node node = fleet.findNode(nodeId);
         if (node == null) {
             return RemoteStatus.failed("找不到处理该任务的 ComfyUI 节点: " + nodeId);
         }

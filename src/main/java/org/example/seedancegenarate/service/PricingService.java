@@ -1,5 +1,6 @@
 package org.example.seedancegenarate.service;
 
+import org.example.seedancegenarate.engine.OutputType;
 import org.example.seedancegenarate.entity.VideoTask;
 
 import java.math.BigDecimal;
@@ -17,4 +18,16 @@ public interface PricingService {
     /** 计费结果：单价 + 金额 + 币种 */
     record Price(BigDecimal unitPrice, BigDecimal amount, String currency) {
     }
+
+    /** 模型标准定价详情（用于用户端展示与算力折算） */
+    record ModelPriceInfo(
+            BigDecimal unitPrice,
+            String billingType,
+            Long pointsPerUnit,
+            String currency,
+            String pricingText
+    ) {
+    }
+
+    ModelPriceInfo getModelPriceInfo(String provider, String model, OutputType outputType);
 }

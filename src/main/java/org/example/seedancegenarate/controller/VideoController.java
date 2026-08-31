@@ -16,6 +16,7 @@ import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.ArtifactStorage;
+import org.example.seedancegenarate.service.ContentModerationPolicy;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.OssService;
 import org.example.seedancegenarate.service.ApiDocService;
@@ -57,6 +58,8 @@ public class VideoController {
     private final ApiDocService apiDocService;
     private final TaskEtaService taskEtaService;
     private final org.example.seedancegenarate.service.ArtifactExpiryPolicy artifactExpiryPolicy;
+    private final org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService;
+    private final ContentModerationPolicy contentModerationPolicy;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -108,10 +111,13 @@ public class VideoController {
             List<String> audioUrls,
             @RequestParam(value = "requestId", required = false)
             String formRequestId,
+            @RequestParam(value = "nodeId", required = false)
+            String nodeId,
             @RequestHeader(value = "Idempotency-Key", required = false)
             String idempotencyKey
     ) throws Exception {
         Long userId = UserContext.requireUserId();
+        videoSubmitService.validatePinnedNode(provider, nodeId);
         // Header 优先；multipart 表单字段是浏览器客户端的重试键；两者都没有才生成一次性键。
         String requestId = StringUtils.hasText(idempotencyKey)
                 ? idempotencyKey.trim()
@@ -138,7 +144,7 @@ public class VideoController {
         List<String> audioPaths = uploadRefFiles(audios, audioUrls, "音频");
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, provider, model, prompt, imagePaths, videoPaths, audioPaths,
-                duration, ratio, megapixels, null, requestId));
+                duration, ratio, megapixels, null, requestId, nodeId));
         return Result.success(task);
     }
 
@@ -232,6 +238,7 @@ public class VideoController {
             String idempotencyKey
     ) throws Exception {
         Long userId = UserContext.requireUserId();
+        videoSubmitService.validatePinnedNode(request.getProvider(), request.getNodeId());
         String requestId = StringUtils.hasText(idempotencyKey)
                 ? idempotencyKey.trim()
                 : (StringUtils.hasText(request.getRequestId()) ? request.getRequestId().trim()
@@ -251,7 +258,7 @@ public class VideoController {
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, request.getProvider(), request.getModel(), prompt,
                 List.of(), List.of(), List.of(), duration, ratio, null, null,
-                requestId));
+                requestId, request.getNodeId()));
         return Result.success(task);
     }
 
@@ -328,6 +335,16 @@ public class VideoController {
         return Result.success(new VideoOptionsResponse(effectiveDefault, providers));
     }
 
+    /**
+     * 用户端模型与算力消耗一览列表（由 Redis 提供高性能缓存，管理员改价时自动驱逐）
+     * GET /api/video/models
+     */
+    @GetMapping("/models")
+    public Result<List<org.example.seedancegenarate.dto.ModelPricingView>> models() {
+        boolean admin = UserContext.isAdmin();
+        return Result.success(publicModelPricingService.getPublicModels(admin));
+    }
+
     private VideoOptionsResponse.ModelOption toModelOption(ModelSpec spec,
                                                            Map<String, Boolean> overrides,
                                                            boolean defaultOpen) {
@@ -398,9 +415,14 @@ public class VideoController {
                 VideoTask::getDuration, VideoTask::getRatio, VideoTask::getProvider, VideoTask::getNodeId,
                 VideoTask::getModel, VideoTask::getOutputType, VideoTask::getCostAmount,
                 VideoTask::getPrompt, VideoTask::getCreateTime, VideoTask::getUpdateTime,
+                VideoTask::getModerationStatus, VideoTask::getModerationReasonCode,
+                VideoTask::getModerationMessage, VideoTask::getModeratedAt,
+                VideoTask::getModerationVersion,
                 // 过期判定要用；@JsonIgnore 不会下发给客户端
                 VideoTask::getArtifactStorageType);
-        return Result.success(artifactExpiryPolicy.stampAll(videoTaskService.page(page, wrapper)));
+        Page<VideoTask> result = artifactExpiryPolicy.stampAll(videoTaskService.page(page, wrapper));
+        if (!UserContext.isAdmin()) contentModerationPolicy.redactAll(result);
+        return Result.success(result);
     }
 
     /**
@@ -441,21 +463,16 @@ public class VideoController {
      */
     @GetMapping("/task/{taskId}")
     public Result<?> task(@PathVariable String taskId) {
-        LambdaQueryWrapper<VideoTask> taskWrapper = Wrappers.<VideoTask>lambdaQuery()
-                .eq(VideoTask::getTaskId, taskId);
-        if (!UserContext.isAdmin()) {
-            taskWrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
-        }
-        VideoTask task = videoTaskService.getOne(
-                taskWrapper,
-                false
-        );
+        UserContext.requireUserId();
+        VideoTask task = findOwnedTask(taskId);
         if (task == null) {
             throw new RuntimeException("任务不存在");
         }
         // 只读库：远端轮询已由后台推进器（VideoTaskPoller）统一负责并落库，实时变化经 SSE
         // （GET /api/video/stream）推送给前端。此处不再触发远端轮询，避免每次客户端查询都打远端。
-        return Result.success(artifactExpiryPolicy.stamp(task));
+        artifactExpiryPolicy.stamp(task);
+        if (!UserContext.isAdmin()) contentModerationPolicy.redact(task);
+        return Result.success(task);
     }
 
     /**
@@ -474,6 +491,10 @@ public class VideoController {
         VideoTask task = findOwnedTask(taskId);
         if (task == null || task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        if (!UserContext.isAdmin() && contentModerationPolicy.isBlocked(task)) {
+            writeBlocked(response, task);
             return;
         }
         if (artifactExpiryPolicy.isExpired(task)) {
@@ -509,6 +530,10 @@ public class VideoController {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
+        if (!UserContext.isAdmin() && contentModerationPolicy.isBlocked(task)) {
+            writeBlocked(response, task);
+            return;
+        }
         if (artifactExpiryPolicy.isExpired(task)) {
             writeGone(response);
             return;
@@ -521,12 +546,24 @@ public class VideoController {
         copyLegacyLocalArtifact(task.getVideoUrl(), response, false, null);
     }
 
-    /** 查询当前用户有权访问的任务；迁移期兼容旧 task_id。 */
+    /** 查询当前用户有权访问的任务；兼容 biz_task_id、旧 task_id 以及数字自增 id。 */
     private VideoTask findOwnedTask(String taskId) {
+        if (!StringUtils.hasText(taskId)) {
+            return null;
+        }
+        String normalized = taskId.trim();
         LambdaQueryWrapper<VideoTask> wrapper = Wrappers.<VideoTask>lambdaQuery()
-                .and(w -> w.eq(VideoTask::getBizTaskId, taskId)
-                        .or()
-                        .eq(VideoTask::getTaskId, taskId));
+                .and(w -> {
+                    w.eq(VideoTask::getBizTaskId, normalized)
+                            .or()
+                            .eq(VideoTask::getTaskId, normalized);
+                    if (normalized.matches("^\\d+$")) {
+                        try {
+                            w.or().eq(VideoTask::getId, Long.parseLong(normalized));
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                });
         if (!UserContext.isAdmin()) {
             wrapper.eq(VideoTask::getUserId, UserContext.requireUserId());
         }
@@ -546,6 +583,15 @@ public class VideoController {
         response.getWriter().write(new com.fasterxml.jackson.databind.ObjectMapper()
                 .writeValueAsString(Result.fail(HttpServletResponse.SC_GONE,
                         artifactExpiryPolicy.expiredMessage())));
+    }
+
+    /** 屏蔽不是删除/过期：403 让客户端停止展示，同时保留恢复语义。 */
+    private void writeBlocked(HttpServletResponse response, VideoTask task) throws java.io.IOException {
+        response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+        response.setContentType("application/json;charset=UTF-8");
+        response.getWriter().write(new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(Result.fail(HttpServletResponse.SC_FORBIDDEN,
+                        contentModerationPolicy.blockedMessage(task))));
     }
 
     private boolean hasOssArtifact(VideoTask task) {

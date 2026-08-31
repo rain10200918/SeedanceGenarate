@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
+import org.example.seedancegenarate.entity.AppUser;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.PricingService;
@@ -58,7 +60,11 @@ class VideoSubmitServiceEstimateTest {
                 pricingService,
                 new ObjectMapper(),
                 mock(ApplicationEventPublisher.class),
-                new VideoCompletionProperties());
+                new VideoCompletionProperties(),
+                mock(org.example.seedancegenarate.mapper.AppUserMapper.class),
+                mock(org.example.seedancegenarate.mapper.ApiKeyMapper.class),
+                mock(org.example.seedancegenarate.service.ConcurrencyPolicy.class),
+                mock(org.example.seedancegenarate.service.AdmissionControl.class));
         ReflectionTestUtils.setField(service, "defaultProvider", "seedance");
         when(registry.get("seedance")).thenReturn(engine);
         when(engine.effectiveModel(any())).thenReturn("seedance-v1-pro");
@@ -115,5 +121,49 @@ class VideoSubmitServiceEstimateTest {
                 () -> service.estimate(null, null, null));
         assertTrue(ex.getMessage().contains("未开放"));
         verify(pricingService, never()).price(any());
+    }
+
+    @Test
+    void ordinaryUsersCannotPinAComfyNodeBeforeAnySubmitSideEffect() {
+        // 【测什么】普通用户即使伪造 nodeId，也在解析模型、落任务、冻结资金之前被 403 拒绝
+        // 【怎么算红】只在前端隐藏“指定节点”入口、服务层不守 —— 用户直接改请求体即可绕过
+        //          enabled / healthy / capability / vram 全部过滤，把真实任务强塞给维护中的机器
+        AppUser user = new AppUser();
+        user.setId(7L);
+        user.setRole("USER");
+        UserContext.setUser(user);
+
+        RuntimeException error = assertThrows(RuntimeException.class, () -> service.submit(
+                new VideoSubmitService.SubmitRequest(7L, "comfyui", "t2v", "test",
+                        java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                        5, "16:9", null, null, "ui:pin-denied", "gpu-disabled")));
+
+        assertTrue(error.getMessage().contains("管理员"));
+        verify(registry, never()).get(any());
+        verify(pricingService, never()).price(any());
+    }
+
+    @Test
+    void administratorPinnedNodeReachesTheEngineCommand() throws Exception {
+        // 【测什么】管理员给的 nodeId 穿过统一提交编排，最终进入 GenerateCommand 供调度器指定节点
+        // 【怎么算红】DTO/API 虽然收了 nodeId，但构造 GenerateCommand 时漏掉 `.nodeId(...)` ——
+        //          页面显示“正在验证 gpu-new”，实际仍走普通负载均衡，验证结论完全错误
+        AppUser admin = new AppUser();
+        admin.setId(1L);
+        admin.setRole("ADMIN");
+        UserContext.setUser(admin);
+        when(registry.get("comfyui")).thenReturn(engine);
+        when(engine.effectiveModel("t2v")).thenReturn("t2v");
+        when(engine.outputType("t2v")).thenReturn(OutputType.VIDEO);
+        when(modelAccessService.isOpen("t2v")).thenReturn(true);
+        when(engine.submit(any())).thenReturn(org.example.seedancegenarate.engine.SubmitResult.of("prompt-1", "gpu-new"));
+
+        service.submit(new VideoSubmitService.SubmitRequest(null, "comfyui", "t2v", "test",
+                java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                5, "16:9", null, null, "ui:pin-admin", "gpu-new"));
+
+        ArgumentCaptor<GenerateCommand> command = ArgumentCaptor.forClass(GenerateCommand.class);
+        verify(engine).submit(command.capture());
+        assertEquals("gpu-new", command.getValue().getNodeId());
     }
 }

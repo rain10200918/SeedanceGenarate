@@ -48,7 +48,7 @@ class ComfyUiLostDetectionTest {
         node.setBaseUrl(BASE);
         node.setEnabled(true);
         props.setNodes(List.of(node));
-        engine = new ComfyUiEngine(props, client, mock(ComfyUiNodeScheduler.class),
+        engine = new ComfyUiEngine(props, client, mock(ComfyUiNodeScheduler.class), new org.example.seedancegenarate.engine.comfyui.ComfyUiFleet(props),
                 List.<org.example.seedancegenarate.engine.comfyui.WorkflowBuilder>of(),
                 json, new org.example.seedancegenarate.config.VideoCompletionProperties());
     }

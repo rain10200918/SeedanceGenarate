@@ -30,6 +30,12 @@ public class ApiKey {
     /** 回调 HMAC 签名密钥 */
     private String webhookSecret;
     private LocalDateTime lastUsedAt;
+    /** 本把 key 的在途上限；生效值取 min(账号上限, 本值)，<b>只能收紧不能放宽</b>，所以能安全地放给用户自己设 */
+    private Integer maxConcurrency;
+    /** 签发者：自助创建=本人，管理员代建=管理员。明文只展示一次，泄漏时只能靠它回溯 */
+    private Long createdBy;
+    /** 签发来源 IP */
+    private String createdIp;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)

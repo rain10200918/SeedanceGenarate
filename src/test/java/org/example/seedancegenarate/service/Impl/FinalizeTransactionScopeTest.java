@@ -88,7 +88,8 @@ class FinalizeTransactionScopeTest {
 
         service = spy(new VideoTaskServiceImpl(downloadService, costRecordService,
                 mock(ApplicationEventPublisher.class), null, taskEtaService, null, null,
-                walletService, mock(PricingService.class), template));
+                walletService, mock(PricingService.class),
+                mock(org.example.seedancegenarate.service.AdmissionControl.class), template));
 
         VideoTask task = new VideoTask();
         task.setId(TASK_ID);

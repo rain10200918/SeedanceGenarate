@@ -11,6 +11,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.exception.ApiException;
+import org.example.seedancegenarate.exception.ConcurrencyLimitExceededException;
 import org.example.seedancegenarate.mapper.ApiCallLogMapper;
 import org.example.seedancegenarate.service.ApiVideoService;
 import org.example.seedancegenarate.service.OssService;
@@ -90,7 +91,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                     context.apiKey().getUserId(), engine.provider(), context.model(), context.prompt(),
                     imageUrls, List.of(), List.of(), context.duration(), context.ratio(), context.megapixels(),
-                    context.apiKey().getId(), "api:" + context.requestId()));
+                    context.apiKey().getId(), "api:" + context.requestId(), null));
             // 两阶段日志：回写 taskId + 排队耗时（终态由 ApiCallLogUpdater 收尾）
             ApiCallLog update = new ApiCallLog();
             update.setId(callLog.getId());
@@ -293,6 +294,11 @@ public class ApiVideoServiceImpl implements ApiVideoService {
     }
 
     private ApiException toApiException(Exception e, String model) {
+        // 按类型认，放在所有 message 匹配之前（D-028）：CONCURRENCY_LIMIT 和 RATE_LIMITED
+        // 是两个码，客户的处置一个是「等一条跑完」一个是「退避重试」，混了就让人写错代码
+        if (e instanceof ConcurrencyLimitExceededException limited) {
+            return ApiException.concurrencyLimited(limited.getLimit(), limited.getCurrent());
+        }
         String msg = e.getMessage() == null ? "" : e.getMessage();
         if (msg.contains("余额不足")) {
             return ApiException.insufficientBalance();

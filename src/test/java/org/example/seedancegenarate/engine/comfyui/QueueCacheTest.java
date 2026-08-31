@@ -15,7 +15,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * history 为空的任务查一次队列——ComfyUI 回到 2 秒轮询器之后，同一节点上的多条任务
  * 每轮各取一份完全一样的几 MB，纯属烧带宽。
  * <p>
- * 但<b>调度选节点绝不能吃缓存</b>：那是提交路径，用过期负载会让一批提交全压到同一台。
+ * 但 <b>ETA 定位和管理端健康检测不能吃缓存</b>：前者要的是队列里的实时**位次**，
+ * 后者是人点了"检测"按钮之后要看的当下状态。
+ * <p>
+ * <b>调度不在这份名单里了</b>：D-026 于 2026-08-28 修订后，选节点读的是内存快照 +
+ * 待发计数，一次 HTTP 都不发（见 {@code NodeSchedulingSpreadTest} 与 {@code ComfyUiFleet}）。
  */
 class QueueCacheTest {
 
@@ -98,16 +102,21 @@ class QueueCacheTest {
     }
 
     @Test
-    void schedulingPathBypassesTheCache() throws Exception {
-        // 【测什么】调度用的 queueLoad 走不带缓存的 getQueue —— 提交路径要看实时负载
-        // 【怎么算红】调度也吃缓存 —— 3 秒内的一批提交按同一份过期负载决策，
-        //            全部压到同一个节点上，负载均衡形同虚设
+    void etaAndHealthCheckPathsBypassTheCache() throws Exception {
+        // 【测什么】ETA 定位（getQueue 直调）和管理端健康检测（queueLoad）都不吃缓存
+        // 【怎么算红】把这两条也接到 getQueueCached 上 —— ETA 会连续 3 秒告诉不同的用户
+        //            「你排在第 4 位」（其中一部分人其实已经在跑了），而管理端点一次
+        //            「检测」拿到的是 3 秒前的旧数据，运维据此判断节点死活
+        //
+        // 注：**调度**曾经也在这条豁免名单里（D-026 原条文「调度选节点必须取实时」）。
+        //     2026-08-28 修订后调度改为读内存快照 + 待发计数，一次 HTTP 都不发，
+        //     它的守卫搬到了 NodeSchedulingSpreadTest（守意图而不是守机制）。
         props.setQueueCacheMs(3000);
 
-        client.queueLoad("http://node/gpu-3", 3000);
+        client.getQueue("http://node/gpu-3", 3000);
         client.queueLoad("http://node/gpu-3", 3000);
         client.queueLoad("http://node/gpu-3", 3000);
 
-        assertEquals(3, httpCalls.get(), "调度必须每次实时，实际=" + httpCalls.get());
+        assertEquals(3, httpCalls.get(), "ETA / 健康检测必须每次实时，实际=" + httpCalls.get());
     }
 }

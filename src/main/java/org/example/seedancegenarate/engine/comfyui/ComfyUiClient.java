@@ -92,6 +92,25 @@ public class ComfyUiClient {
         return objectMapper.readTree(resp.body());
     }
 
+    /**
+     * 这台节点装了哪些 node type。响应的<b>顶层 key 就是 node type 名字</b>，
+     * 每个值是该节点的完整参数定义 —— 载荷是 MB 级，所以只能慢探（默认 60 秒一轮），
+     * 且必须用 readTimeoutMs 而不是 statusTimeoutMs。
+     * <p>
+     * 这是判断「这台能不能跑某个工作流」<b>唯一可靠</b>的依据：文件列表对得上不代表能跑
+     * （插件目录齐了但少个 pip 依赖，import 失败，node type 就是不出现），
+     * 而 node type 出现了就一定能跑。
+     */
+    public JsonNode getObjectInfo(String baseUrl, int timeoutMs) throws Exception {
+        HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/object_info"))
+                .timeout(timeoutMs)
+                .execute();
+        if (!resp.isOk()) {
+            throw new RuntimeException("ComfyUI 查询节点类型失败: " + resp.getStatus());
+        }
+        return objectMapper.readTree(resp.body());
+    }
+
     /** 查询任务历史（含状态与输出）；prompt_id 不在结果里表示仍在排队 / 执行 */
     public JsonNode getHistory(String baseUrl, String promptId, int timeoutMs) throws Exception {
         HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/history/" + promptId))
@@ -103,10 +122,28 @@ public class ComfyUiClient {
         return objectMapper.readTree(resp.body());
     }
 
-    /** 队列负载 = 运行中 + 排队中；用于 least-queue 调度，同时兼作健康检查 */
+    /** 队列负载 = 运行中 + 排队中；管理端健康检测用（要顺带拿到延迟与错误明细） */
     public int queueLoad(String baseUrl, int timeoutMs) throws Exception {
         JsonNode n = getQueue(baseUrl, timeoutMs);
         return n.path("queue_running").size() + n.path("queue_pending").size();
+    }
+
+    /**
+     * 队列深度，来自 {@code GET /prompt} —— <b>后台探测器专用</b>。
+     * <p>
+     * 和 {@link #queueLoad} 是同一个数字，但载荷差几个数量级：{@code /prompt} 的响应是
+     * {@code {"exec_info":{"queue_remaining":0}}}（约 37 字节），而 {@code /queue} 带的是
+     * 队列中<b>每个 prompt 的完整工作流 JSON</b>（可能几 MB）。
+     * 3 秒一轮 × N 个节点，这个差别就是「几乎免费」和「持续烧带宽」的差别。
+     */
+    public int queueRemaining(String baseUrl, int timeoutMs) throws Exception {
+        HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/prompt"))
+                .timeout(timeoutMs)
+                .execute();
+        if (!resp.isOk()) {
+            throw new RuntimeException("ComfyUI 查询队列深度失败: " + resp.getStatus());
+        }
+        return objectMapper.readTree(resp.body()).path("exec_info").path("queue_remaining").asInt(0);
     }
 
     /**
@@ -116,7 +153,8 @@ public class ComfyUiClient {
      * 丢失判定会对每个 history 为空的任务查一次队列，同一轮里同节点上的多条任务拿到的
      * 必然是同一份 —— 各取一遍纯属浪费带宽。
      * <p>
-     * <b>调度选节点绝不能用这个</b>：那是提交路径，缓存会让一批提交按过期负载全压到同一台。
+     * 调度不用这个，也不用它的无缓存版本 —— 选节点读的是 {@link ComfyUiFleet} 的内存快照，
+     * 一次 HTTP 都不发（D-026，2026-08-28 修订）。
      */
     public JsonNode getQueueCached(String baseUrl, int timeoutMs) throws Exception {
         long ttl = Math.max(properties.getQueueCacheMs(), 0);

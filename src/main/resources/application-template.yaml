@@ -222,6 +222,11 @@ async-job:
   backoff-base-seconds: ${ASYNC_JOB_BACKOFF_BASE_SECONDS:30}
   channel: ${ASYNC_JOB_REDIS_CHANNEL:local:seedance:event:job-available}
 
+api-key:
+  # 每账号可持有的 key 数量上限。每把 key 都是一个泄漏面；
+  # 限流按**账号**分桶（不是按 key），所以多建 key 不放大配额，这个数只挡「脚本无限建」。
+  max-per-user: ${API_KEY_MAX_PER_USER:50}
+
 rate-limit:
   # Redis key 使用 {环境}:seedance:rate:{场景}:{身份}；不同环境共用 Redis 时请使用不同前缀。
   redis-key-prefix: ${RATE_LIMIT_REDIS_KEY_PREFIX:local:seedance:rate}

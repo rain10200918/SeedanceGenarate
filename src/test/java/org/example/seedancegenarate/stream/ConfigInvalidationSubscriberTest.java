@@ -24,20 +24,23 @@ class ConfigInvalidationSubscriberTest {
     void reloadsOnlyTheMatchingSnapshotHolder() {
         ConfigSnapshotReloadable modelAccess = reloadable(ConfigInvalidationNotifier.TYPE_MODEL_ACCESS);
         ConfigSnapshotReloadable pricing = reloadable(ConfigInvalidationNotifier.TYPE_PRICING);
+        org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService = mock(org.example.seedancegenarate.service.PublicModelPricingService.class);
         ConfigInvalidationSubscriber subscriber = new ConfigInvalidationSubscriber(
-                List.of(modelAccess, pricing), new ObjectMapper());
+                List.of(modelAccess, pricing), new ObjectMapper(), publicModelPricingService);
 
         subscriber.onMessage(message("{\"type\":\"MODEL_ACCESS\"}"), null);
 
         verify(modelAccess).reload();
         verify(pricing, never()).reload();
+        verify(publicModelPricingService).clearCache();
     }
 
     @Test
     void unknownTypeIsIgnored() {
         ConfigSnapshotReloadable modelAccess = reloadable(ConfigInvalidationNotifier.TYPE_MODEL_ACCESS);
+        org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService = mock(org.example.seedancegenarate.service.PublicModelPricingService.class);
         ConfigInvalidationSubscriber subscriber = new ConfigInvalidationSubscriber(
-                List.of(modelAccess), new ObjectMapper());
+                List.of(modelAccess), new ObjectMapper(), publicModelPricingService);
 
         // 新版本加了新类型，老实例不认识——不该报错，也不该乱重载
         subscriber.onMessage(message("{\"type\":\"SOMETHING_NEW\"}"), null);
@@ -48,8 +51,9 @@ class ConfigInvalidationSubscriberTest {
     @Test
     void malformedPayloadDoesNotThrow() {
         ConfigSnapshotReloadable modelAccess = reloadable(ConfigInvalidationNotifier.TYPE_MODEL_ACCESS);
+        org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService = mock(org.example.seedancegenarate.service.PublicModelPricingService.class);
         ConfigInvalidationSubscriber subscriber = new ConfigInvalidationSubscriber(
-                List.of(modelAccess), new ObjectMapper());
+                List.of(modelAccess), new ObjectMapper(), publicModelPricingService);
 
         subscriber.onMessage(message("not json"), null);
         subscriber.onMessage(message("{}"), null);
@@ -59,16 +63,18 @@ class ConfigInvalidationSubscriberTest {
 
     @Test
     void oneFailingReloadDoesNotBlockOthers() {
-        ConfigSnapshotReloadable failing = reloadable(ConfigInvalidationNotifier.TYPE_MODEL_ACCESS);
-        org.mockito.Mockito.doThrow(new RuntimeException("db down")).when(failing).reload();
-        ConfigSnapshotReloadable healthy = reloadable(ConfigInvalidationNotifier.TYPE_MODEL_ACCESS);
+        ConfigSnapshotReloadable faulty = reloadable(ConfigInvalidationNotifier.TYPE_PRICING);
+        org.mockito.Mockito.doThrow(new RuntimeException("boom")).when(faulty).reload();
+        ConfigSnapshotReloadable healthy = reloadable(ConfigInvalidationNotifier.TYPE_PRICING);
+        org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService = mock(org.example.seedancegenarate.service.PublicModelPricingService.class);
         ConfigInvalidationSubscriber subscriber = new ConfigInvalidationSubscriber(
-                List.of(failing, healthy), new ObjectMapper());
+                List.of(faulty, healthy), new ObjectMapper(), publicModelPricingService);
 
-        subscriber.onMessage(message("{\"type\":\"MODEL_ACCESS\"}"), null);
+        subscriber.onMessage(message("{\"type\":\"PRICING\"}"), null);
 
-        verify(failing).reload();
+        verify(faulty).reload();
         verify(healthy).reload();
+        verify(publicModelPricingService).clearCache();
     }
 
     private ConfigSnapshotReloadable reloadable(String type) {

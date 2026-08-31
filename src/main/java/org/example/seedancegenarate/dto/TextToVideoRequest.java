@@ -27,6 +27,8 @@ public class TextToVideoRequest {
      * 模型 / 工作流标识（ComfyUI 必填，Seedance 可忽略）
      */
     private String model;
+    /** 管理员灰度验证时指定的 ComfyUI 节点；普通用户传入会被拒绝 */
+    private String nodeId;
     /** 可选幂等键；UI 重试同一请求时复用 */
     private String requestId;
 }

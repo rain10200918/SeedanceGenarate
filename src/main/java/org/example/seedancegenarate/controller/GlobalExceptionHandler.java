@@ -2,6 +2,7 @@ package org.example.seedancegenarate.controller;
 
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.exception.ConcurrencyLimitExceededException;
 import org.example.seedancegenarate.exception.BusinessException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
@@ -29,6 +30,18 @@ public class GlobalExceptionHandler {
     public Result<?> handleBusinessException(BusinessException e) {
         log.warn("业务拦截: code={}, message={}", e.getCode(), e.getMessage());
         return Result.fail(e.getCode(), e.getMessage());
+    }
+
+    /**
+     * 1.5 在途并发达上限：429，而不是 400/500。
+     * <p>
+     * 按<b>类型</b>匹配而不是靠 message 文本认（D-028）。前端拿 429 才知道这是「等一等就能提交」，
+     * 不是「参数写错了」——两者提示语和重试策略完全不同。
+     */
+    @ExceptionHandler(ConcurrencyLimitExceededException.class)
+    public Result<?> handleConcurrencyLimit(ConcurrencyLimitExceededException e) {
+        log.info("在途并发达上限: {}/{}", e.getCurrent(), e.getLimit());
+        return Result.tooManyRequests(e.getMessage());
     }
 
     /** 2. 参数非法：记录 WARN */

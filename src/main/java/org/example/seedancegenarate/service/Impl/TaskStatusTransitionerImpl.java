@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.event.TaskStatusChangedEvent;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
+import org.example.seedancegenarate.service.AdmissionControl;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.WalletService;
@@ -27,6 +28,7 @@ public class TaskStatusTransitionerImpl implements TaskStatusTransitioner {
     private final VideoTaskMapper videoTaskMapper;
     private final ApplicationEventPublisher eventPublisher;
     private final WalletService walletService;
+    private final AdmissionControl admissionControl;
     private final PricingService pricingService;
 
     @Override
@@ -69,6 +71,9 @@ public class TaskStatusTransitionerImpl implements TaskStatusTransitioner {
         }
         task.setStatus("FAILED");
         task.setErrorMsg(userMsg);
+        // 归还并发槽位：只有 CAS 赢家（rows==1）走到这里，不会重复释放。
+        // best-effort，失败交给对账 —— 和下面的解冻同一个语义。
+        admissionControl.releaseQuietly(task.getUserId(), task.getId(), task.getApiKeyId());
         // 失败统一解冻（预授权退回）：提交时冻结的金额退还可用户。幂等（biz_key=task:{id}:release），
         // 0 元任务自动跳过；金额用提交时快照（freeze_amount）；这里在 CAS 落 FAILED 成功后才执行。
         try {

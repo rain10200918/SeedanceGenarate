@@ -59,7 +59,12 @@ public class ZImageTurboWorkflowBuilder implements WorkflowBuilder {
         return MODEL;
     }
 
-    @Override
+        @Override
+    public String templatePath() {
+        return TEMPLATE_PATH;
+    }
+
+@Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "Z-Image-Turbo 文生图",
                 false, 0, 0, RATIOS, 0, 0, List.of(), OutputType.IMAGE);

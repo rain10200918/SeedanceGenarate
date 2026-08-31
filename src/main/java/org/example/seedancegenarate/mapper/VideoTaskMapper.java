@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 import org.example.seedancegenarate.entity.VideoTask;
 
 import java.time.LocalDateTime;
@@ -12,6 +13,33 @@ import java.util.Map;
 
 @Mapper
 public interface VideoTaskMapper extends BaseMapper<VideoTask> {
+
+    /** 只写审核列；任务终态、账务快照和产物定位列不在 SQL 中，结构上避免屏蔽误伤结算或 OSS。 */
+    @Update("UPDATE video_task SET moderation_status = 'BLOCKED', "
+            + "moderation_reason_code = #{reasonCode}, moderation_message = #{message}, "
+            + "moderated_by = #{operatorId}, moderated_at = #{moderatedAt}, "
+            + "moderation_version = moderation_version + 1 "
+            + "WHERE id = #{id} AND moderation_version = #{expectedVersion} "
+            + "AND moderation_status <> 'BLOCKED' AND status = 'SUCCESS' "
+            + "AND video_url IS NOT NULL AND video_url <> ''")
+    int blockContent(@Param("id") Long id,
+                     @Param("expectedVersion") int expectedVersion,
+                     @Param("reasonCode") String reasonCode,
+                     @Param("message") String message,
+                     @Param("operatorId") Long operatorId,
+                     @Param("moderatedAt") LocalDateTime moderatedAt);
+
+    /** 恢复同样只写审核列；video_url/artifact_key 从未清空，因此恢复不需要重建产物。 */
+    @Update("UPDATE video_task SET moderation_status = 'VISIBLE', "
+            + "moderation_reason_code = NULL, moderation_message = NULL, "
+            + "moderated_by = #{operatorId}, moderated_at = #{moderatedAt}, "
+            + "moderation_version = moderation_version + 1 "
+            + "WHERE id = #{id} AND moderation_version = #{expectedVersion} "
+            + "AND moderation_status = 'BLOCKED'")
+    int restoreContent(@Param("id") Long id,
+                       @Param("expectedVersion") int expectedVersion,
+                       @Param("operatorId") Long operatorId,
+                       @Param("moderatedAt") LocalDateTime moderatedAt);
 
     /**
      * 终态账务补偿候选：缺少对应 SETTLE/RELEASE 流水；限制最近天数范围，配合 idx_bt_task_type 索引消除全表扫描。

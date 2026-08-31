@@ -79,7 +79,12 @@ public class MiniMaxH3Fl2vaHdWorkflowBuilder implements WorkflowBuilder {
         return MODEL;
     }
 
-    @Override
+        @Override
+    public String templatePath() {
+        return TEMPLATE_PATH;
+    }
+
+@Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3 首尾帧生视频 高清版",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),

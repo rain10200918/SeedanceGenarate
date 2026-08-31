@@ -55,7 +55,7 @@ class ComfyUiWebhookCapabilityTest {
     }
 
     private ComfyUiEngine engine() {
-        return new ComfyUiEngine(props, client, mock(ComfyUiNodeScheduler.class),
+        return new ComfyUiEngine(props, client, mock(ComfyUiNodeScheduler.class), new org.example.seedancegenarate.engine.comfyui.ComfyUiFleet(props),
                 List.of(), json, completion);
     }
 

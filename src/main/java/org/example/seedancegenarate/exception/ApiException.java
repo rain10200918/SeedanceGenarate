@@ -63,6 +63,20 @@ public class ApiException extends RuntimeException {
         return new ApiException("ARTIFACT_EXPIRED", HttpStatus.GONE, message);
     }
 
+    /** 产物仍保留且任务仍成功，但平台内容治理已禁止交付。 */
+    public static ApiException contentBlocked(String message) {
+        return new ApiException("CONTENT_BLOCKED", HttpStatus.FORBIDDEN, message);
+    }
+
+    /**
+     * 在途并发已达上限。与 {@link #rateLimited()} 刻意分成两个码：
+     * 前者要「等一条跑完」，后者要「退避重试」，客户的处置完全不同。
+     */
+    public static ApiException concurrencyLimited(int limit, long current) {
+        return new ApiException("CONCURRENCY_LIMIT", HttpStatus.TOO_MANY_REQUESTS,
+                "同时进行的任务已达上限（" + current + "/" + limit + "），等一条完成后再提交");
+    }
+
     public static ApiException rateLimited() {
         return new ApiException("RATE_LIMITED", HttpStatus.TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试");
     }

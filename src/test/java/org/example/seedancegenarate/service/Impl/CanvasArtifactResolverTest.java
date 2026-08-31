@@ -42,7 +42,8 @@ class CanvasArtifactResolverTest {
         OssConfig ossConfig = new OssConfig();
         ossConfig.setSignedUrlTtlSeconds(300);
         resolver = new CanvasArtifactResolverImpl(videoTaskService, artifactStorage, ossConfig,
-                new org.example.seedancegenarate.service.ArtifactExpiryPolicy(30));
+                new org.example.seedancegenarate.service.ArtifactExpiryPolicy(30),
+                new org.example.seedancegenarate.service.ContentModerationPolicy());
     }
 
     private CanvasNode producer(String taskId) {
@@ -167,5 +168,26 @@ class CanvasArtifactResolverTest {
                 new ResolvedInputs.PortValue(MediaType.IMAGE, "tsk_new.png"));
 
         assertEquals("https://oss/signed", out.value());
+    }
+
+    @Test
+    void blockedUpstreamArtifactIsRejectedBeforeSigningOrFreezingMoney() throws Exception {
+        // 【测什么】被管理员屏蔽的画布上游在签 OSS 地址之前就停止，不能继续流入下游生成
+        // 【怎么算红】只在播放器/下载接口挡 —— 画布仍签出原件并提交新任务，受限内容被二次传播且又冻结一笔钱
+        VideoTask blocked = new VideoTask();
+        blocked.setBizTaskId("tsk_blocked");
+        blocked.setStatus("SUCCESS");
+        blocked.setArtifactStorageType("OSS");
+        blocked.setArtifactKey("outputs/tsk_blocked/result.mp4");
+        blocked.setModerationStatus("BLOCKED");
+        when(videoTaskService.getOne(any(), anyBoolean())).thenReturn(blocked);
+
+        BusinessException thrown = assertThrows(BusinessException.class,
+                () -> resolver.toFetchable(producer("tsk_blocked"),
+                        new ResolvedInputs.PortValue(MediaType.VIDEO, "tsk_blocked.mp4")));
+
+        assertEquals(403, thrown.getCode());
+        assertTrue(thrown.getMessage().contains("已被平台屏蔽"));
+        verify(artifactStorage, never()).createSignedGetUrl(any(), any());
     }
 }

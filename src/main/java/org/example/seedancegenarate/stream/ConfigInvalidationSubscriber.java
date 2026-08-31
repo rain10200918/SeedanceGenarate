@@ -23,11 +23,14 @@ public class ConfigInvalidationSubscriber implements MessageListener {
 
     private final List<ConfigSnapshotReloadable> reloadables;
     private final ObjectMapper objectMapper;
+    private final org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService;
 
     public ConfigInvalidationSubscriber(List<ConfigSnapshotReloadable> reloadables,
-                                       ObjectMapper objectMapper) {
+                                       ObjectMapper objectMapper,
+                                       org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService) {
         this.reloadables = reloadables;
         this.objectMapper = objectMapper;
+        this.publicModelPricingService = publicModelPricingService;
     }
 
     @Override
@@ -35,6 +38,10 @@ public class ConfigInvalidationSubscriber implements MessageListener {
         String type = parseType(new String(message.getBody(), StandardCharsets.UTF_8));
         if (type == null) {
             return;
+        }
+        if (org.example.seedancegenarate.service.ConfigInvalidationNotifier.TYPE_PRICING.equals(type)
+                || org.example.seedancegenarate.service.ConfigInvalidationNotifier.TYPE_MODEL_ACCESS.equals(type)) {
+            publicModelPricingService.clearCache();
         }
         for (ConfigSnapshotReloadable reloadable : reloadables) {
             if (!type.equals(reloadable.snapshotType())) {

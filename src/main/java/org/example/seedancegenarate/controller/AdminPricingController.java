@@ -29,6 +29,7 @@ public class AdminPricingController {
     private final VideoEngineRegistry videoEngineRegistry;
     private final ConfigPricingService configPricingService;
     private final ConfigInvalidationNotifier invalidationNotifier;
+    private final org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService;
 
     @GetMapping
     public Result<List<PriceConfig>> list() {
@@ -68,9 +69,10 @@ public class AdminPricingController {
         return Result.<Void>success(null);
     }
 
-    /** 先刷本实例（管理员下一笔计费就该用新价），再广播给其他实例。 */
+    /** 先刷本实例与清除 Redis 定价缓存，再广播给其他实例。 */
     private void refreshPricing() {
         configPricingService.reload();
+        publicModelPricingService.clearCache();
         invalidationNotifier.notifyChanged(ConfigInvalidationNotifier.TYPE_PRICING);
     }
 

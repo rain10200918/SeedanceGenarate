@@ -19,6 +19,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ModelAdminController {
     private final ModelAccessService modelAccessService;
+    private final org.example.seedancegenarate.service.PublicModelPricingService publicModelPricingService;
 
     @GetMapping
     public Result<List<ModelAccessView>> list() {
@@ -33,6 +34,7 @@ public class ModelAdminController {
             throw new RuntimeException("open 不能为空");
         }
         modelAccessService.setOpen(model, request.getOpen());
+        publicModelPricingService.clearCache();
         return Result.success(null);
     }
 

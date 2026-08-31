@@ -24,6 +24,10 @@ public class AppUser {
     private String lastActiveIpLocation;
     private String lastOperation;
     private LocalDateTime lastOperationTime;
+    /** 在途并发档位名（STANDARD/TEAM/ENTERPRISE）；具体数值在配置里，null=不限 */
+    private String accountTier;
+    /** 单客户特谈的在途上限，优先于档位；null=按档位，0=禁止提交 */
+    private Integer concurrencyOverride;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)

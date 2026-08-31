@@ -66,7 +66,12 @@ public class QwenImageEditWorkflowBuilder implements WorkflowBuilder {
         return MODEL;
     }
 
-    @Override
+        @Override
+    public String templatePath() {
+        return TEMPLATE_PATH;
+    }
+
+@Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "Qwen-Image-Edit 图生图",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, 0, 0, List.of(), OutputType.IMAGE);

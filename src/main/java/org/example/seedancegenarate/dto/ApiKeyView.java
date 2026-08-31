@@ -16,12 +16,14 @@ public record ApiKeyView(
         LocalDateTime expiresAt,
         String callbackUrl,
         LocalDateTime lastUsedAt,
+        /** 分配给这把 key 的同时可跑任务数；null = 与其他 key 共用账号总量 */
+        Integer maxConcurrency,
         LocalDateTime createTime
 ) {
     /** 从实体裁剪敏感字段；username 由调用方传入（批量补查避免 N+1） */
     public static ApiKeyView of(org.example.seedancegenarate.entity.ApiKey key, String username) {
         return new ApiKeyView(key.getId(), key.getUserId(), username, key.getName(), key.getKeyPrefix(),
                 key.getStatus(), key.getExpiresAt(), key.getCallbackUrl(),
-                key.getLastUsedAt(), key.getCreateTime());
+                key.getLastUsedAt(), key.getMaxConcurrency(), key.getCreateTime());
     }
 }

@@ -1,58 +1,60 @@
 package org.example.seedancegenarate.service.Impl;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.dto.NodeHealth;
-import org.example.seedancegenarate.engine.comfyui.ComfyUiClient;
-import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
+import org.example.seedancegenarate.engine.comfyui.ComfyUiFleet;
+import org.example.seedancegenarate.engine.comfyui.NodeState;
+import org.example.seedancegenarate.engine.comfyui.WorkflowRequirements;
 import org.example.seedancegenarate.service.NodeHealthService;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 /**
- * 节点健康检测实现。每次调用实时探测：/queue（连通性 + 队列深度 + 延迟）
- * + /system_stats（GPU 型号 / 显存）。节点少，直接实时查，不做缓存。
+ * 节点健康：直接读后台探测器的<b>内存快照</b>，一次 HTTP 都不发。
+ *
+ * <h3>为什么不再现场探测</h3>
+ * 从前每次调用都并行探测全部节点（{@code /queue} 几 MB × N 台）。两个问题：
+ * <ul>
+ *   <li>页面上看到的和<b>调度此刻用来派活的</b>是两次不同的观测。
+ *       「页面显示一切正常，但活就是派不过去」这类问题因此查不清 ——
+ *       而这正是最需要这个页面的时候</li>
+ *   <li>谁点一下刷新，就往机队打一轮请求。看板做自动刷新就是一台放大器</li>
+ * </ul>
+ * 代价是数据最多旧 3 秒（快探测周期）。看板本来就不需要更新。
  */
 @Service
 @RequiredArgsConstructor
 public class NodeHealthServiceImpl implements NodeHealthService {
 
-    private final ComfyUiProperties properties;
-    private final ComfyUiClient client;
+    private final ComfyUiFleet fleet;
+    private final WorkflowRequirements requirements;
 
     @Override
     public List<NodeHealth> checkAll() {
-        return properties.enabledNodes().parallelStream()
-                .map(this::checkOne)
-                .toList();
+        return fleet.nodes().stream().map(this::toHealth).toList();
     }
 
-    private NodeHealth checkOne(ComfyUiProperties.Node node) {
-        long start = System.nanoTime();
-        try {
-            int load = client.queueLoad(node.getBaseUrl(), properties.getConnectTimeoutMs());
-            long latencyMs = (System.nanoTime() - start) / 1_000_000;
-            JsonNode stats = client.getSystemStats(node.getBaseUrl(), properties.getConnectTimeoutMs());
-            JsonNode device = stats.path("devices").path(0);
-            return new NodeHealth(
-                    node.getId(),
-                    node.getBaseUrl(),
-                    true,
-                    latencyMs,
-                    load,
-                    device.path("name").asText(""),
-                    numOrNull(device.path("vram_total")),
-                    numOrNull(device.path("vram_free")),
-                    null);
-        } catch (Exception e) {
-            long latencyMs = (System.nanoTime() - start) / 1_000_000;
-            return new NodeHealth(node.getId(), node.getBaseUrl(), false,
-                    latencyMs, -1, null, null, null, e.getMessage());
-        }
-    }
-
-    private static Long numOrNull(JsonNode node) {
-        return node.isNumber() ? node.asLong() : null;
+    private NodeHealth toHealth(NodeState node) {
+        return new NodeHealth(
+                node.id(),
+                node.baseUrl(),
+                node.enabled(),
+                node.archived(),
+                node.remark(),
+                node.healthy(),
+                node.weight(),
+                node.probeLatencyMs(),
+                node.queueDepth(),
+                fleet.pendingCount(node.id()),
+                node.gpuName(),
+                node.vramTotal(),
+                // vram_free 刻意不透出：它是此刻的空闲量，随别的任务跑完就涨回来。
+                // 放在看板上会诱导人拿它做容量判断，而路由用的是 vram_total（物理上限）。
+                null,
+                node.capabilities() == null ? null : node.capabilities().size(),
+                requirements.runnableModelsOn(node),
+                node.versions(),
+                node.lastError());
     }
 }

@@ -75,7 +75,12 @@ public class MiniMaxH3AccelWorkflowBuilder implements WorkflowBuilder {
         return MODEL;
     }
 
-    @Override
+        @Override
+    public String templatePath() {
+        return TEMPLATE_PATH;
+    }
+
+@Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3参考生视频 官方加速",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),

@@ -62,7 +62,7 @@ class ComfyUiStatusTimeoutTest {
         when(builder.spec()).thenReturn(new ModelSpec("comfyui", "t2v", "文生视频",
                 false, 0, 0, List.of(), 1, 10, List.of()));
 
-        engine = new ComfyUiEngine(props, client, scheduler, List.of(builder),
+        engine = new ComfyUiEngine(props, client, scheduler, new org.example.seedancegenarate.engine.comfyui.ComfyUiFleet(props), List.of(builder),
                 json, new VideoCompletionProperties());
     }
 
@@ -112,7 +112,10 @@ class ComfyUiStatusTimeoutTest {
         // 【测什么】提交仍然用 60s —— 这次改动不许把大载荷路径也一起收紧
         // 【怎么算红】提交也用 5s —— 上传几十 MB 参考素材必然超时，所有图生视频任务当场失败
         ComfyUiProperties.Node node = props.getNodes().get(0);
-        when(scheduler.pick()).thenReturn(node);
+        // 提交路径调的是 pick(model, pinnedNodeId)：model 用来做能力/显存过滤，
+        // pinnedNodeId 是管理员指定节点（这里为 null，走正常调度）
+        when(scheduler.pick(eq("t2v"), isNull()))
+                .thenReturn(new ComfyUiNodeScheduler.NodeSelection(node, 1L));
         when(builder.build(any(), any())).thenReturn(json.readTree("{}"));
         when(client.submitPrompt(anyString(), any(), anyString(), isNull(), anyInt()))
                 .thenReturn(PROMPT);

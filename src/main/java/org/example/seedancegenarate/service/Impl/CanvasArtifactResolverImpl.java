@@ -11,6 +11,7 @@ import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.service.ArtifactExpiryPolicy;
 import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.CanvasArtifactResolver;
+import org.example.seedancegenarate.service.ContentModerationPolicy;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -29,6 +30,7 @@ public class CanvasArtifactResolverImpl implements CanvasArtifactResolver {
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
     private final ArtifactExpiryPolicy artifactExpiryPolicy;
+    private final ContentModerationPolicy contentModerationPolicy;
 
     @Override
     public ResolvedInputs.PortValue toFetchable(CanvasNode producer, ResolvedInputs.PortValue value) {
@@ -56,6 +58,11 @@ public class CanvasArtifactResolverImpl implements CanvasArtifactResolver {
                 || !StringUtils.hasText(task.getArtifactKey())) {
             throw BusinessException.badRequest(
                     name(producer) + "的产物没有存进对象存储，无法作为下游输入");
+        }
+        // 内容屏蔽必须早于签名与下游任务提交：否则同一份受限产物会被画布二次传播。
+        if (contentModerationPolicy.isBlocked(task)) {
+            throw BusinessException.forbidden(
+                    name(producer) + "的产物已被平台屏蔽，无法继续作为下游输入");
         }
         // 产物过期必须在这里挡住，不能等引擎去下载才发现。
         // 放行的话顺序是：签地址（不校验对象存在）→ 提交 → **钱先冻结** → 引擎 downloadBytes()

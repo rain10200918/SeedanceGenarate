@@ -154,7 +154,7 @@ public class CanvasRunServiceImpl implements CanvasRunService {
                 canvas.getUserId(), plan.provider(), plan.model(), plan.prompt(),
                 plan.imageUrls(), plan.videoUrls(), plan.audioUrls(),
                 plan.duration(), plan.ratio(), plan.megapixels(),
-                null, node.getSubmitRequestId()));
+                null, node.getSubmitRequestId(), null));
 
         CanvasNode patch = new CanvasNode();
         patch.setId(node.getId());

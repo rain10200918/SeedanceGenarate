@@ -14,6 +14,7 @@ import org.example.seedancegenarate.exception.ApiException;
 import org.example.seedancegenarate.service.ApiDocService;
 import org.example.seedancegenarate.service.ArtifactStorage;
 import org.example.seedancegenarate.service.ApiVideoService;
+import org.example.seedancegenarate.service.ContentModerationPolicy;
 import org.example.seedancegenarate.service.Impl.ApiVideoServiceImpl;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.util.IpUtils;
@@ -41,6 +42,7 @@ public class ApiVideoController {
     private final ArtifactStorage artifactStorage;
     private final OssConfig ossConfig;
     private final org.example.seedancegenarate.service.ArtifactExpiryPolicy artifactExpiryPolicy;
+    private final ContentModerationPolicy contentModerationPolicy;
 
     /** 当前请求的 API Key（ApiKeyInterceptor 注入） */
     private static ApiKey currentKey(HttpServletRequest request) {
@@ -83,7 +85,8 @@ public class ApiVideoController {
     /** 查状态：PROCESSING / SUCCESS（含结果）/ FAILED（含错误） */
     @GetMapping("/{taskId}")
     public VideoTask get(@PathVariable String taskId, HttpServletRequest servletRequest) {
-        return artifactExpiryPolicy.stamp(findTask(currentKey(servletRequest).getId(), taskId));
+        return contentModerationPolicy.redact(
+                artifactExpiryPolicy.stamp(findTask(currentKey(servletRequest).getId(), taskId)));
     }
 
     /** 任务列表（该钥匙的，分页） */
@@ -95,11 +98,12 @@ public class ApiVideoController {
     ) {
         long pageCurrent = Math.max(current, 1L);
         long pageSize = Math.min(Math.max(size, 1L), 100L);
-        return artifactExpiryPolicy.stampAll(videoTaskService.page(
+        Page<VideoTask> page = artifactExpiryPolicy.stampAll(videoTaskService.page(
                 new Page<>(pageCurrent, pageSize),
                 Wrappers.<VideoTask>lambdaQuery()
                         .eq(VideoTask::getApiKeyId, currentKey(servletRequest).getId())
                         .orderByDesc(VideoTask::getId)));
+        return contentModerationPolicy.redactAll(page);
     }
 
     /** 下载产物（内联，按扩展名定 Content-Type） */
@@ -107,6 +111,9 @@ public class ApiVideoController {
     public void content(@PathVariable String taskId, HttpServletRequest servletRequest,
                         HttpServletResponse response) throws Exception {
         VideoTask task = findTask(currentKey(servletRequest).getId(), taskId);
+        if (contentModerationPolicy.isBlocked(task)) {
+            throw ApiException.contentBlocked(contentModerationPolicy.blockedMessage(task));
+        }
         if (task.getVideoUrl() == null || task.getVideoUrl().isBlank()) {
             throw ApiException.validation("任务尚无产物");
         }

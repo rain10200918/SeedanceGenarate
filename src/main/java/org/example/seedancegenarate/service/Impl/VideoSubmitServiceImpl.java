@@ -14,7 +14,16 @@ import org.example.seedancegenarate.engine.OutputType;
 import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
+import org.example.seedancegenarate.entity.ApiKey;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.exception.ConcurrencyLimitExceededException;
+import org.example.seedancegenarate.exception.BusinessException;
+import org.example.seedancegenarate.mapper.ApiKeyMapper;
+import org.example.seedancegenarate.mapper.AppUserMapper;
+import org.example.seedancegenarate.service.AdmissionControl;
+import org.example.seedancegenarate.service.AdmissionResult;
+import org.example.seedancegenarate.service.ConcurrencyLimit;
+import org.example.seedancegenarate.service.ConcurrencyPolicy;
 import org.example.seedancegenarate.event.TaskSubmittedEvent;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.PricingService;
@@ -51,6 +60,10 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final ObjectMapper objectMapper;
     private final ApplicationEventPublisher applicationEventPublisher;
     private final VideoCompletionProperties completionProperties;
+    private final AppUserMapper appUserMapper;
+    private final ApiKeyMapper apiKeyMapper;
+    private final ConcurrencyPolicy concurrencyPolicy;
+    private final AdmissionControl admissionControl;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -74,6 +87,23 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     }
 
     @Override
+    public void validatePinnedNode(String provider, String nodeId) {
+        if (!StringUtils.hasText(nodeId)) {
+            return;
+        }
+        if (!UserContext.isAdmin()) {
+            throw BusinessException.forbidden("指定 ComfyUI 节点仅限管理员灰度验证");
+        }
+        String normalized = nodeId.trim();
+        if (normalized.length() > 64) {
+            throw BusinessException.badRequest("节点 id 不能超过 64 个字符");
+        }
+        if (!"comfyui".equalsIgnoreCase(resolveProvider(provider))) {
+            throw BusinessException.badRequest("指定节点只适用于 ComfyUI 提供方");
+        }
+    }
+
+    @Override
     public PriceEstimate estimate(String provider, String model, Integer duration) {
         ResolvedSpec spec = resolveSpec(provider, model, duration);
         // 探针任务只为复用 price() 的字段口径，不落库、无任何副作用
@@ -89,6 +119,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
     @Override
     public VideoTask submit(SubmitRequest request) throws Exception {
+        validatePinnedNode(request.provider(), request.nodeId());
         ResolvedSpec spec = resolveSpec(request.provider(), request.model(), request.duration());
         String provider = spec.provider();
         VideoEngine engine = spec.engine();
@@ -151,11 +182,18 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setFreezeCurrency(freezePrice.currency());
         videoTaskService.save(task);
 
-        // 预授权冻结（提交即占用额度）：余额不足或发生异常 → 删除刚建的任务行并拒绝，不产生僵尸任务。
+        // 占并发槽位 + 预授权冻结（提交即占用额度）：任一失败 → 删除刚建的任务行并拒绝，不产生僵尸任务。
         // 冻结幂等（biz_key=task:{id}），超时重试不重复冻结；成功结算/失败解冻在终态入口统一处理。
+        //
+        // 槽位在钱之前：撞并发上限是常态（企业跑满是设计内的），先冻再退会在钱包流水里
+        // 堆一大堆「冻结→退款」的成对记录，全是噪音，将来对账还得逐条解释它们；
+        // 而且补偿成本一边是一次 ZREM，一边是一整个钱包事务。挑便宜的先做。
         try {
+            admit(task);
             walletService.freeze(request.userId(), freezeAmount, task.getId());
         } catch (Exception e) {
+            // ZREM 幂等，没占上也无害；顺序与占用相反，先放最外层的资源
+            admissionControl.releaseQuietly(request.userId(), task.getId(), request.apiKeyId());
             videoTaskService.removeById(task.getId());
             throw e;
         }
@@ -171,6 +209,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                 .model(effectiveModel)
                 .megapixels(request.megapixels())
                 .webhookUrl(resolveWebhookUrl(engine, provider))
+                .nodeId(StringUtils.hasText(request.nodeId()) ? request.nodeId().trim() : null)
                 .build();
         log.info("提交生成任务: provider={}, model={}, taskId={}, webhookUrl={}",
                 provider, effectiveModel, task.businessTaskId(),
@@ -191,6 +230,33 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 任务提交成功事件：异步提交
         applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
+    }
+
+    /**
+     * 占一个在途并发槽位；超限则抛，由上面的 catch 统一补偿。
+     * <p>
+     * <b>个人用户走的是「一次 Redis 都不发」那条</b>：{@code resolve} 返回不限时
+     * {@code acquire} 立刻返回 skipped，连 app_user 之外的任何额外开销都没有。
+     * <p>
+     * 这里刻意<b>不给 resolve 加缓存</b>：档位是管理员随时可改的，缓存会让「刚给客户开了 200 路」
+     * 迟迟不生效，而这条查询是主键读。
+     */
+    private void admit(VideoTask task) {
+        Long userId = task.getUserId();
+        if (userId == null) {
+            return; // 无属主的历史/内部任务不进这套
+        }
+        Long apiKeyId = task.getApiKeyId();
+        // key 份额只有走 API 的请求才有（网页/画布没有 apiKeyId，只受账号总量管）
+        ApiKey apiKey = apiKeyId == null ? null : apiKeyMapper.selectById(apiKeyId);
+        ConcurrencyLimit limit = concurrencyPolicy.resolve(appUserMapper.selectById(userId), apiKey);
+        if (limit.unlimited()) {
+            return;
+        }
+        AdmissionResult result = admissionControl.acquire(userId, task.getId(), apiKeyId, limit);
+        if (!result.admitted()) {
+            throw new ConcurrencyLimitExceededException(result);
+        }
     }
 
     /**

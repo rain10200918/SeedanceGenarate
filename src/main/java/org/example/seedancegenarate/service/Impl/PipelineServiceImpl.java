@@ -374,7 +374,7 @@ public class PipelineServiceImpl implements PipelineService {
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 pipeline.getUserId(), pipeline.getProvider(), effectiveModel,
                 node.getPrompt(), urls, List.of(), List.of(),
-                node.getDuration(), node.getRatio(), null, null, requestId));
+                node.getDuration(), node.getRatio(), null, null, requestId, null));
         PipelineNode update = new PipelineNode();
         update.setId(nodeId);
         update.setTaskId(task.businessTaskId());

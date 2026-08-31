@@ -21,7 +21,8 @@ class WebhookTokenMaskTest {
 
     private String mask(String url) {
         return (String) ReflectionTestUtils.invokeMethod(
-                new VideoSubmitServiceImpl(null, null, null, null, null, null, null, null, null),
+                new VideoSubmitServiceImpl(null, null, null, null, null, null, null, null, null,
+                        null, null, null, null),
                 "maskToken", url);
     }
 

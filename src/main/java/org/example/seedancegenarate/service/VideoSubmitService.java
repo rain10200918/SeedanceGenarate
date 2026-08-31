@@ -16,6 +16,9 @@ public interface VideoSubmitService {
      */
     void validate(String provider, String model);
 
+    /** 指定 ComfyUI 节点是管理员灰度能力；在上传素材等副作用之前调用。 */
+    void validatePinnedNode(String provider, String nodeId);
+
     /**
      * 只读估价：按与 {@link #submit} 完全相同的口径（提供方默认值 / 生效模型 / 开放闸门 /
      * 时长默认 / 输出类型）计算本次提交将冻结的金额，供前端在提交前展示。无任何副作用。
@@ -56,14 +59,15 @@ public interface VideoSubmitService {
             String ratio,
             Double megapixels,
             Long apiKeyId,
-            String requestId
+            String requestId,
+            String nodeId
     ) {
         /** 兼容旧调用方：没有显式幂等键时由提交服务生成一次性键。 */
         public SubmitRequest(Long userId, String provider, String model, String prompt,
                              List<String> imageUrls, List<String> videoUrls, List<String> audioUrls,
                              Integer duration, String ratio, Double megapixels, Long apiKeyId) {
             this(userId, provider, model, prompt, imageUrls, videoUrls, audioUrls,
-                    duration, ratio, megapixels, apiKeyId, null);
+                    duration, ratio, megapixels, apiKeyId, null, null);
         }
     }
 }

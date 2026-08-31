@@ -89,7 +89,12 @@ public class Flux2ImageEditWorkflowBuilder implements WorkflowBuilder {
         return MODEL;
     }
 
-    @Override
+        @Override
+    public String templatePath() {
+        return TEMPLATE_PATH;
+    }
+
+@Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "Flux 2.0 图像编辑",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, 0, 0, List.of(),

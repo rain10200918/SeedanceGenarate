@@ -11,6 +11,7 @@ import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.PricingService;
+import org.example.seedancegenarate.service.AdmissionControl;
 import org.example.seedancegenarate.service.TaskEtaService;
 import org.example.seedancegenarate.service.TaskRetryPolicy;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
@@ -40,6 +41,7 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final TaskRetryPolicy taskRetryPolicy;
     private final WalletService walletService;
     private final PricingService pricingService;
+    private final AdmissionControl admissionControl;
     /** 显式事务：不用 @Transactional 抽方法——同类内自调用会绕过代理，事务会静默消失 */
     private final TransactionTemplate transactionTemplate;
 
@@ -131,6 +133,11 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         if (!Boolean.TRUE.equals(committed)) {
             return; // 其他 Worker 已落终态，幂等跳过
         }
+        // 归还并发槽位。**必须在事务提交之后**：Redis 加不进 MySQL 事务，放事务里一旦回滚
+        // 就是「槽位放了但任务还是 PROCESSING」= 超发，而且没人发现；放事务外最坏是少发一路，
+        // 对账 2 秒内会补回来。少发能自愈，超发不能。（D-027 同一条边界）
+        // 只有 CAS 赢家走到这里，所以不会重复释放。
+        admissionControl.releaseQuietly(task.getUserId(), task.getId(), task.getApiKeyId());
         // 事务外：只是刷该模型平均耗时的 Redis 缓存（ETA 用）。
         // 它失败不该把一笔已经结算完的成功任务回滚掉。
         try {

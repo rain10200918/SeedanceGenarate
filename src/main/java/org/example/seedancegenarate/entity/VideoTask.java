@@ -72,6 +72,17 @@ public class VideoTask {
     private String model;
     /** 产物类型（VIDEO / IMAGE），提交时按模型能力定死，是任务类型的权威输出维度 */
     private String outputType;
+    /** 内容访问状态，独立于生成终态与账务：VISIBLE / BLOCKED。 */
+    private String moderationStatus;
+    /** 管理员选择的屏蔽原因代码。 */
+    private String moderationReasonCode;
+    /** 给内容属主看的说明；不包含内部审核备注。 */
+    private String moderationMessage;
+    /** 最后执行屏蔽/恢复的管理员。 */
+    private Long moderatedBy;
+    private LocalDateTime moderatedAt;
+    /** 管理员并发操作乐观锁；内容动作不复用 update_time，避免把老任务顶到列表首位。 */
+    private Integer moderationVersion;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)

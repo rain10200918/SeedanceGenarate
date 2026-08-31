@@ -31,4 +31,12 @@ public class GenerateCommand {
     private Double megapixels;
     /** 事件驱动引擎的回调地址（框架注入，带鉴权 token）；轮询引擎忽略 */
     private String webhookUrl;
+    /**
+     * 指定跑在哪台 ComfyUI 节点上（<b>管理员专用</b>，为空则正常调度）。
+     * <p>
+     * 用途只有一个：一台新机器接进来之后，在<b>不放量</b>的前提下先把真实工作流跑通。
+     * 所以它必须能指到 {@code enabled=false} 的节点上 —— 那正是新机器的初始状态。
+     * 其它引擎（Seedance）忽略这个字段。
+     */
+    private String nodeId;
 }
