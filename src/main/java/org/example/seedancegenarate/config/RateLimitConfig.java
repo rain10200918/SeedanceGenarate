@@ -11,7 +11,12 @@ public class RateLimitConfig {
     private Bucket generateUser = new Bucket(true, 3, 1, 60L);
     private Bucket generateAdmin = new Bucket(true, 30, 10, 60L);
     private Bucket generateIp = new Bucket(true, 5, 1, 60L);
+    private Bucket captchaGetIp = new Bucket(true, 30, 30, 60L);
+    private Bucket captchaCheckIp = new Bucket(true, 30, 30, 60L);
+    private Bucket loginIp = new Bucket(true, 10, 5, 60L);
+    private Bucket loginUsername = new Bucket(true, 5, 2, 60L);
     private Bucket registerIp = new Bucket(true, 2, 1, 3600L);
+    private Bucket registerUsername = new Bucket(true, 2, 1, 3600L);
     private Bucket promptOptimizeUser = new Bucket(true, 20, 5, 60L);
     private Bucket promptOptimizeIp = new Bucket(true, 30, 10, 60L);
     /** 对外 API：按钥匙限流（每次提交消耗 1 令牌） */

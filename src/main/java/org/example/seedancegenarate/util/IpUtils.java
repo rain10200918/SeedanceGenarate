@@ -21,21 +21,9 @@ public class IpUtils {
     }
 
     public static String getClientIp(HttpServletRequest request) {
-        String[] headers = {
-                "X-Forwarded-For",
-                "X-Real-IP",
-                "Proxy-Client-IP",
-                "WL-Proxy-Client-IP",
-                "HTTP_CLIENT_IP",
-                "HTTP_X_FORWARDED_FOR"
-        };
-        for (String header : headers) {
-            String value = request.getHeader(header);
-            if (StringUtils.hasText(value) && !UNKNOWN.equalsIgnoreCase(value)) {
-                return value.split(",")[0].trim();
-            }
-        }
-        return request.getRemoteAddr();
+        // X-Forwarded-For 只允许由 Tomcat RemoteIpValve 在受信代理链上解析；
+        // 业务代码直接读请求头会让直连客户端伪造 IP 绕过限流。
+        return request == null ? UNKNOWN : request.getRemoteAddr();
     }
 
     public static String getIpLocation(HttpServletRequest request, String ip) {

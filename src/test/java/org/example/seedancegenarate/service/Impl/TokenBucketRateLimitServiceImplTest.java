@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -65,6 +66,39 @@ class TokenBucketRateLimitServiceImplTest {
 
         assertFalse(result.allowed());
         assertEquals(1, result.retryAfterSeconds());
+    }
+
+    @Test
+    void distributedSecurityEntryNeverFallsBackToTheLocalBucket() {
+        // 【测什么】验证码安全限流即使灰度开关关闭也强制访问共享 Redis，故障直接抛出。
+        // 【怎么算红】让 tryAcquireDistributed 读取 redis-rate-limit 开关并回退本地桶，这条必须变红。
+        RecordingRedisTemplate redisTemplate = new RecordingRedisTemplate(
+                new IllegalStateException("Redis unavailable")
+        );
+        TokenBucketRateLimitServiceImpl service = service(false, redisTemplate, "test:seedance:rate");
+
+        assertThrows(IllegalStateException.class, () -> service.tryAcquireDistributed(
+                "captcha:get:ip:test",
+                bucket(10, 10, 60)
+        ));
+        assertEquals("test:seedance:rate:captcha:get:ip:test", redisTemplate.lastKey);
+    }
+
+    @Test
+    void distributedSecurityEntryRejectsDisabledOrMissingBuckets() {
+        // 【测什么】安全限流桶被配置为关闭或缺失时必须响亮失败，不能静默放行认证请求。
+        // 【怎么算红】恢复 tryAcquireDistributed 对 disabled/null 返回 permitted，本测试必须变红。
+        RecordingRedisTemplate redisTemplate = new RecordingRedisTemplate(List.of(1L, 9L, 0L));
+        TokenBucketRateLimitServiceImpl service = service(false, redisTemplate, "test:seedance:rate");
+        RateLimitConfig.Bucket disabled = bucket(10, 10, 60);
+        disabled.setEnabled(false);
+
+        assertThrows(IllegalStateException.class, () -> service.tryAcquireDistributed(
+                "captcha:get:ip:test", disabled
+        ));
+        assertThrows(IllegalStateException.class, () -> service.tryAcquireDistributed(
+                "captcha:get:ip:test", null
+        ));
     }
 
     private TokenBucketRateLimitServiceImpl service(boolean redisEnabled,

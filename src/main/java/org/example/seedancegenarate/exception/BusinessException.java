@@ -26,6 +26,11 @@ public class BusinessException extends RuntimeException {
         this.code = 500;
     }
 
+    public BusinessException(Integer code, String message, Throwable cause) {
+        super(message, cause);
+        this.code = code == null ? 500 : code;
+    }
+
     public static BusinessException badRequest(String message) {
         return new BusinessException(400, message);
     }

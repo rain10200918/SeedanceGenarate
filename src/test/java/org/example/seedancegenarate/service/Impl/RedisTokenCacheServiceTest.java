@@ -52,6 +52,27 @@ class RedisTokenCacheServiceTest {
         assertFalse(service.put("", 42L, Instant.now(), 3600));
     }
 
+    @Test
+    void deletingAnAlreadyMissingKeyIsStillACompletedLogout() {
+        // 【测什么】Redis DEL 返回 false（key 不存在）仍是命令成功，重复登出保持幂等。
+        // 【怎么算红】把 RedisTokenCacheService.delete 直接返回 redisTemplate.delete 的布尔值，这条必须变红。
+        RedisTokenCacheService service = new RedisTokenCacheService(
+                new DeleteRedisTemplate(false, null), properties());
+
+        assertTrue(service.delete("already-gone"));
+    }
+
+    @Test
+    void redisDeleteFailureIsReportedToTheCaller() {
+        // 【测什么】Redis DEL 连接异常向上层返回失败，不伪装成已撤销。
+        // 【怎么算红】恢复 catch 后无条件返回成功，这条必须变红。
+        RedisTokenCacheService service = new RedisTokenCacheService(
+                new DeleteRedisTemplate(null, new IllegalStateException("redis unavailable")),
+                properties());
+
+        assertFalse(service.delete("token"));
+    }
+
     private AuthTokenProperties properties() {
         AuthTokenProperties properties = new AuthTokenProperties();
         properties.setKeyPrefix("test:auth");
@@ -73,6 +94,24 @@ class RedisTokenCacheServiceTest {
             lastKey = keys.get(0);
             lastArguments = Arrays.stream(args).map(String::valueOf).toList();
             return (T) result;
+        }
+    }
+
+    private static final class DeleteRedisTemplate extends StringRedisTemplate {
+        private final Boolean result;
+        private final RuntimeException failure;
+
+        private DeleteRedisTemplate(Boolean result, RuntimeException failure) {
+            this.result = result;
+            this.failure = failure;
+        }
+
+        @Override
+        public Boolean delete(String key) {
+            if (failure != null) {
+                throw failure;
+            }
+            return result;
         }
     }
 }

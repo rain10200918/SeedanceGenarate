@@ -5,9 +5,11 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.dto.AuthResponse;
+import org.example.seedancegenarate.dto.CaptchaPayloads.CaptchaScene;
 import org.example.seedancegenarate.entity.AppUser;
 import org.example.seedancegenarate.mapper.AppUserMapper;
 import org.example.seedancegenarate.service.AppUserService;
+import org.example.seedancegenarate.service.CaptchaSecurityService;
 import org.example.seedancegenarate.service.InviteCodeService;
 import org.example.seedancegenarate.service.UserActivityService;
 import org.example.seedancegenarate.service.UserTokenService;
@@ -29,7 +31,11 @@ public class AppUserServiceImpl extends ServiceImpl<AppUserMapper, AppUser> impl
 
     @Override
     @Transactional
-    public AuthResponse register(String username, String password, String inviteCode, HttpServletRequest request) {
+    public AuthResponse register(CaptchaSecurityService.VerifiedAttempt verified,
+                                 String password,
+                                 String inviteCode,
+                                 HttpServletRequest request) {
+        String username = verifiedUsername(verified, CaptchaScene.REGISTER);
         validateInviteCode(inviteCode);
         validateAuthParams(username, password);
         String normalizedUsername = username.trim();
@@ -51,7 +57,10 @@ public class AppUserServiceImpl extends ServiceImpl<AppUserMapper, AppUser> impl
     }
 
     @Override
-    public AuthResponse login(String username, String password, HttpServletRequest request) {
+    public AuthResponse login(CaptchaSecurityService.VerifiedAttempt verified,
+                              String password,
+                              HttpServletRequest request) {
+        String username = verifiedUsername(verified, CaptchaScene.LOGIN);
         validateAuthParams(username, password);
         AppUser user = this.getOne(
                 Wrappers.<AppUser>lambdaQuery().eq(AppUser::getUsername, username.trim()),
@@ -83,6 +92,13 @@ public class AppUserServiceImpl extends ServiceImpl<AppUserMapper, AppUser> impl
         if (!StringUtils.hasText(inviteCode)) {
             throw new RuntimeException("请输入邀请码");
         }
+    }
+
+    private String verifiedUsername(CaptchaSecurityService.VerifiedAttempt verified, CaptchaScene expected) {
+        if (verified == null || verified.scene() != expected) {
+            throw new IllegalArgumentException("验证码场景不匹配");
+        }
+        return verified.username();
     }
 
     private void validateAuthParams(String username, String password) {

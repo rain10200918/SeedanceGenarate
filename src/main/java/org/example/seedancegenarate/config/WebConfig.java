@@ -7,7 +7,6 @@ import org.example.seedancegenarate.interceptor.ApiKeyRateLimitInterceptor;
 import org.example.seedancegenarate.interceptor.AuthInterceptor;
 import org.example.seedancegenarate.interceptor.PromptOptimizeRateLimitInterceptor;
 import org.example.seedancegenarate.interceptor.RateLimitInterceptor;
-import org.example.seedancegenarate.interceptor.RegisterRateLimitInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -20,14 +19,10 @@ public class WebConfig implements WebMvcConfigurer {
     private final ApiKeyInterceptor apiKeyInterceptor;
     private final ApiKeyRateLimitInterceptor apiKeyRateLimitInterceptor;
     private final RateLimitInterceptor rateLimitInterceptor;
-    private final RegisterRateLimitInterceptor registerRateLimitInterceptor;
     private final PromptOptimizeRateLimitInterceptor promptOptimizeRateLimitInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(registerRateLimitInterceptor)
-                .addPathPatterns("/api/auth/register");
-
         // 对外 API：走 API Key 鉴权，不走登录 token；限流在其后（依赖注入的 api_key 属性）
         registry.addInterceptor(apiKeyInterceptor)
                 .addPathPatterns("/api/v1/**");
@@ -39,6 +34,9 @@ public class WebConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/api/auth/login",
                         "/api/auth/register",
+                        "/api/auth/logout",
+                        "/api/captcha/get",
+                        "/api/captcha/check",
                         "/api/v1/**",
                         "/api/callback/**",
                         // 支付渠道回调：来源是支付宝服务器，没有登录 token，靠 RSA2 验签鉴权

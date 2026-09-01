@@ -68,6 +68,11 @@
             <version>5.8.27</version>
         </dependency>
         <dependency>
+            <groupId>com.anji-plus</groupId>
+            <artifactId>captcha</artifactId>
+            <version>1.4.0</version>
+        </dependency>
+        <dependency>
             <!-- IP 属地离线解析（数据文件 resources/ip2region.xdb，随 jar 打包，无需外部网络） -->
             <groupId>org.lionsoul</groupId>
             <artifactId>ip2region</artifactId>

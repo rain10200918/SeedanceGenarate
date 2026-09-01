@@ -8,5 +8,7 @@ public enum OutputType {
     /** 视频（mp4） */
     VIDEO,
     /** 图片（png / jpg …） */
-    IMAGE
+    IMAGE,
+    /** 音频（mp3) */
+    AUDIO,
 }

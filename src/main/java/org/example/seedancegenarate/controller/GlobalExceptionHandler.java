@@ -99,6 +99,15 @@ public class GlobalExceptionHandler {
         return Result.fail(400, "缺少必要参数: " + e.getParameterName());
     }
 
+    /** JSON 语法错误、枚举值非法等请求体反序列化失败统一按业务 400 返回。 */
+    @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
+    public Result<?> handleMessageNotReadable(
+            org.springframework.http.converter.HttpMessageNotReadableException e) {
+        // Do not log Jackson's message: it may quote the submitted password or captcha proof.
+        log.warn("请求体 JSON 不合法");
+        return Result.fail(400, "请求参数不合法");
+    }
+
     /** 6. 上传文件大小超出限制 */
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public Result<?> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException e) {

@@ -9,8 +9,8 @@ import org.springframework.stereotype.Component;
 @Component
 @ConfigurationProperties(prefix = "auth.token")
 public class AuthTokenProperties {
-    /** 登录 Token 完整有效期。 */
-    private long ttlSeconds = 30L * 24 * 60 * 60;
+    /** 登录 Token 完整有效期（默认 3 天）。 */
+    private long ttlSeconds = 3L * 24 * 60 * 60;
     /** 剩余 TTL 低于该值时，认证拦截链会将 Token 续回完整有效期。 */
     private long refreshThresholdSeconds = 5 * 60;
     /** 与其他环境隔离的 Redis Key 前缀。 */

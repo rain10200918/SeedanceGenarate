@@ -2,6 +2,7 @@ package org.example.seedancegenarate.service.Impl;
 
 import org.example.seedancegenarate.config.AuthTokenProperties;
 import org.example.seedancegenarate.entity.AppUser;
+import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.service.AppUserService;
 import org.example.seedancegenarate.service.TokenCacheService;
 import org.example.seedancegenarate.service.UserTokenService;
@@ -63,6 +64,8 @@ public class UserTokenServiceImpl implements UserTokenService {
         if (token == null || token.isBlank()) {
             return;
         }
-        tokenCacheService.delete(token);
+        if (!tokenCacheService.delete(token)) {
+            throw new BusinessException(503, "登出服务暂不可用，请稍后重试");
+        }
     }
 }

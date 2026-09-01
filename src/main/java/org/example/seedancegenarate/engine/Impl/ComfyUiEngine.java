@@ -255,8 +255,8 @@ public class ComfyUiEngine implements VideoEngine {
         if (!completed) {
             return RemoteStatus.processing();
         }
-        String videoUrl = extractVideoUrl(node.getBaseUrl(), entry.path("outputs"));
-        return videoUrl == null ? RemoteStatus.failed("任务完成但未找到视频输出") : RemoteStatus.success(videoUrl);
+        String mediaUrl = extractMediaUrl(node.getBaseUrl(), entry.path("outputs"));
+        return mediaUrl == null ? RemoteStatus.failed("任务完成但未找到生成输出") : RemoteStatus.success(mediaUrl);
     }
 
     /**
@@ -356,13 +356,13 @@ public class ComfyUiEngine implements VideoEngine {
         }
     }
 
-    /** 从 outputs 找第一个视频文件（VHS_VideoCombine 输出在 gifs / videos 下） */
-    private String extractVideoUrl(String baseUrl, JsonNode outputs) {
+    /** 从 outputs 找第一个媒体文件（视频在 gifs / videos 下，图片在 images 下，音频在 audio / audios 下） */
+    private String extractMediaUrl(String baseUrl, JsonNode outputs) {
         if (!outputs.isObject()) {
             return null;
         }
         for (JsonNode nodeOutput : outputs) {
-            for (String key : new String[]{"gifs", "videos", "images"}) {
+            for (String key : new String[]{"gifs", "videos", "images", "audio", "audios"}) {
                 JsonNode arr = nodeOutput.path(key);
                 if (arr.isArray() && !arr.isEmpty()) {
                     JsonNode file = arr.get(0);

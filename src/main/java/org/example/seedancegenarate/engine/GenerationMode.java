@@ -11,13 +11,18 @@ public enum GenerationMode {
     /** 文生图 */
     TEXT_TO_IMAGE,
     /** 图生图 */
-    IMAGE_TO_IMAGE;
+    IMAGE_TO_IMAGE,
+    /** 文生音频/音乐 */
+    TEXT_TO_AUDIO;
 
     /**
      * 由「是否有参考图」×「输出类型」派生任务类型 —— 这两个正交事实（输入看 images 是否为空、
      * 输出看模型 {@link OutputType}）是唯一来源，本枚举只作派生视图，不单独落库。
      */
     public static GenerationMode of(boolean hasImage, OutputType output) {
+        if (output == OutputType.AUDIO) {
+            return TEXT_TO_AUDIO;
+        }
         boolean image = output == OutputType.IMAGE;
         if (hasImage) {
             return image ? IMAGE_TO_IMAGE : IMAGE_TO_VIDEO;

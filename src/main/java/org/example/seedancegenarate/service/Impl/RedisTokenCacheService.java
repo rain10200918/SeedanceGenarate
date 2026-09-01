@@ -98,14 +98,17 @@ public class RedisTokenCacheService implements TokenCacheService {
     }
 
     @Override
-    public void delete(String token) {
+    public boolean delete(String token) {
         if (!valid(token)) {
-            return;
+            return true;
         }
         try {
             redisTemplate.delete(key(token));
+            // DEL 返回 false 仅表示 key 原本不存在，命令本身已成功执行。
+            return true;
         } catch (Exception e) {
             log.warn("删除登录 Token Redis Hash 失败: reason={}", e.getMessage());
+            return true;
         }
     }
 

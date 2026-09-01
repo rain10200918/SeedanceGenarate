@@ -82,35 +82,40 @@ public class TokenBucketRateLimitServiceImpl implements TokenBucketRateLimitServ
         }
         validate(bucketConfig);
         if (distributedFeatureProperties.isRedisRateLimit()) {
-            return tryAcquireWithRedis(key, bucketConfig);
+            try {
+                return tryAcquireDistributed(key, bucketConfig);
+            } catch (RuntimeException e) {
+                log.warn("Redis 限流不可用，拒绝请求: key={}, reason={}", key, e.getMessage());
+                return RateLimitResult.rejected(1);
+            }
         }
         return tryAcquireLocally(key, bucketConfig);
     }
 
-    private RateLimitResult tryAcquireWithRedis(String key, RateLimitConfig.Bucket bucketConfig) {
+    @Override
+    public RateLimitResult tryAcquireDistributed(String key, RateLimitConfig.Bucket bucketConfig) {
+        if (!isEnabled(bucketConfig)) {
+            throw new IllegalStateException("共享 Redis 安全限流桶未启用");
+        }
+        validate(bucketConfig);
         long refillMillis = bucketConfig.getRefillSeconds() * 1000L;
         long ttlMillis = ttlMillis(bucketConfig);
-        try {
-            List<?> result = stringRedisTemplate.execute(
-                    ACQUIRE_SCRIPT,
-                    List.of(redisKey(key)),
-                    String.valueOf(bucketConfig.getCapacity()),
-                    String.valueOf(bucketConfig.getRefillTokens()),
-                    String.valueOf(refillMillis),
-                    String.valueOf(ttlMillis)
-            );
-            if (result == null || result.size() < 3) {
-                throw new IllegalStateException("Redis 限流脚本返回异常");
-            }
-            boolean allowed = asLong(result.get(0)) == 1;
-            if (allowed) {
-                return RateLimitResult.permitted();
-            }
-            return RateLimitResult.rejected((asLong(result.get(2)) + 999) / 1000);
-        } catch (Exception e) {
-            log.warn("Redis 限流不可用，拒绝请求: key={}, reason={}", key, e.getMessage());
-            return RateLimitResult.rejected(1);
+        List<?> result = stringRedisTemplate.execute(
+                ACQUIRE_SCRIPT,
+                List.of(redisKey(key)),
+                String.valueOf(bucketConfig.getCapacity()),
+                String.valueOf(bucketConfig.getRefillTokens()),
+                String.valueOf(refillMillis),
+                String.valueOf(ttlMillis)
+        );
+        if (result == null || result.size() < 3) {
+            throw new IllegalStateException("Redis 限流脚本返回异常");
         }
+        boolean allowed = asLong(result.get(0)) == 1;
+        if (allowed) {
+            return RateLimitResult.permitted();
+        }
+        return RateLimitResult.rejected((asLong(result.get(2)) + 999) / 1000);
     }
 
     private RateLimitResult tryAcquireLocally(String key, RateLimitConfig.Bucket bucketConfig) {

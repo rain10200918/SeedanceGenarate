@@ -52,7 +52,12 @@ spring:
     baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
 server:
   port: ${SERVER_PORT:8080}
+  # 只让 Tomcat 的受信代理规则解析转发头；业务代码始终读取 remoteAddr。
+  forward-headers-strategy: native
   tomcat:
+    remoteip:
+      remote-ip-header: X-Forwarded-For
+      protocol-header: X-Forwarded-Proto
     threads:
       # 提交接口同步跑完外部调用链（上传 OSS → 调提供方），单请求可能占线程数十秒，
       # 所以按「并发提交数」算，不按核数算
@@ -69,11 +74,17 @@ server:
     mime-types: application/json
     min-response-size: 2048
 auth:
+  # 登录/注册与验证码入口在 JSON 反序列化前执行的请求体上限；防止畸形大包绕过业务字段守卫。
+  request-body-max-bytes: ${AUTH_REQUEST_BODY_MAX_BYTES:16384}
   token:
-    ttl-seconds: ${AUTH_TOKEN_TTL_SECONDS:2592000}
+    ttl-seconds: ${AUTH_TOKEN_TTL_SECONDS:259200}
     # 剩余有效期低于 5 分钟时，认证拦截链续回完整 TTL。
     refresh-threshold-seconds: ${AUTH_TOKEN_REFRESH_THRESHOLD_SECONDS:300}
     key-prefix: ${AUTH_TOKEN_REDIS_KEY_PREFIX:local:seedance:auth:token}
+
+captcha:
+  redis-key-prefix: ${CAPTCHA_REDIS_KEY_PREFIX:local:seedance:captcha}
+  proof-ttl-seconds: ${CAPTCHA_PROOF_TTL_SECONDS:120}
 seedance:
   api-key: ${SEEDANCE_API_KEY}
   model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
@@ -245,6 +256,26 @@ rate-limit:
     capacity: ${RATE_LIMIT_GENERATE_IP_CAPACITY:5}
     refill-tokens: ${RATE_LIMIT_GENERATE_IP_REFILL_TOKENS:1}
     refill-seconds: ${RATE_LIMIT_GENERATE_IP_REFILL_SECONDS:60}
+  captcha-get-ip:
+    enabled: true
+    capacity: ${RATE_LIMIT_CAPTCHA_GET_IP_CAPACITY:30}
+    refill-tokens: ${RATE_LIMIT_CAPTCHA_GET_IP_REFILL_TOKENS:30}
+    refill-seconds: ${RATE_LIMIT_CAPTCHA_GET_IP_REFILL_SECONDS:60}
+  captcha-check-ip:
+    enabled: true
+    capacity: ${RATE_LIMIT_CAPTCHA_CHECK_IP_CAPACITY:30}
+    refill-tokens: ${RATE_LIMIT_CAPTCHA_CHECK_IP_REFILL_TOKENS:30}
+    refill-seconds: ${RATE_LIMIT_CAPTCHA_CHECK_IP_REFILL_SECONDS:60}
+  login-ip:
+    enabled: true
+    capacity: ${RATE_LIMIT_LOGIN_IP_CAPACITY:10}
+    refill-tokens: ${RATE_LIMIT_LOGIN_IP_REFILL_TOKENS:5}
+    refill-seconds: ${RATE_LIMIT_LOGIN_IP_REFILL_SECONDS:60}
+  login-username:
+    enabled: true
+    capacity: ${RATE_LIMIT_LOGIN_USERNAME_CAPACITY:5}
+    refill-tokens: ${RATE_LIMIT_LOGIN_USERNAME_REFILL_TOKENS:2}
+    refill-seconds: ${RATE_LIMIT_LOGIN_USERNAME_REFILL_SECONDS:60}
   prompt-optimize-user:
     enabled: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_ENABLED:true}
     capacity: ${RATE_LIMIT_PROMPT_OPTIMIZE_USER_CAPACITY:20}
@@ -256,10 +287,15 @@ rate-limit:
     refill-tokens: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_REFILL_TOKENS:10}
     refill-seconds: ${RATE_LIMIT_PROMPT_OPTIMIZE_IP_REFILL_SECONDS:60}
   register-ip:
-    enabled: ${RATE_LIMIT_REGISTER_IP_ENABLED:true}
+    enabled: true
     capacity: ${RATE_LIMIT_REGISTER_IP_CAPACITY:2}
     refill-tokens: ${RATE_LIMIT_REGISTER_IP_REFILL_TOKENS:1}
     refill-seconds: ${RATE_LIMIT_REGISTER_IP_REFILL_SECONDS:3600}
+  register-username:
+    enabled: true
+    capacity: ${RATE_LIMIT_REGISTER_USERNAME_CAPACITY:2}
+    refill-tokens: ${RATE_LIMIT_REGISTER_USERNAME_REFILL_TOKENS:1}
+    refill-seconds: ${RATE_LIMIT_REGISTER_USERNAME_REFILL_SECONDS:3600}
   api-key:
     enabled: ${RATE_LIMIT_API_KEY_ENABLED:true}
     capacity: ${RATE_LIMIT_API_KEY_CAPACITY:10}
@@ -316,6 +352,8 @@ wechat:
 logging:
   level:
     root: ${LOG_LEVEL_ROOT:INFO}
+    # AJ 1.4.0 的 DEBUG 会输出 token 与隐藏坐标，必须独立钉在 INFO 以上。
+    com.anji.captcha: INFO
     # 排查时把这个调成 DEBUG 就能看到 poll 判定、缓存命中这类过程日志，不用改代码重新构建
     org.example.seedancegenarate: ${LOG_LEVEL_APP:INFO}
   logback:
