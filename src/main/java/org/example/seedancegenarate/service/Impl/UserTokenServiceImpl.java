@@ -32,7 +32,7 @@ public class UserTokenServiceImpl implements UserTokenService {
         long ttlSeconds = Math.max(authTokenProperties.getTtlSeconds(), 1);
         Instant expireAt = Instant.now().plusSeconds(ttlSeconds);
         if (!tokenCacheService.put(token, userId, expireAt, ttlSeconds)) {
-            throw new IllegalStateException("登录服务暂不可用，请稍后重试");
+            throw new BusinessException(503, "登录服务暂不可用，请稍后重试");
         }
         return token;
     }

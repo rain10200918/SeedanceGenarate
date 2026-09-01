@@ -2,6 +2,7 @@ package org.example.seedancegenarate.controller;
 
 import org.example.seedancegenarate.service.AppUserService;
 import org.example.seedancegenarate.service.CaptchaSecurityService;
+import org.example.seedancegenarate.service.RegistrationEmailSessionService;
 import org.example.seedancegenarate.service.UserTokenService;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -20,7 +21,8 @@ class AuthLogoutControllerTest {
         AppUserService users = mock(AppUserService.class);
         UserTokenService tokens = mock(UserTokenService.class);
         CaptchaSecurityService captcha = mock(CaptchaSecurityService.class);
-        AuthController controller = new AuthController(users, tokens, captcha);
+        RegistrationEmailSessionService registrationSessions = mock(RegistrationEmailSessionService.class);
+        AuthController controller = new AuthController(users, tokens, captcha, registrationSessions);
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/auth/logout");
         request.addHeader("Authorization", "Bearer current-token");
         request.addHeader("X-Token", "other-device-token");
@@ -30,6 +32,6 @@ class AuthLogoutControllerTest {
 
         assertTrue(result.getData());
         verify(tokens).deleteToken("current-token");
-        verifyNoInteractions(users, captcha);
+        verifyNoInteractions(users, captcha, registrationSessions);
     }
 }

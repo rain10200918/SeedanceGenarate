@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.example.seedancegenarate.entity.InviteCode;
+import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.mapper.InviteCodeMapper;
 import org.example.seedancegenarate.service.InviteCodeService;
 import org.springframework.stereotype.Service;
@@ -45,7 +46,7 @@ public class InviteCodeServiceImpl extends ServiceImpl<InviteCodeMapper, InviteC
                 .set(InviteCode::getUsedTime, LocalDateTime.now());
         boolean updated = this.update(wrapper);
         if (!updated) {
-            throw new RuntimeException("邀请码无效或已使用");
+            throw BusinessException.conflict("邀请码无效或已使用");
         }
     }
 

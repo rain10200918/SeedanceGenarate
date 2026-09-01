@@ -39,6 +39,8 @@ class AuthLogoutInterceptorTest {
         MappedInterceptor authMapping = registry.mappedFor(auth);
 
         assertFalse(authMapping.matches(request("POST", "/api/auth/logout")));
+        assertFalse(authMapping.matches(request("POST", "/api/auth/register/email-code")));
+        assertFalse(authMapping.matches(request("POST", "/api/auth/register/email-code/resend")));
         assertTrue(authMapping.matches(request("GET", "/api/auth/me")));
     }
 

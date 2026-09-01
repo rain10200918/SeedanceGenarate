@@ -36,7 +36,9 @@ public class AuthRequestSizeFilter extends OncePerRequestFilter {
             PathPatternParser.defaultInstance.parse("/api/captcha/get"),
             PathPatternParser.defaultInstance.parse("/api/captcha/check"),
             PathPatternParser.defaultInstance.parse("/api/auth/login"),
-            PathPatternParser.defaultInstance.parse("/api/auth/register")
+            PathPatternParser.defaultInstance.parse("/api/auth/register"),
+            PathPatternParser.defaultInstance.parse("/api/auth/register/email-code"),
+            PathPatternParser.defaultInstance.parse("/api/auth/register/email-code/resend")
     );
 
     private final ObjectMapper objectMapper;

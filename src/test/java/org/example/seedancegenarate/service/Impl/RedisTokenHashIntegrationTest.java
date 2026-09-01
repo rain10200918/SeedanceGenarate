@@ -106,7 +106,12 @@ class RedisTokenHashIntegrationTest {
 
             clearInvocations(users);
             CaptchaSecurityService captcha = mock(CaptchaSecurityService.class);
-            AuthController controller = new AuthController(users, tokens, captcha);
+            AuthController controller = new AuthController(
+                    users,
+                    tokens,
+                    captcha,
+                    mock(org.example.seedancegenarate.service.RegistrationEmailSessionService.class)
+            );
             MockHttpServletRequest logoutRequest = new MockHttpServletRequest("POST", "/api/auth/logout");
             logoutRequest.addHeader("Authorization", "Bearer already-gone");
             assertTrue(controller.logout(logoutRequest).getData());

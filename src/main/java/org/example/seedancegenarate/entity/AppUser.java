@@ -12,6 +12,8 @@ public class AppUser {
     @TableId(type = IdType.AUTO)
     private Long id;
     private String username;
+    private String email;
+    private LocalDateTime emailVerifiedAt;
     private String password;
     private String role;
     private BigDecimal totalCost;

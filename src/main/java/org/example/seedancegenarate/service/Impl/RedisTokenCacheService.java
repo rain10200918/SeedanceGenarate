@@ -108,7 +108,7 @@ public class RedisTokenCacheService implements TokenCacheService {
             return true;
         } catch (Exception e) {
             log.warn("删除登录 Token Redis Hash 失败: reason={}", e.getMessage());
-            return true;
+            return false;
         }
     }
 

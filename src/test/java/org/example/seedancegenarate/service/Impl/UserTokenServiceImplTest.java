@@ -36,11 +36,15 @@ class UserTokenServiceImplTest {
 
     @Test
     void rejectsLoginWhenRedisWriteFails() {
+        // 【测什么】token Redis 写入失败使用可恢复的 503 业务语义，不伪装成注册事务失败。
+        // 【怎么算红】恢复裸 IllegalStateException 或吞掉 put=false 返回 token，本测试必须变红。
         TokenCacheService cache = mock(TokenCacheService.class);
         when(cache.put(anyString(), eq(7L), any(), eq(3600L))).thenReturn(false);
         UserTokenServiceImpl service = new UserTokenServiceImpl(mock(AppUserService.class), cache, properties());
 
-        assertThrows(IllegalStateException.class, () -> service.createToken(7L));
+        BusinessException error = assertThrows(BusinessException.class, () -> service.createToken(7L));
+
+        assertEquals(503, error.getCode());
     }
 
     @Test

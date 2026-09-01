@@ -6,10 +6,9 @@ import org.example.seedancegenarate.dto.AuthResponse;
 import org.example.seedancegenarate.entity.AppUser;
 
 public interface AppUserService extends IService<AppUser> {
-    AuthResponse register(CaptchaSecurityService.VerifiedAttempt verified,
-                          String password,
-                          String inviteCode,
-                          HttpServletRequest request);
+    AppUser registerVerified(RegistrationEmailSessionService.VerifiedRegistration verified,
+                             String password,
+                             HttpServletRequest request);
 
     AuthResponse login(CaptchaSecurityService.VerifiedAttempt verified,
                        String password,

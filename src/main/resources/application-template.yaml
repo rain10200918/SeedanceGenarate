@@ -29,6 +29,22 @@ spring:
           min-idle: ${SPRING_REDIS_MIN_IDLE:16}
           # 不用 -1ms（无限等待）：池满时要快速失败，不要让请求全部卡住
           max-wait: ${SPRING_REDIS_MAX_WAIT:2000ms}
+  mail:
+    host: ${SPRING_MAIL_HOST}
+    port: ${SPRING_MAIL_PORT:587}
+    username: ${SPRING_MAIL_USERNAME}
+    password: ${SPRING_MAIL_PASSWORD}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          connectiontimeout: ${SPRING_MAIL_CONNECTION_TIMEOUT_MS:5000}
+          timeout: ${SPRING_MAIL_READ_TIMEOUT_MS:10000}
+          writetimeout: ${SPRING_MAIL_WRITE_TIMEOUT_MS:10000}
+          starttls:
+            enable: ${SPRING_MAIL_STARTTLS_ENABLE:true}
+            required: ${SPRING_MAIL_STARTTLS_REQUIRED:true}
+    test-connection: false
   servlet:
     multipart:
       max-file-size: 50MB
@@ -85,6 +101,11 @@ auth:
 captcha:
   redis-key-prefix: ${CAPTCHA_REDIS_KEY_PREFIX:local:seedance:captcha}
   proof-ttl-seconds: ${CAPTCHA_PROOF_TTL_SECONDS:120}
+registration:
+  email:
+    # 不同环境共用 Redis 时必须使用不同前缀；发件人未单独配置时回退 spring.mail.username。
+    redis-key-prefix: ${REGISTRATION_EMAIL_REDIS_KEY_PREFIX:local:seedance:registration-email}
+    from: ${REGISTRATION_EMAIL_FROM:${SPRING_MAIL_USERNAME}}
 seedance:
   api-key: ${SEEDANCE_API_KEY}
   model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
@@ -296,6 +317,21 @@ rate-limit:
     capacity: ${RATE_LIMIT_REGISTER_USERNAME_CAPACITY:2}
     refill-tokens: ${RATE_LIMIT_REGISTER_USERNAME_REFILL_TOKENS:1}
     refill-seconds: ${RATE_LIMIT_REGISTER_USERNAME_REFILL_SECONDS:3600}
+  register-email-ip:
+    enabled: true
+    capacity: ${RATE_LIMIT_REGISTER_EMAIL_IP_CAPACITY:10}
+    refill-tokens: ${RATE_LIMIT_REGISTER_EMAIL_IP_REFILL_TOKENS:5}
+    refill-seconds: ${RATE_LIMIT_REGISTER_EMAIL_IP_REFILL_SECONDS:3600}
+  register-email-address:
+    enabled: true
+    capacity: ${RATE_LIMIT_REGISTER_EMAIL_ADDRESS_CAPACITY:3}
+    refill-tokens: ${RATE_LIMIT_REGISTER_EMAIL_ADDRESS_REFILL_TOKENS:1}
+    refill-seconds: ${RATE_LIMIT_REGISTER_EMAIL_ADDRESS_REFILL_SECONDS:600}
+  register-email-global:
+    enabled: true
+    capacity: ${RATE_LIMIT_REGISTER_EMAIL_GLOBAL_CAPACITY:120}
+    refill-tokens: ${RATE_LIMIT_REGISTER_EMAIL_GLOBAL_REFILL_TOKENS:120}
+    refill-seconds: ${RATE_LIMIT_REGISTER_EMAIL_GLOBAL_REFILL_SECONDS:60}
   api-key:
     enabled: ${RATE_LIMIT_API_KEY_ENABLED:true}
     capacity: ${RATE_LIMIT_API_KEY_CAPACITY:10}

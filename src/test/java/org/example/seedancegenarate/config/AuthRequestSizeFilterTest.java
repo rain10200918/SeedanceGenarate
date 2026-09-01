@@ -60,7 +60,7 @@ class AuthRequestSizeFilterTest {
 
     @Test
     void unrelatedEndpointsAreNotBufferedByTheAuthGuard() throws Exception {
-        // 【测什么】资源上限只影响四个公开认证 POST，不改变上传/生成等既有大 body 接口。
+        // 【测什么】资源上限只影响六个公开认证 POST，不改变上传/生成等既有大 body 接口。
         // 【怎么算红】若 guarded path 判断扩大到全站，本请求会被 413 拒绝。
         AuthRequestSizeFilter filter = new AuthRequestSizeFilter(new ObjectMapper(), 8);
         MockHttpServletRequest request = request("/api/video/submit", new byte[32]);
@@ -71,6 +71,26 @@ class AuthRequestSizeFilterTest {
 
         assertEquals(200, response.getStatus());
         verify(chain).doFilter(same(request), same(response));
+    }
+
+    @Test
+    void bothRegistrationEmailEndpointsAreGuardedBeforeJsonDeserialization() throws Exception {
+        // 【测什么】发码与重发两个新公开 POST 都受相同的 16 KiB 前置守卫保护。
+        // 【怎么算红】GUARDED_PATHS 漏掉任一路径时，该路径会进入 FilterChain 而不是返回 413。
+        AuthRequestSizeFilter filter = new AuthRequestSizeFilter(new ObjectMapper(), 8);
+        for (String path : new String[]{
+                "/api/auth/register/email-code",
+                "/api/auth/register/email-code/resend"
+        }) {
+            MockHttpServletRequest request = request(path, new byte[9]);
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            FilterChain chain = mock(FilterChain.class);
+
+            filter.doFilter(request, response, chain);
+
+            assertEquals(413, response.getStatus(), path);
+            verify(chain, never()).doFilter(any(), any());
+        }
     }
 
     private static MockHttpServletRequest request(String path, byte[] body) {
