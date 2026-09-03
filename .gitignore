@@ -74,3 +74,7 @@ src/main/resources/alipay/
 # docs/线上env完整版.env 当时处于「未跟踪且未忽略」状态，一次 git add . 就进索引了。
 *.env
 !*.env.example
+
+# 运行时产物：data/images 是用户上传（file.upload-path），data/videos 是迁移 OSS 前的本地视频，
+# 由应用写入、VideoCleanupTask 按 48h 删除。之前有 98MB 视频进了历史，每次清理都在 status 里刷出几十行删除。
+data/
