@@ -8,6 +8,7 @@ import org.example.seedancegenarate.mapper.AssetFolderMapper;
 import org.example.seedancegenarate.mapper.UserAssetMapper;
 import org.example.seedancegenarate.service.AssetService;
 import org.example.seedancegenarate.service.OssService;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -44,11 +45,11 @@ public class AssetServiceImpl implements AssetService {
                 .distinct()
                 .collect(Collectors.toList());
         if (distinct.isEmpty()) return;
+        // 不看 status：软删的行还占着 uk_asset_user_url，再插会撞 1062；用户删过的图也不因为又拿去生成就复活
         Set<String> existUrls = userAssetMapper.selectList(
                         new LambdaQueryWrapper<UserAsset>()
                                 .select(UserAsset::getUrl)
                                 .eq(UserAsset::getUserId, userId)
-                                .eq(UserAsset::getStatus, "ACTIVE")
                                 .in(UserAsset::getUrl, distinct))
                 .stream()
                 .map(UserAsset::getUrl)
@@ -62,10 +63,19 @@ public class AssetServiceImpl implements AssetService {
             asset.setUrl(url);
             asset.setTaskId(taskId);
             asset.setStatus("ACTIVE");
-            userAssetMapper.insert(asset);
+            try {
+                userAssetMapper.insert(asset);
+            } catch (DuplicateKeyException e) {
+                // 两个任务同时带同一张图：另一边先登记上了，本来就只要一条
+            }
         }
     }
 
+    /**
+     * OSS 键是内容的 md5，同一张图传两次地址一样，uk_asset_user_url 会挡掉第二条 insert。
+     * 按「同图幂等」的本意：已有就返回已有那条；软删过的复活——否则用户删过一次的图再也传不上去。
+     * 不加事务：中间有一次 OSS 网络上传（D-027）。
+     */
     @Override
     public UserAsset uploadImage(Long userId, Long folderId, MultipartFile file) throws Exception {
         if (file == null || file.isEmpty()) {
@@ -75,15 +85,39 @@ public class AssetServiceImpl implements AssetService {
             requireOwnedFolder(userId, folderId);
         }
         String url = ossService.upload(file);
-        UserAsset asset = new UserAsset();
-        asset.setUserId(userId);
-        asset.setType("IMAGE");
-        asset.setSource("UPLOAD");
-        asset.setUrl(url);
-        asset.setFolderId(folderId);
-        asset.setStatus("ACTIVE");
-        userAssetMapper.insert(asset);
-        return asset;
+        UserAsset existing = findByUrl(userId, url);
+        if (existing == null) {
+            UserAsset asset = new UserAsset();
+            asset.setUserId(userId);
+            asset.setType("IMAGE");
+            asset.setSource("UPLOAD");
+            asset.setUrl(url);
+            asset.setFolderId(folderId);
+            asset.setStatus("ACTIVE");
+            try {
+                userAssetMapper.insert(asset);
+                return asset;
+            } catch (DuplicateKeyException e) {
+                // 同一张图两个请求同时传：输的那个拿赢家那条
+                existing = findByUrl(userId, url);
+                if (existing == null) {
+                    throw e;
+                }
+            }
+        }
+        existing.setStatus("ACTIVE");
+        if (folderId != null) {
+            existing.setFolderId(folderId);
+        }
+        userAssetMapper.updateById(existing);
+        return existing;
+    }
+
+    private UserAsset findByUrl(Long userId, String url) {
+        return userAssetMapper.selectOne(new LambdaQueryWrapper<UserAsset>()
+                .eq(UserAsset::getUserId, userId)
+                .eq(UserAsset::getUrl, url)
+                .last("LIMIT 1"));
     }
 
     @Override
