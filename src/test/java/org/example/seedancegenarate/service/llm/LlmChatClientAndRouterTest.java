@@ -82,9 +82,32 @@ class LlmChatClientAndRouterTest {
             }
             reply(ex, 200, "{\"choices\":[{\"message\":{\"content\":\"late\"}}]}");
         });
+        // 假 uvicorn（vLLM / SGLang 的服务器）：httptools 看到非 WebSocket 的 Upgrade 头就回 400 纯文本
+        server.createContext("/uvicorn", ex -> {
+            record(null, ex.getRequestBody().readAllBytes());
+            if (ex.getRequestHeaders().containsKey("Upgrade")) {
+                reply(ex, 400, "Unsupported upgrade request.");
+                return;
+            }
+            reply(ex, 200, "{\"choices\":[{\"message\":{\"content\":\"served by uvicorn\"}}]}");
+        });
+        // vLLM 典型 400：上下文超长，OpenAI 形状的 error.message
+        server.createContext("/too-long", ex -> {
+            record(null, ex.getRequestBody().readAllBytes());
+            reply(ex, 400, "{\"object\":\"error\",\"error\":{\"message\":\"This model's maximum context length is 4096 tokens. "
+                    + "However, you requested 5100 tokens (3600 in the messages, 1500 in the completion). "
+                    + "Please reduce the length of the messages or completion.\",\"type\":\"BadRequestError\",\"code\":400}}");
+        });
         server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
         client = new LlmChatClient(MAPPER, HttpClient.newBuilder().connectTimeout(Duration.ofMillis(500)).build());
+    }
+
+    /** 生产构造器造出来的客户端——传输层的默认值（HTTP 版本、连接超时）全在这里，测试必须走它 */
+    private LlmChatClient productionClient() {
+        PromptOptimizeConfig config = new PromptOptimizeConfig();
+        config.setConnectTimeoutMs(500);
+        return new LlmChatClient(config, MAPPER);
     }
 
     @AfterEach
@@ -153,6 +176,50 @@ class LlmChatClientAndRouterTest {
     }
 
     // ───────────────────────── 客户端：失败分类 ─────────────────────────
+
+    @Test
+    void productionClientSpeaksPlainHttp11SoUvicornDoesNotReject() {
+        // 【测什么】生产构造器造的客户端对 http:// 地址不发 "Upgrade: h2c"（JDK HttpClient 默认 HTTP_2 会发）；
+        //          uvicorn 对非 WebSocket 的 Upgrade 直接回 400 —— 2026-09-03 线上两条通道全 400 就是这个
+        // 【怎么算红】去掉 HttpClient.Version.HTTP_1_1：假 uvicorn 看到 Upgrade 头回 400，这里抛 LlmChannelException
+        LlmChatResponse r = productionClient().chat(
+                channel("u", "/uvicorn", 1, true, 5000, 0.7, LlmChannelSpec.TokenParam.MAX_TOKENS), MESSAGES, META);
+
+        assertEquals("served by uvicorn", r.content());
+    }
+
+    @Test
+    void http400CarriesTheProvidersOwnSentenceButNeverTheKeyOrUrl() {
+        // 【测什么】非 2xx 时把服务端 error.message 那句话带进短因（运营在试跑结果里靠它修配置），并抹掉 key / URL
+        // 【怎么算红】(a) 只记状态码不带正文 —— 断言 "maximum context length" 失败；
+        //            (b) 正文原样拼接 —— 401 那条里 "sk-should-not-leak" 会出现，另一条测试红
+        LlmChannelException e = assertThrows(LlmChannelException.class,
+                () -> client.chat(channel("t", "/too-long", 1, true, 5000, null, LlmChannelSpec.TokenParam.MAX_TOKENS), MESSAGES, META));
+
+        assertTrue(e.failoverable());
+        assertTrue(e.reason().startsWith("HTTP 400"), e.reason());
+        assertTrue(e.reason().contains("maximum context length is 4096 tokens"), "服务端那句话要带出来: " + e.reason());
+        assertTrue(e.reason().contains("1500 in the completion"), e.reason());
+        assertFalse(e.reason().contains("sk-"), e.reason());
+        assertFalse(e.reason().contains("127.0.0.1"), e.reason());
+        assertEquals("提示词优化服务调用失败，请稍后再试", e.getMessage(), "给用户的那句仍然是通用文案");
+    }
+
+    @Test
+    void providerDetailRedactsKeysAndUrlsAndTruncates() {
+        // 【测什么】正文里回显的 Bearer key / sk- 串 / URL 一律抹掉；纯文本也能用；超过 200 字截断
+        // 【怎么算红】去掉任一 replaceAll，对应断言失败
+        String body = "{\"error\":{\"message\":\"invalid key sk-abcdef0123456789 for http://10.0.0.8:8000/v1 (Bearer sk-abcdef0123456789)\"}}";
+        String detail = client.providerDetail(body, "sk-abcdef0123456789");
+        assertFalse(detail.contains("sk-"), detail);
+        assertFalse(detail.contains("10.0.0.8"), detail);
+        assertTrue(detail.contains("invalid key"), detail);
+
+        assertEquals(": Unsupported upgrade request.", client.providerDetail("Unsupported upgrade request.\n", null));
+        assertEquals("", client.providerDetail("   ", null));
+        String longDetail = client.providerDetail("x".repeat(500), null);
+        assertTrue(longDetail.length() < 220 && longDetail.endsWith("…"), "要截断: " + longDetail.length());
+    }
 
     @Test
     void httpErrorsAreFailoverableAndNeverEchoTheKeyOrUrl() {

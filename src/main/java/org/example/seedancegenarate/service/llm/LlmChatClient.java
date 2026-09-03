@@ -42,6 +42,9 @@ public class LlmChatClient {
     @Autowired
     public LlmChatClient(PromptOptimizeConfig config, ObjectMapper objectMapper) {
         this(objectMapper, HttpClient.newBuilder()
+                // 默认 HTTP_2 会对 http:// 地址先发 "Upgrade: h2c"；uvicorn（vLLM / SGLang）对非 WebSocket 的
+                // Upgrade 直接回 400 "Unsupported upgrade request."——线上两条通道全 400 就是这个
+                .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofMillis(config.getConnectTimeoutMs() == null ? 5000 : config.getConnectTimeoutMs()))
                 .build());
     }
@@ -80,8 +83,9 @@ public class LlmChatClient {
 
         int status = response.statusCode();
         if (status < 200 || status >= 300) {
-            // 只记状态码，响应体可能回显请求（含 messages），不进日志
-            throw fail(channel, scene, LlmChannelException.failoverable(httpReason(status), null));
+            // 带上服务端那句错误原因（≤200 字），否则线上只看到「400」谁也修不了；不带 URL 和 key
+            throw fail(channel, scene, LlmChannelException.failoverable(
+                    httpReason(status) + providerDetail(response.body(), channel.apiKey()), null));
         }
 
         String content;
@@ -144,6 +148,45 @@ public class LlmChatClient {
             return LlmChannelException.failoverable("io: " + t.getClass().getSimpleName(), t);
         }
         return LlmChannelException.failoverable("unexpected: " + t.getClass().getSimpleName(), t);
+    }
+
+    /**
+     * 服务端错误正文里那句话：OpenAI 形状取 error.message，FastAPI 形状取 detail，否则原文；压成一行、截 200 字。
+     * 这是运营在试跑结果里能看到的唯一线索（"maximum context length is 4096 tokens" / "Unsupported upgrade request."）。
+     * 第三方 401 会把我们发过去的 key 回显在正文里，所以 key 和任何 URL 先抹掉再往外给（D-023）。
+     */
+    String providerDetail(String body, String apiKey) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        String text = body.strip();
+        try {
+            JsonNode node = objectMapper.readTree(text);
+            JsonNode message = node.path("error").path("message");
+            if (!message.isTextual()) {
+                message = node.path("message");
+            }
+            if (!message.isTextual()) {
+                message = node.path("detail");
+            }
+            if (message.isTextual() && !message.asText().isBlank()) {
+                text = message.asText();
+            }
+        } catch (Exception ignored) {
+            // 不是 JSON（uvicorn 的 "Unsupported upgrade request." 就是纯文本），原文即线索
+        }
+        if (apiKey != null && !apiKey.isBlank()) {
+            text = text.replace(apiKey.trim(), "<key>");
+        }
+        text = text.replaceAll("(?i)bearer\\s+[A-Za-z0-9._\\-]+", "<key>")
+                .replaceAll("\\bsk-[A-Za-z0-9._\\-]{4,}", "<key>")
+                .replaceAll("https?://\\S+", "<url>")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (text.length() > 200) {
+            text = text.substring(0, 200) + "…";
+        }
+        return text.isEmpty() ? "" : ": " + text;
     }
 
     /** 状态码的短因。401/403 单独点出「配置错误」——它不是瞬时故障，切走之后必须有人去修 */
