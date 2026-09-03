@@ -2,12 +2,11 @@ package org.example.seedancegenarate.service.Impl;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.example.seedancegenarate.config.PromptOptimizeConfig;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
 import org.example.seedancegenarate.service.llm.LlmCallMeta;
-import org.example.seedancegenarate.service.llm.LlmChatClient;
 import org.example.seedancegenarate.service.llm.LlmChatResponse;
+import org.example.seedancegenarate.service.llm.LlmRouter;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
@@ -31,26 +30,34 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
     private static final String FALLBACK_GUIDE =
             "你是 AI 生成提示词专家，请把用户的粗略描述改写成一条高质量、结构清晰的提示词。";
 
-    private final PromptOptimizeConfig config;
-    private final LlmChatClient llmChatClient;
+    /** 用哪条 LLM 通道由路由决定；这里只关心模板和消息。「未配置」也由路由报 */
+    private final LlmRouter llmRouter;
 
     @Override
     public String optimize(String prompt, PromptContext context) throws Exception {
-        if (config.getApiKey() == null || config.getApiKey().isBlank()
-                || config.getUrl() == null || config.getUrl().isBlank()
-                || config.getModel() == null || config.getModel().isBlank()) {
-            throw new RuntimeException("提示词优化服务未配置，请联系管理员");
-        }
+        String targetModel = context == null ? null : context.model();
+        LlmChatResponse response = llmRouter.chat(buildMessages(prompt, context),
+                new LlmCallMeta(LlmCallMeta.SCENE_PROMPT_OPTIMIZE, targetModel));
+        return finish(response);
+    }
 
+    @Override
+    public LlmChatResponse optimizeWith(String channelName, String prompt, PromptContext context) {
+        String targetModel = context == null ? null : context.model();
+        LlmChatResponse response = llmRouter.chatWith(channelName, buildMessages(prompt, context),
+                new LlmCallMeta(LlmCallMeta.SCENE_PROMPT_OPTIMIZE_TRIAL, targetModel));
+        return new LlmChatResponse(finish(response), response.promptTokens(), response.completionTokens());
+    }
+
+    private List<Map<String, Object>> buildMessages(String prompt, PromptContext context) {
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(message("system", buildSystemPrompt(context)));
         messages.add(message("user", prompt));
+        return messages;
+    }
 
-        // LLM 调用统一走 LlmChatClient（TokenUsageAspect 在此切面记录 token 消耗）
-        String targetModel = context == null ? null : context.model();
-        LlmChatResponse response = llmChatClient.chat(config.getModel(), messages,
-                new LlmCallMeta(LlmCallMeta.SCENE_PROMPT_OPTIMIZE, targetModel));
-
+    /** 去掉模型爱加的包裹引号；剥完还是空的就不能交给用户 */
+    private String finish(LlmChatResponse response) {
         String optimized = stripWrappingQuotes(response.content());
         if (optimized.isEmpty()) {
             throw new RuntimeException("提示词优化失败，请稍后再试");

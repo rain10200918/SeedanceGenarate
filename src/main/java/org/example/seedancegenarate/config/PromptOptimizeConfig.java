@@ -7,6 +7,10 @@ import org.springframework.stereotype.Component;
 /**
  * 提示词优化（OpenAI 兼容 Chat Completions 服务）配置。
  * 密钥仅存在于后端，绝不下发给前端。
+ * <p>
+ * <b>url / apiKey / model / temperature / maxTokens / timeoutMs 从此只是 seed</b>：
+ * 首次启动被 {@code LlmChannelRegistry} 灌进 {@code llm_channel} 表成名为 default 的通道，
+ * 之后改这里不生效，要改在管理端改。只有 {@link #connectTimeoutMs} 仍是全局配置。
  */
 @Data
 @Component
@@ -41,4 +45,11 @@ public class PromptOptimizeConfig {
      * 否则前端先断连，后端还在白烧 token，用户看到的症状和超时一模一样。
      */
     private Integer timeoutMs = 100000;
+    /**
+     * 连接超时（毫秒），<b>全局</b>，不按通道配。
+     * <p>
+     * 和读超时分开（D-020 同一条理由）：一台被黑洞的主机（SYN 不回）如果也走 100s 读超时，
+     * 路由就永远等不到「快失败」去切下一条；连接层 5 秒能定，切过去还有整段预算。
+     */
+    private Integer connectTimeoutMs = 5000;
 }

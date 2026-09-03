@@ -10,6 +10,7 @@ import org.example.seedancegenarate.entity.AppUser;
 import org.example.seedancegenarate.entity.PromptTokenUsage;
 import org.example.seedancegenarate.service.TokenUsageService;
 import org.example.seedancegenarate.service.llm.LlmCallMeta;
+import org.example.seedancegenarate.service.llm.LlmChannelSpec;
 import org.example.seedancegenarate.service.llm.LlmChatResponse;
 import org.springframework.stereotype.Component;
 
@@ -39,7 +40,10 @@ public class TokenUsageAspect {
     @Around("execution(* org.example.seedancegenarate.service.llm.LlmChatClient.chat(..))")
     public Object record(ProceedingJoinPoint pjp) throws Throwable {
         Object[] args = pjp.getArgs();
-        String llmModel = (String) args[0];
+        // 第一个参数是通道：按通道记，两条通道可能用同名模型，只记模型名分不出是哪家
+        LlmChannelSpec channel = (LlmChannelSpec) args[0];
+        String llmModel = channel.model();
+        String llmChannel = channel.name();
         LlmCallMeta meta = (LlmCallMeta) args[2];
 
         int promptLen = charsOf(args[1]);
@@ -47,13 +51,13 @@ public class TokenUsageAspect {
         try {
             LlmChatResponse response = (LlmChatResponse) pjp.proceed();
             int responseLen = response.content().length();
-            save(llmModel, meta, promptLen, responseLen,
+            save(llmModel, llmChannel, meta, promptLen, responseLen,
                     estimateTokens(response.promptTokens(), promptLen),
                     estimateTokens(response.completionTokens(), responseLen),
                     System.currentTimeMillis() - start, "SUCCESS", null);
             return response;
         } catch (Throwable t) {
-            save(llmModel, meta, promptLen, 0, null, null,
+            save(llmModel, llmChannel, meta, promptLen, 0, null, null,
                     System.currentTimeMillis() - start, "FAILED",
                     t.getMessage() == null ? null : t.getMessage().substring(0, Math.min(t.getMessage().length(), ERROR_MSG_MAX)));
             throw t;
@@ -61,7 +65,7 @@ public class TokenUsageAspect {
     }
 
     /** 记录落库：内部兜底，写库失败不影响 LLM 主流程 */
-    private void save(String llmModel, LlmCallMeta meta, int promptLen, int responseLen,
+    private void save(String llmModel, String llmChannel, LlmCallMeta meta, int promptLen, int responseLen,
                       Integer promptTokens, Integer completionTokens, long latencyMs, String status, String errorMsg) {
         try {
             PromptTokenUsage usage = new PromptTokenUsage();
@@ -73,6 +77,7 @@ public class TokenUsageAspect {
             usage.setScene(meta == null ? null : meta.scene());
             usage.setTargetModel(meta == null ? null : meta.targetModel());
             usage.setLlmModel(llmModel);
+            usage.setLlmChannel(llmChannel);
             usage.setPromptTokens(promptTokens);
             usage.setCompletionTokens(completionTokens);
             usage.setTotalTokens(promptTokens == null ? null : promptTokens + (completionTokens == null ? 0 : completionTokens));

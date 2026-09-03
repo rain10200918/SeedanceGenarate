@@ -186,10 +186,12 @@ video:
       - id: gpu-6
         base-url: ${COMFYUI_NODE6_URL}
         enabled: ${COMFYUI_NODE6_ENABLED:true}
+# url / api-key / model 只在首次启动 seed 进 llm_channel 表；之后在管理端「AI 通道」改
 prompt-optimize:
   url: ${PROMPT_OPTIMIZE_URL}
   api-key: ${PROMPT_OPTIMIZE_API_KEY}
   model: ${PROMPT_OPTIMIZE_MODEL:gemma-4-31b}
+  connect-timeout-ms: ${PROMPT_OPTIMIZE_CONNECT_TIMEOUT_MS:5000}
 file:
   upload-path: ${FILE_UPLOAD_PATH:./data/images}
 billing:

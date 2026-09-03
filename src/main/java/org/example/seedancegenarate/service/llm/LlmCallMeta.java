@@ -13,4 +13,6 @@ public record LlmCallMeta(
         String targetModel
 ) {
     public static final String SCENE_PROMPT_OPTIMIZE = "PROMPT_OPTIMIZE";
+    /** 管理端对指定通道试跑。单独一个 scene，统计时不和真实用户的调用混在一起 */
+    public static final String SCENE_PROMPT_OPTIMIZE_TRIAL = "PROMPT_OPTIMIZE_TRIAL";
 }

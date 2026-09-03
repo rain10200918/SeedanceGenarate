@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class PromptOptimizeServiceImplTest {
 
     private final PromptOptimizeServiceImpl service =
-            new PromptOptimizeServiceImpl(null, null);
+            new PromptOptimizeServiceImpl(null);
 
     @Test
     void ref2vaTemplateSelectedAndImageCountInjected() {

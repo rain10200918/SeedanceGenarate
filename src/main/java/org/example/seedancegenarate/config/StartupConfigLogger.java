@@ -83,6 +83,11 @@ public class StartupConfigLogger {
             "video.completion.callback-base-url",
             "video.completion.callback-secret",
             "video.comfyui.access-token",
+            // —— 提示词优化 LLM：这几项只在首次启动 seed 进 llm_channel 表，之后以表为准
+            "prompt-optimize.url",
+            "prompt-optimize.model",
+            "prompt-optimize.api-key",
+            "prompt-optimize.connect-timeout-ms",
             // —— 支付
             "wechat.pay.mch-id",
             "wechat.pay.api-v3-key",

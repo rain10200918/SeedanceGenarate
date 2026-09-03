@@ -24,6 +24,8 @@ public class PromptTokenUsage {
     private String scene;
     /** 实际调用的 LLM 模型 */
     private String llmModel;
+    /** 实际服务的通道名（llm_channel.name）。两条通道可能用同名模型，只靠 llmModel 分不出是哪家 */
+    private String llmChannel;
     /** 业务目标模型（如被优化的视频模型） */
     private String targetModel;
     /** 输入 token（usage 缺失时按字符估算） */
