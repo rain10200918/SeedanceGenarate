@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.PromptOptimizeConfig;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -37,12 +38,15 @@ public class LlmChatClient {
     private final ObjectMapper objectMapper;
     private final HttpClient http;
 
+    // 两个构造器时 Spring 不会自己挑，缺了这个注解就去找无参构造器，启动直接失败
+    @Autowired
     public LlmChatClient(PromptOptimizeConfig config, ObjectMapper objectMapper) {
         this(objectMapper, HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(config.getConnectTimeoutMs() == null ? 5000 : config.getConnectTimeoutMs()))
                 .build());
     }
 
+    /** 测试用：注一个自定义 HttpClient（回环地址、极短超时） */
     LlmChatClient(ObjectMapper objectMapper, HttpClient http) {
         this.objectMapper = objectMapper;
         this.http = http;
