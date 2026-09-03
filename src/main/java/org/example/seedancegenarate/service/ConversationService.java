@@ -22,6 +22,7 @@ import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,7 +76,9 @@ public class ConversationService {
         if (!includeArchived) {
             q.eq(Conversation::getArchived, false);
         }
-        return conversationMapper.selectList(q).stream().map(ConversationView::of).toList();
+        List<Conversation> rows = conversationMapper.selectList(q);
+        Map<Long, ConversationView.Cover> covers = covers(rows.stream().map(Conversation::getId).toList());
+        return rows.stream().map(c -> ConversationView.of(c, covers.get(c.getId()))).toList();
     }
 
     public ConversationView create(Long userId, String title) {
@@ -99,14 +102,14 @@ public class ConversationService {
         c.setTitle(t);
         c.setTitleSource(Conversation.TITLE_USER);
         conversationMapper.updateById(c);
-        return ConversationView.of(c);
+        return withCover(c);
     }
 
     public ConversationView setArchived(Long userId, Long id, boolean archived) {
         Conversation c = requireOwned(userId, id);
         c.setArchived(archived);
         conversationMapper.updateById(c);
-        return ConversationView.of(c);
+        return withCover(c);
     }
 
     /** 按 seq 游标往前翻：beforeSeq 为空取最新一页；返回升序 */
@@ -317,7 +320,42 @@ public class ConversationService {
             }
             turn.add(toView(m));
         }
-        return new ConversationTurnView(ConversationView.of(conv), turn);
+        return new ConversationTurnView(withCover(conv), turn);
+    }
+
+    private ConversationView withCover(Conversation c) {
+        return ConversationView.of(c, covers(List.of(c.getId())).get(c.getId()));
+    }
+
+    /** 左栏缩略图：每个对话最近一次成功结果。ids 为空不查——IN () 是语法错 */
+    private Map<Long, ConversationView.Cover> covers(List<Long> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, ConversationView.Cover> out = new HashMap<>();
+        for (ConversationMessageMapper.LatestOutput row : messageMapper.latestSuccessOutputs(ids)) {
+            ConversationView.Cover cover = coverOf(parse(row.getOutput()), parse(row.getGenParams()));
+            if (cover != null) {
+                out.put(row.getConversationId(), cover);
+            }
+        }
+        return out;
+    }
+
+    /** 图片直接用结果图；视频没有封面帧，用第一张参考图顶上；音频没有图，只带类型让前端画图标 */
+    static ConversationView.Cover coverOf(JsonNode output, JsonNode genParams) {
+        if (output == null) {
+            return null;
+        }
+        String type = output.path("mediaType").asText("video");
+        String url = null;
+        if ("image".equals(type)) {
+            url = output.path("url").asText(null);
+        } else if ("video".equals(type) && genParams != null && genParams.path("imageUrls").isArray()
+                && genParams.path("imageUrls").size() > 0) {
+            url = genParams.path("imageUrls").get(0).asText(null);
+        }
+        return new ConversationView.Cover(StringUtils.hasText(url) ? url : null, type);
     }
 
     private Conversation requireOwned(Long userId, Long id) {

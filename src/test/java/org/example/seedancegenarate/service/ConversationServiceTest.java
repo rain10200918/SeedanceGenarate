@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.config.RateLimitConfig;
 import org.example.seedancegenarate.dto.ConversationMessageView;
 import org.example.seedancegenarate.dto.ConversationTurnView;
+import org.example.seedancegenarate.dto.ConversationView;
 import org.example.seedancegenarate.dto.SendMessageRequest;
 import org.example.seedancegenarate.entity.Conversation;
 import org.example.seedancegenarate.entity.ConversationMessage;
@@ -253,6 +254,53 @@ class ConversationServiceTest {
         assertEquals("video", ConversationService.mediaType(null));
         assertFalse(ConversationService.userFacingReason(new java.io.IOException("socket")).contains("socket"));
         assertNotNull(ConversationService.userFacingReason(new RuntimeException("余额不足")));
+    }
+
+    @Test
+    void listCarriesTheLatestSuccessfulResultAsCover() {
+        // 【测什么】左栏缩略图：图片用结果图；视频没有封面帧用第一张参考图；音频只有类型没有图；没成功过的对话没有 cover
+        // 【怎么算红】视频拿了 output.url（那是 mp4）；音频给了 url；没结果的对话被塞了 cover
+        Conversation image = conversation(3);
+        Conversation video = conversation(3);
+        video.setId(2L);
+        Conversation audio = conversation(3);
+        audio.setId(3L);
+        Conversation none = conversation(1);
+        none.setId(4L);
+        when(conversations.selectList(any())).thenReturn(List.of(image, video, audio, none));
+        when(messages.latestSuccessOutputs(any())).thenReturn(List.of(
+                latest(1L, "{\"mediaType\":\"image\",\"url\":\"/outputs/a.png\"}", "{}"),
+                latest(2L, "{\"mediaType\":\"video\",\"url\":\"/outputs/b.mp4\"}", "{\"imageUrls\":[\"https://x/ref.jpg\"]}"),
+                latest(3L, "{\"mediaType\":\"audio\",\"url\":\"/outputs/c.mp3\"}", "{}")));
+
+        List<ConversationView> views = service.list(USER, false);
+
+        assertEquals("/outputs/a.png", views.get(0).coverUrl());
+        assertEquals("image", views.get(0).coverType());
+        assertEquals("https://x/ref.jpg", views.get(1).coverUrl());
+        assertEquals("video", views.get(1).coverType());
+        assertNull(views.get(2).coverUrl());
+        assertEquals("audio", views.get(2).coverType());
+        assertNull(views.get(3).coverUrl());
+        assertNull(views.get(3).coverType());
+    }
+
+    @Test
+    void emptyConversationListNeverAsksForCovers() {
+        // 【测什么】没有对话就不查缩略图——IN () 是 SQL 语法错，会把整个列表接口打瘫
+        // 【怎么算红】去掉 covers() 里的 isEmpty 判断
+        when(conversations.selectList(any())).thenReturn(List.of());
+
+        assertTrue(service.list(USER, false).isEmpty());
+        verify(messages, never()).latestSuccessOutputs(any());
+    }
+
+    private static ConversationMessageMapper.LatestOutput latest(long conversationId, String output, String genParams) {
+        ConversationMessageMapper.LatestOutput row = new ConversationMessageMapper.LatestOutput();
+        row.setConversationId(conversationId);
+        row.setOutput(output);
+        row.setGenParams(genParams);
+        return row;
     }
 
     private static Conversation conversation(int count) {
