@@ -3,7 +3,8 @@ package org.example.seedancegenarate.dto;
 import java.util.List;
 
 /**
- * 对话里发一条消息。参考素材只收 URL（本地图片先进素材库再发）；
+ * 对话里发一条消息。attachments 是素材库里选的历史地址（只认本系统 OSS 域名）；
+ * 本地文件和生成页一样随 multipart 的 images / videos / audios 一起来，由 {@code ConversationMediaResolver} 传 OSS 后归并。
  * generation 是这一轮生成用的参数，由前端的 composer 选好。
  */
 public record SendMessageRequest(

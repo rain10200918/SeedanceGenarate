@@ -64,6 +64,7 @@ public class ConversationService {
     private final RateLimitConfig rateLimitConfig;
     private final TransactionTemplate transactionTemplate;
     private final ObjectMapper objectMapper;
+    private final ConversationMediaResolver mediaResolver;
 
     // ───────────────────────── 对话 ─────────────────────────
 
@@ -132,6 +133,12 @@ public class ConversationService {
     // ───────────────────────── 发一轮 ─────────────────────────
 
     public ConversationTurnView send(Long userId, Long conversationId, SendMessageRequest req) {
+        return send(userId, conversationId, req, ConversationMediaResolver.LocalFiles.none());
+    }
+
+    /** files 是随 multipart 来的本地参考素材：先传 OSS 换成地址，再和 req.attachments 里的历史地址归并（事务之前，D-027） */
+    public ConversationTurnView send(Long userId, Long conversationId, SendMessageRequest req,
+                                     ConversationMediaResolver.LocalFiles files) {
         if (req == null) {
             throw BusinessException.badRequest("请求参数不能为空");
         }
@@ -144,7 +151,7 @@ public class ConversationService {
             throw BusinessException.badRequest("请选择生成模型");
         }
         boolean agent = !MODE_DIRECT.equalsIgnoreCase(req.mode());
-        List<SendMessageRequest.Attachment> attachments = normalizeAttachments(req.attachments());
+        List<SendMessageRequest.Attachment> attachments = mediaResolver.resolve(normalizeAttachments(req.attachments()), files);
         String clientMsgId = trimToNull(req.clientMsgId(), 64);
 
         // ① 锁对话、幂等重放、预留整轮 seq、落用户气泡

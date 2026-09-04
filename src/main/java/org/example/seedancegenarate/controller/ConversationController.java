@@ -8,7 +8,9 @@ import org.example.seedancegenarate.dto.ConversationView;
 import org.example.seedancegenarate.dto.SendMessageRequest;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.exception.BusinessException;
+import org.example.seedancegenarate.service.ConversationMediaResolver;
 import org.example.seedancegenarate.service.ConversationService;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,7 +18,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -62,10 +66,25 @@ public class ConversationController {
         return Result.success(conversationService.messages(UserContext.requireUserId(), id, beforeSeq, limit));
     }
 
-    /** 发一条消息：同步等 Agent 整理（最长约 100 秒），返回整轮气泡 */
-    @PostMapping("/{id}/messages")
+    /** 发一条消息：同步等 Agent 整理（最长约 100 秒），返回整轮气泡。纯 JSON：参考素材全是素材库地址 */
+    @PostMapping(value = "/{id}/messages", consumes = MediaType.APPLICATION_JSON_VALUE)
     public Result<ConversationTurnView> send(@PathVariable Long id, @RequestBody SendMessageRequest request) {
         return Result.success(conversationService.send(UserContext.requireUserId(), id, request));
+    }
+
+    /**
+     * 同一接口的 multipart 形态，和生成页 /video/image2video 同一套：本地文件跟着请求走，
+     * payload 是 JSON 的 {@link SendMessageRequest}，imageOrder 逐位置写 file / url 决定图片顺序（= 提示词里的 &lt;Picture N&gt;）
+     */
+    @PostMapping(value = "/{id}/messages", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<ConversationTurnView> sendWithFiles(@PathVariable Long id,
+                                                      @RequestPart("payload") SendMessageRequest request,
+                                                      @RequestParam(value = "images", required = false) MultipartFile[] images,
+                                                      @RequestParam(value = "imageOrder", required = false) List<String> imageOrder,
+                                                      @RequestParam(value = "videos", required = false) MultipartFile[] videos,
+                                                      @RequestParam(value = "audios", required = false) MultipartFile[] audios) {
+        return Result.success(conversationService.send(UserContext.requireUserId(), id, request,
+                new ConversationMediaResolver.LocalFiles(images, imageOrder, videos, audios)));
     }
 
     public record CreateRequest(String title) {

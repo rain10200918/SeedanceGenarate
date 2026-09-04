@@ -51,6 +51,7 @@ class ConversationServiceTest {
     private final PromptOptimizeService optimizer = mock(PromptOptimizeService.class);
     private final TokenBucketRateLimitService rateLimiter = mock(TokenBucketRateLimitService.class);
     private final TransactionTemplate tx = mock(TransactionTemplate.class);
+    private final ConversationMediaResolver media = mock(ConversationMediaResolver.class);
     private final List<ConversationMessage> inserted = new ArrayList<>();
     private long nextId = 100;
     private ConversationService service;
@@ -97,8 +98,10 @@ class ConversationServiceTest {
         task.setBizTaskId("tsk-1");
         task.setStatus("PROCESSING");
         when(submitService.submit(any())).thenReturn(task);
+        // 素材解析替身：没有本地文件，历史地址原样放行（白名单和归并在 ConversationMediaResolverTest 里测）
+        when(media.resolve(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         service = new ConversationService(conversations, messages, submitService, optimizer, rateLimiter,
-                new RateLimitConfig(), tx, new ObjectMapper());
+                new RateLimitConfig(), tx, new ObjectMapper(), media);
     }
 
     @Test
