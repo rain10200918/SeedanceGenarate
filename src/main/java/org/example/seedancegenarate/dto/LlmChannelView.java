@@ -20,11 +20,13 @@ public record LlmChannelView(
         int priority,
         boolean enabled,
         boolean archived,
-        String remark
+        String remark,
+        boolean supportsImages,
+        String imageCapabilitySource
 ) {
     public static LlmChannelView of(LlmChannelSpec s) {
         return new LlmChannelView(s.name(), s.baseUrl(), LlmChannelSpec.maskKey(s.apiKey()), s.model(),
                 s.temperature(), s.maxTokens(), s.tokenParam().stored(), s.timeoutMs(), s.priority(),
-                s.enabled(), s.archived(), s.remark());
+                s.enabled(), s.archived(), s.remark(), s.supportsImages(), s.imageCapabilitySource());
     }
 }

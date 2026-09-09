@@ -54,6 +54,7 @@ class AdminLlmChannelControllerTest {
                         new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""),
                 LlmChannel.class);
         mapper = mock(LlmChannelMapper.class);
+        when(mapper.update(eq(null),any(Wrapper.class))).thenReturn(1);
         registry = mock(LlmChannelRegistry.class);
         optimizer = mock(PromptOptimizeService.class);
         controller = new AdminLlmChannelController(mapper, registry, optimizer);
@@ -93,11 +94,54 @@ class AdminLlmChannelControllerTest {
         return req;
     }
 
+    // 【测什么】显式确认图片能力落SET，换模型未确认安全关闭，同模型普通编辑不清能力。
+    // 【怎么算红】删掉能力SET或模型变化检测，捕获SQL与参数断言失败。
+    @Test void imageCapabilityIsExplicitAndModelChangesResetIt() {
+        var existing=row("default",false); existing.setModel("old");existing.setBaseUrl("http://h/v1");existing.setSupportsImages(true);
+        when(mapper.selectById("default")).thenReturn(existing);
+        var req=new AdminLlmChannelController.LlmChannelUpsertRequest(); req.setModel("new");
+        controller.update("default",req);
+        ArgumentCaptor<Wrapper<LlmChannel>> capture=ArgumentCaptor.forClass(Wrapper.class);
+        verify(mapper).update(eq(null),capture.capture());
+        var wrapper=(com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<LlmChannel>)capture.getValue();
+        assertTrue(wrapper.getSqlSet().contains("supports_images"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(false));
+        assertTrue(wrapper.getSqlSegment().contains("model") && wrapper.getSqlSegment().contains("base_url"));
+        org.mockito.Mockito.clearInvocations(mapper);
+        req.setSupportsImages(true); controller.update("default",req);
+        verify(mapper).update(eq(null),capture.capture());
+        wrapper=(com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<LlmChannel>)capture.getValue();
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(true));
+        org.mockito.Mockito.clearInvocations(mapper);
+        var plain=new AdminLlmChannelController.LlmChannelUpsertRequest();plain.setRemark("note");
+        controller.update("default",plain);verify(mapper).update(eq(null),capture.capture());
+        assertFalse(capture.getValue().getSqlSet().contains("supports_images"));
+    }
+
+    // 【测什么】旧编辑确认不能覆盖新模型，条件更新竞争失败返回409；无变化驱动返回0可安全重放。
+    // 【怎么算红】删expected比较或忽略更新行数，则冲突不再抛出；把0一律失败则重放失败。
+    @Test void imageConfirmationFencesConcurrentModelChangesAndAcceptsIdenticalReplay() {
+        var existing=row("default",false);existing.setModel("m1");existing.setBaseUrl("http://h/v1");existing.setSupportsImages(true);
+        when(mapper.selectById("default")).thenReturn(existing);
+        var req=new AdminLlmChannelController.LlmChannelUpsertRequest(); req.setSupportsImages(true);
+        req.setExpectedModel("m0");req.setExpectedBaseUrl("http://h/v1");
+        assertEquals(409,assertThrows(org.example.seedancegenarate.exception.BusinessException.class,()->controller.update("default",req)).getCode());
+        req.setExpectedModel("m1");
+        when(mapper.update(eq(null),any(Wrapper.class))).thenReturn(0);
+        controller.update("default",req);
+        var competing=row("default",false);competing.setModel("m2");competing.setBaseUrl("http://h/v1");competing.setSupportsImages(true);
+        when(mapper.selectById("default")).thenReturn(existing,competing);
+        assertEquals(409,assertThrows(org.example.seedancegenarate.exception.BusinessException.class,()->controller.update("default",req)).getCode());
+        req.setExpectedBaseUrl(null);
+        assertThrows(IllegalArgumentException.class,()->controller.update("default",req));
+        assertEquals(409,controller.businessFailure(org.example.seedancegenarate.exception.BusinessException.conflict("changed")).getStatusCode().value());
+    }
+
     @Test
     void listNeverExposesThePlainKey() {
         // 【测什么】列表返回的是脱敏形态，且返回类型上根本没有明文字段
         // 【怎么算红】把 spec 直接返回 / 或 view 里加一个 apiKey 字段 —— 任何有管理员会话的人都能拿到全部第三方密钥
-        when(registry.channels()).thenReturn(List.of(spec("default", true, false)));
+        when(registry.channelsStrict()).thenReturn(List.of(spec("default", true, false)));
         List<LlmChannelView> views = controller.list(false).getData();
         assertEquals(1, views.size());
         assertEquals("sk-a7f••••••1b", views.get(0).apiKeyMasked());
@@ -106,11 +150,40 @@ class AdminLlmChannelControllerTest {
                 "LlmChannelView 上不许有明文 apiKey 字段");
     }
 
+    // 【测什么】另一实例保存能力后，管理列表绕过本实例30秒旧缓存，数据库失败也不返回假新状态。
+    // 【怎么算红】管理list调用channels缓存版时，显式false仍显示true；数据库故障时错误地返回旧列表。
+    @Test void adminListDoesNotReuseAnotherNodesStaleCapability() {
+        var value=row("vision",false);value.setModel("m");value.setBaseUrl("http://h/v1");value.setSupportsImages(true);
+        when(mapper.selectList(any(Wrapper.class))).thenReturn(List.of(value));
+        var live=new LlmChannelRegistry(mapper,new org.example.seedancegenarate.config.PromptOptimizeConfig());
+        var admin=new AdminLlmChannelController(mapper,live,optimizer);
+        assertTrue(live.channels().get(0).supportsImages());
+        value.setSupportsImages(false); // another node's committed write; this registry was not invalidated
+        assertFalse(admin.list(false).getData().get(0).supportsImages());
+        when(mapper.selectList(any(Wrapper.class))).thenThrow(new RuntimeException("database offline"));
+        assertThrows(RuntimeException.class,()->admin.list(false));
+    }
+
+    // 【测什么】MVC陈旧确认真实HTTP409，畸形字段400而非200包装。
+    // 【怎么算红】删除局部异常处理，MockMvc状态断言失败或异常逃逸。
+    @Test void staleImageConfirmationUsesHttpConflict() throws Exception {
+        var existing=row("default",false);existing.setModel("new");existing.setBaseUrl("http://h/v1");
+        when(mapper.selectById("default")).thenReturn(existing);
+        var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).build();
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch("/api/admin/llm-channels/default")
+                .contentType("application/json").content("{\"supportsImages\":true,\"expectedModel\":\"old\",\"expectedBaseUrl\":\"http://h/v1\"}"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isConflict())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code").value(409));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch("/api/admin/llm-channels/default")
+                .contentType("application/json").content("{\"supportsImages\":{}}"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest());
+    }
+
     @Test
     void listHidesArchivedUnlessAsked() {
         // 【测什么】默认不列归档；includeArchived=true 才列
         // 【怎么算红】默认全列 —— 归档等于没归档，列表越用越长
-        when(registry.channels()).thenReturn(List.of(spec("default", true, false), spec("old", false, true)));
+        when(registry.channelsStrict()).thenReturn(List.of(spec("default", true, false), spec("old", false, true)));
         assertEquals(1, controller.list(false).getData().size());
         assertEquals(2, controller.list(true).getData().size());
     }
@@ -127,6 +200,9 @@ class AdminLlmChannelControllerTest {
         verify(mapper).insert(captor.capture());
         assertFalse(captor.getValue().getEnabled(), "新增必须是关闭的");
         assertFalse(captor.getValue().getArchived());
+        // 【测什么】新通道不能继承旧配置的读图权限。
+        // 【怎么算红】新增默认未写false时此字段缺失或为null。
+        assertEquals(Boolean.FALSE,captor.getValue().getSupportsImages());
         assertEquals("sk-real-key-0123456789abcdef", captor.getValue().getApiKey());
         assertEquals("max_tokens", captor.getValue().getTokenParam(), "token_param 缺省按 max_tokens");
         verify(registry).invalidate();

@@ -27,6 +27,30 @@ import static org.mockito.Mockito.when;
  */
 class LlmChannelRegistryTest {
 
+    // 【测什么】NULL只兼容旧名单，DB false不能被名单覆盖，副本保持能力和来源。
+    // 【怎么算红】把resolvedSpec的null守卫删掉或副本丢字段，false/来源断言失败。
+    @Test void databaseImageDeclarationOverridesLegacyAndSurvivesCopies() {
+        var calls=new org.example.seedancegenarate.config.AgentModelCallConfig();
+        calls.setImageChannels(List.of("legacy","disabled"));
+        var live=new LlmChannelRegistry(mapper,config,calls);
+        var legacy=row("legacy","m",true,false,3);
+        var disabled=row("disabled","m",true,false,1); disabled.setSupportsImages(false);
+        var vision=row("vision","m",true,false,2); vision.setSupportsImages(true);
+        givenTable(List.of(legacy,disabled,vision));
+        var all=live.routableStrict();
+        assertFalse(all.get(0).supportsImages()); assertEquals("CHANNEL",all.get(0).imageCapabilitySource());
+        assertTrue(all.get(1).supportsImages()); assertEquals("CHANNEL",all.get(1).imageCapabilitySource());
+        assertTrue(all.get(2).supportsImages()); assertEquals("LEGACY_CONFIG",all.get(2).imageCapabilitySource());
+        var copy=all.get(2).withTimeoutMs(300000).withMaxTokens(4096);
+        assertTrue(copy.supportsImages()); assertEquals("LEGACY_CONFIG",copy.imageCapabilitySource());
+        when(mapper.selectById("legacy")).thenReturn(legacy);
+        assertTrue(live.findRoutableStrict("legacy").supportsImages());
+        live.channels(); legacy.setSupportsImages(false);
+        assertFalse(live.findRoutableStrict("legacy").supportsImages());
+        when(mapper.selectList(any(com.baomidou.mybatisplus.core.conditions.Wrapper.class))).thenThrow(new RuntimeException("offline"));
+        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class,live::routableStrict);
+    }
+
     private LlmChannelMapper mapper;
     private PromptOptimizeConfig config;
     private LlmChannelRegistry registry;

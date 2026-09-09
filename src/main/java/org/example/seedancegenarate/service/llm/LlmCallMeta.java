@@ -10,8 +10,19 @@ public record LlmCallMeta(
         /** 用途标识：PROMPT_OPTIMIZE=提示词优化 */
         String scene,
         /** 业务目标模型（如被优化的视频模型）；纯 LLM 场景可为 null */
-        String targetModel
+        String targetModel,
+        /** Background execution identity; trusted runtime only, not model output. */
+        Long userId,
+        String agentTurnId,
+        Integer decisionStep
 ) {
+    public LlmCallMeta(String scene, String targetModel, Long userId, String agentTurnId) {
+        this(scene, targetModel, userId, agentTurnId, null);
+    }
+    /** Preserve the existing request-bound prompt/trial callers. */
+    public LlmCallMeta(String scene, String targetModel) {
+        this(scene, targetModel, null, null);
+    }
     public static final String SCENE_PROMPT_OPTIMIZE = "PROMPT_OPTIMIZE";
     /** 管理端对指定通道试跑。单独一个 scene，统计时不和真实用户的调用混在一起 */
     public static final String SCENE_PROMPT_OPTIMIZE_TRIAL = "PROMPT_OPTIMIZE_TRIAL";

@@ -36,6 +36,8 @@ public class LlmChannel {
     private Integer priority;
     /** 参不参与路由。<b>新增默认 false</b> —— 先试跑看输出质量再开 */
     private Boolean enabled;
+    /** NULL is an undeclared legacy row; explicit false overrides legacy image-channel configuration. */
+    private Boolean supportsImages;
     /** 列表里显不显示。归档连带停用；行永远留着，usage 才能回查 */
     private Boolean archived;
     private String remark;

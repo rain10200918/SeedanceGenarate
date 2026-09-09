@@ -7,6 +7,9 @@ import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.dto.LlmChannelView;
 import org.example.seedancegenarate.entity.LlmChannel;
 import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.exception.BusinessException;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.example.seedancegenarate.mapper.LlmChannelMapper;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
@@ -26,6 +29,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.util.List;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
@@ -60,7 +64,7 @@ public class AdminLlmChannelController {
     @GetMapping
     public Result<List<LlmChannelView>> list(@RequestParam(defaultValue = "false") boolean includeArchived) {
         requireAdmin();
-        List<LlmChannelSpec> all = llmChannelRegistry.channels();
+        List<LlmChannelSpec> all = llmChannelRegistry.channelsStrict();
         return Result.success(all.stream()
                 .filter(c -> includeArchived || !c.archived())
                 .map(LlmChannelView::of)
@@ -89,6 +93,7 @@ public class AdminLlmChannelController {
         row.setTimeoutMs(request.getTimeoutMs() == null ? 100_000 : validTimeout(request.getTimeoutMs()));
         row.setPriority(request.getPriority() == null ? 100 : validPriority(request.getPriority()));
         row.setEnabled(false); // 刻意不读 request.enabled
+        row.setSupportsImages(Boolean.TRUE.equals(request.getSupportsImages()));
         row.setArchived(false);
         row.setRemark(validRemark(request.getRemark()));
         llmChannelMapper.insert(row);
@@ -104,13 +109,26 @@ public class AdminLlmChannelController {
         if (existing == null) {
             throw new IllegalArgumentException("通道不存在: " + name);
         }
+        if ((request.getExpectedModel()==null)!=(request.getExpectedBaseUrl()==null))
+            throw new IllegalArgumentException("模型和接口地址的原值必须一起提供");
+        if(request.getExpectedModel()!=null && (!Objects.equals(request.getExpectedModel(),existing.getModel())
+                || !Objects.equals(request.getExpectedBaseUrl(),existing.getBaseUrl())))
+            throw BusinessException.conflict("通道模型配置已变化，请刷新后重新确认图片能力");
+        String nextModel=request.getModel()==null?existing.getModel():requiredText(request.getModel(),"模型",128);
+        String nextUrl=request.getBaseUrl()==null?existing.getBaseUrl():validBaseUrl(request.getBaseUrl());
         if (Boolean.TRUE.equals(request.getEnabled())
                 && Boolean.TRUE.equals(existing.getArchived())
                 && !Boolean.FALSE.equals(request.getArchived())) {
             throw new IllegalArgumentException("归档通道必须先取消归档才能启用");
         }
         var update = Wrappers.<LlmChannel>lambdaUpdate().eq(LlmChannel::getName, name);
+        if(existing.getModel()==null)update.isNull(LlmChannel::getModel); else update.eq(LlmChannel::getModel,existing.getModel());
+        if(existing.getBaseUrl()==null)update.isNull(LlmChannel::getBaseUrl); else update.eq(LlmChannel::getBaseUrl,existing.getBaseUrl());
         boolean changed = false;
+        if(request.getSupportsImages()!=null || !Objects.equals(nextModel,existing.getModel()) || !Objects.equals(nextUrl,existing.getBaseUrl())) {
+            update.set(LlmChannel::getSupportsImages,Boolean.TRUE.equals(request.getSupportsImages()));
+            changed=true;
+        }
         if (request.getBaseUrl() != null) {
             update.set(LlmChannel::getBaseUrl, validBaseUrl(request.getBaseUrl()));
             changed = true;
@@ -170,7 +188,13 @@ public class AdminLlmChannelController {
         if (!changed) {
             throw new IllegalArgumentException("至少提供一个要修改的字段");
         }
-        llmChannelMapper.update(null, update);
+        if(llmChannelMapper.update(null, update)==0) {
+            // Drivers configured for changed-row counts may report zero for an identical replay.
+            LlmChannel current=llmChannelMapper.selectById(name);
+            if(current==null || !Objects.equals(current.getModel(),existing.getModel())
+                    || !Objects.equals(current.getBaseUrl(),existing.getBaseUrl()) || !alreadyApplied(request,current))
+                throw BusinessException.conflict("通道配置已变化，请刷新后重试");
+        }
         llmChannelRegistry.invalidate();
         return Result.success(null);
     }
@@ -204,6 +228,34 @@ public class AdminLlmChannelController {
     }
 
     // ───────────────────────── 校验 ─────────────────────────
+
+    private boolean alreadyApplied(LlmChannelUpsertRequest r,LlmChannel c) {
+        return (r.getModel()==null || Objects.equals(r.getModel().trim(),c.getModel()))
+                && (r.getBaseUrl()==null || Objects.equals(r.getBaseUrl().trim(),c.getBaseUrl()))
+                && (r.getSupportsImages()==null || Objects.equals(r.getSupportsImages(),c.getSupportsImages()))
+                && (r.getApiKey()==null || r.getApiKey().isBlank() || Objects.equals(r.getApiKey().trim(),c.getApiKey()))
+                && (Boolean.TRUE.equals(r.getClearTemperature())?c.getTemperature()==null:
+                    r.getTemperature()==null || c.getTemperature()!=null && r.getTemperature().compareTo(c.getTemperature())==0)
+                && (r.getMaxTokens()==null || Objects.equals(r.getMaxTokens(),c.getMaxTokens()))
+                && (r.getTokenParam()==null || Objects.equals(validTokenParam(r.getTokenParam()),c.getTokenParam()))
+                && (r.getTimeoutMs()==null || Objects.equals(r.getTimeoutMs(),c.getTimeoutMs()))
+                && (r.getPriority()==null || Objects.equals(r.getPriority(),c.getPriority()))
+                && (r.getRemark()==null || Objects.equals(r.getRemark(),c.getRemark()))
+                && (r.getArchived()==null || Objects.equals(r.getArchived(),c.getArchived()))
+                && (Boolean.TRUE.equals(r.getArchived())?Boolean.FALSE.equals(c.getEnabled()):
+                    r.getEnabled()==null || Objects.equals(r.getEnabled(),c.getEnabled()));
+    }
+
+    @ExceptionHandler(BusinessException.class)
+    public ResponseEntity<Result<Void>> businessFailure(BusinessException e) {
+        return ResponseEntity.status(e.getCode()).body(Result.fail(e.getCode(),e.getMessage()));
+    }
+
+    @ExceptionHandler({IllegalArgumentException.class, org.springframework.http.converter.HttpMessageNotReadableException.class})
+    public ResponseEntity<Result<Void>> invalidRequest(Exception e) {
+        String message=e instanceof IllegalArgumentException?e.getMessage():"请求字段格式不正确";
+        return ResponseEntity.badRequest().body(Result.fail(400,message));
+    }
 
     private String validName(String value) {
         String v = requiredText(value, "通道名", 64);
@@ -304,6 +356,9 @@ public class AdminLlmChannelController {
         /** 新增必填；PATCH 时空/空白 = 保留原值 */
         private String apiKey;
         private String model;
+        private Boolean supportsImages;
+        private String expectedModel;
+        private String expectedBaseUrl;
         private BigDecimal temperature;
         /** PATCH 专用：true = 把 temperature 置空（不传给模型） */
         private Boolean clearTemperature;

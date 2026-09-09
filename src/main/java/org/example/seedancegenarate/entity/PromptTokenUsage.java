@@ -28,6 +28,12 @@ public class PromptTokenUsage {
     private String llmChannel;
     /** 业务目标模型（如被优化的视频模型） */
     private String targetModel;
+    /** Durable Agent turn correlation; null for existing prompt and trial requests. */
+    private String agentTurnId;
+    /** Planner/Skill 调用所在的持久化 decision step；非 Agent 请求为空。 */
+    private Integer decisionStep;
+    /** PROVIDER / ESTIMATED / UNKNOWN；失败未返回 usage 不能视为零消耗。 */
+    private String usageSource;
     /** 输入 token（usage 缺失时按字符估算） */
     private Integer promptTokens;
     /** 输出 token */

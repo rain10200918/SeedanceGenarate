@@ -11,6 +11,7 @@ import org.example.seedancegenarate.entity.PromptTokenUsage;
 import org.example.seedancegenarate.service.TokenUsageService;
 import org.example.seedancegenarate.service.llm.LlmCallMeta;
 import org.example.seedancegenarate.service.llm.LlmChannelSpec;
+import org.example.seedancegenarate.service.llm.LlmChannelException;
 import org.example.seedancegenarate.service.llm.LlmChatResponse;
 import org.springframework.stereotype.Component;
 
@@ -18,8 +19,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * LLM 调用 token 消耗统计切面：切 LlmChatClient.chat() 这个唯一出口，
- * 未来新增 LLM 调用场景（走同一客户端）自动纳入统计，无需改这里。
+ * LLM 调用 token 消耗统计切面：覆盖旧文本出口和受控LangChain4j Planner出口。
+ * 两条调用链均显式传channel/messages/meta，Planner额外包含Schema字符估算。
  * <p>
  * 不变量：切面内任何异常只打日志，绝不影响主流程；token 数优先取响应 usage，
  * 缺失时按字符数/4 估算兜底。
@@ -30,14 +31,12 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class TokenUsageAspect {
 
-    /** 无 usage 时的估算系数：约 1 个 token ≈ 4 字符（中文略保守，兜底用足够） */
+    /** 无 usage 时的粗略估算，标记ESTIMATED，不可当作中文模型的精确Token预算。 */
     private static final int TOKENS_PER_CHAR = 4;
-    /** 失败原因截断长度（防脏数据） */
-    private static final int ERROR_MSG_MAX = 200;
 
     private final TokenUsageService tokenUsageService;
 
-    @Around("execution(* org.example.seedancegenarate.service.llm.LlmChatClient.chat(..))")
+    @Around("execution(* org.example.seedancegenarate.service.llm.LlmChatClient.chat(..)) || execution(* org.example.seedancegenarate.service.llm.LangChain4jPlannerClient.chat(..))")
     public Object record(ProceedingJoinPoint pjp) throws Throwable {
         Object[] args = pjp.getArgs();
         // 第一个参数是通道：按通道记，两条通道可能用同名模型，只记模型名分不出是哪家
@@ -47,6 +46,8 @@ public class TokenUsageAspect {
         LlmCallMeta meta = (LlmCallMeta) args[2];
 
         int promptLen = charsOf(args[1]);
+        if(args.length>3 && args[3] instanceof com.fasterxml.jackson.databind.JsonNode schema)
+            promptLen+=schema.toString().length();
         long start = System.currentTimeMillis();
         try {
             LlmChatResponse response = (LlmChatResponse) pjp.proceed();
@@ -54,33 +55,48 @@ public class TokenUsageAspect {
             save(llmModel, llmChannel, meta, promptLen, responseLen,
                     estimateTokens(response.promptTokens(), promptLen),
                     estimateTokens(response.completionTokens(), responseLen),
-                    System.currentTimeMillis() - start, "SUCCESS", null);
+                    System.currentTimeMillis() - start, "SUCCESS", null,
+                    response.promptTokens() != null && response.completionTokens() != null ? "PROVIDER" : "ESTIMATED");
             return response;
         } catch (Throwable t) {
-            save(llmModel, llmChannel, meta, promptLen, 0, null, null,
-                    System.currentTimeMillis() - start, "FAILED",
-                    t.getMessage() == null ? null : t.getMessage().substring(0, Math.min(t.getMessage().length(), ERROR_MSG_MAX)));
+            LlmChannelException modelError = t instanceof LlmChannelException e ? e : null;
+            Integer input = modelError == null ? null : modelError.promptTokens();
+            Integer output = modelError == null ? null : modelError.completionTokens();
+            // 只记录结构化分类，不把可能带请求正文/URL/密钥的异常消息写进管理端。
+            String diagnostic = modelError == null ? "MODEL_CLIENT_ERROR" : modelError.code()
+                    + (modelError.httpStatus() == null ? "" : " HTTP=" + modelError.httpStatus());
+            save(llmModel, llmChannel, meta, promptLen, 0, input, output,
+                    System.currentTimeMillis() - start, "FAILED", diagnostic,
+                    input != null || output != null ? "PROVIDER" : "UNKNOWN");
             throw t;
         }
     }
 
     /** 记录落库：内部兜底，写库失败不影响 LLM 主流程 */
     private void save(String llmModel, String llmChannel, LlmCallMeta meta, int promptLen, int responseLen,
-                      Integer promptTokens, Integer completionTokens, long latencyMs, String status, String errorMsg) {
+                      Integer promptTokens, Integer completionTokens, long latencyMs, String status, String errorMsg,
+                      String usageSource) {
         try {
             PromptTokenUsage usage = new PromptTokenUsage();
-            AppUser user = UserContext.getUser();
-            if (user != null) {
-                usage.setUserId(user.getId());
-                usage.setUserName(user.getUsername());
+            if (meta != null && meta.userId() != null) {
+                usage.setUserId(meta.userId());
+            } else {
+                AppUser user = UserContext.getUser();
+                if (user != null) {
+                    usage.setUserId(user.getId());
+                    usage.setUserName(user.getUsername());
+                }
             }
+            usage.setAgentTurnId(meta == null ? null : meta.agentTurnId());
+            usage.setDecisionStep(meta == null ? null : meta.decisionStep());
+            usage.setUsageSource(usageSource);
             usage.setScene(meta == null ? null : meta.scene());
             usage.setTargetModel(meta == null ? null : meta.targetModel());
             usage.setLlmModel(llmModel);
             usage.setLlmChannel(llmChannel);
             usage.setPromptTokens(promptTokens);
             usage.setCompletionTokens(completionTokens);
-            usage.setTotalTokens(promptTokens == null ? null : promptTokens + (completionTokens == null ? 0 : completionTokens));
+            usage.setTotalTokens(promptTokens == null || completionTokens == null ? null : promptTokens + completionTokens);
             usage.setPromptLen(promptLen);
             usage.setResponseLen(responseLen);
             usage.setLatencyMs(latencyMs);
@@ -94,16 +110,7 @@ public class TokenUsageAspect {
 
     /** messages 全部正文的字符总数（估算输入长度的兜底依据） */
     private int charsOf(Object messagesObj) {
-        if (!(messagesObj instanceof List<?> list)) {
-            return 0;
-        }
-        int chars = 0;
-        for (Object item : list) {
-            if (item instanceof Map<?, ?> m && m.get("content") instanceof String content) {
-                chars += content.length();
-            }
-        }
-        return chars;
+        return org.example.seedancegenarate.service.llm.LlmChatClient.inputTextChars(messagesObj);
     }
 
     /** usage 缺失时按字符数估算 */

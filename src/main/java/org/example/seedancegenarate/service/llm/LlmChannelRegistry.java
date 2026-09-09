@@ -2,9 +2,10 @@ package org.example.seedancegenarate.service.llm;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.PromptOptimizeConfig;
+import org.example.seedancegenarate.config.AgentModelCallConfig;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.example.seedancegenarate.entity.LlmChannel;
 import org.example.seedancegenarate.mapper.LlmChannelMapper;
 import org.springframework.stereotype.Component;
@@ -34,7 +35,6 @@ import java.util.List;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class LlmChannelRegistry {
 
     public static final String SEED_NAME = "default";
@@ -43,6 +43,15 @@ public class LlmChannelRegistry {
 
     private final LlmChannelMapper llmChannelMapper;
     private final PromptOptimizeConfig config;
+    private final AgentModelCallConfig agentCalls;
+
+    @Autowired
+    public LlmChannelRegistry(LlmChannelMapper mapper, PromptOptimizeConfig config, AgentModelCallConfig agentCalls) {
+        this.llmChannelMapper=mapper; this.config=config; this.agentCalls=agentCalls;
+    }
+    public LlmChannelRegistry(LlmChannelMapper mapper, PromptOptimizeConfig config) {
+        this(mapper,config,new AgentModelCallConfig());
+    }
 
     private volatile List<LlmChannelSpec> cache = List.of();
     private volatile long cachedAt;
@@ -107,6 +116,22 @@ public class LlmChannelRegistry {
         return channels().stream().filter(LlmChannelSpec::routable).toList();
     }
 
+    /** Agent security boundary: no stale cache or YAML fallback when database truth is unavailable. */
+    public List<LlmChannelSpec> routableStrict() {
+        return query().stream().filter(LlmChannelSpec::routable).toList();
+    }
+    /** Admin read-back must reflect writes made on any instance; includes disabled/archived rows. */
+    public List<LlmChannelSpec> channelsStrict() { return query(); }
+
+    /** Explicit Agent selection checked against current database state on each external call. */
+    public LlmChannelSpec findRoutableStrict(String name) {
+        if (name == null) return null;
+        LlmChannel row = llmChannelMapper.selectById(name);
+        if (row == null) return null;
+        LlmChannelSpec spec = resolvedSpec(row);
+        return spec.routable() ? spec : null;
+    }
+
     /** 按名字找（含归档、含停用）；没有返回 null */
     public LlmChannelSpec find(String name) {
         if (name == null) {
@@ -126,7 +151,7 @@ public class LlmChannelRegistry {
     private List<LlmChannelSpec> query() {
         List<LlmChannelSpec> result = new ArrayList<>();
         for (LlmChannel row : llmChannelMapper.selectList(Wrappers.<LlmChannel>lambdaQuery())) {
-            result.add(toSpec(row));
+            result.add(resolvedSpec(row));
         }
         result.sort(Comparator.comparingInt(LlmChannelSpec::priority).thenComparing(LlmChannelSpec::name));
         return List.copyOf(result);
@@ -145,7 +170,16 @@ public class LlmChannelRegistry {
                 row.getPriority() == null ? 100 : row.getPriority(),
                 Boolean.TRUE.equals(row.getEnabled()),
                 Boolean.TRUE.equals(row.getArchived()),
-                row.getRemark());
+                row.getRemark(),Boolean.TRUE.equals(row.getSupportsImages()),
+                row.getSupportsImages()==null?"UNCONFIGURED":"CHANNEL");
+    }
+
+    private LlmChannelSpec resolvedSpec(LlmChannel row) {
+        LlmChannelSpec spec=toSpec(row);
+        if(row.getSupportsImages()!=null || !agentCalls.getImageChannels().contains(row.getName())) return spec;
+        return new LlmChannelSpec(spec.name(),spec.baseUrl(),spec.apiKey(),spec.model(),spec.temperature(),
+                spec.maxTokens(),spec.tokenParam(),spec.timeoutMs(),spec.priority(),spec.enabled(),spec.archived(),
+                spec.remark(),true,"LEGACY_CONFIG");
     }
 
     private boolean yamlConfigured() {

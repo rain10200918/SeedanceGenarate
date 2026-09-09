@@ -21,13 +21,21 @@ public record LlmChannelSpec(
         int priority,
         boolean enabled,
         boolean archived,
-        String remark
+        String remark,
+        boolean supportsImages,
+        String imageCapabilitySource
 ) {
+    public LlmChannelSpec(String name, String baseUrl, String apiKey, String model, Double temperature,
+                          int maxTokens, TokenParam tokenParam, int timeoutMs, int priority,
+                          boolean enabled, boolean archived, String remark) {
+        this(name,baseUrl,apiKey,model,temperature,maxTokens,tokenParam,timeoutMs,priority,enabled,archived,
+                remark,false,"UNCONFIGURED");
+    }
 
     /**
-     * 前端 axios 的硬墙（src/api/http.ts: timeout 120_000）。任何通道的读超时都必须严格小于它：
+     * 前端 axios 的硬墙（src/api/http.ts: timeout 120_000）。持久化的同步通道读超时必须严格小于它：
      * 超过就是前端先断连、后端还在白烧 token，用户看到的症状和超时一模一样，排查时还会以为后端放宽了。
-     * 管理端写入校验和测试都引用这一个数。
+     * 管理端写入校验和测试都引用这一个数。后台Agent仅对调用副本使用独立、有界超时。
      */
     public static final int FRONTEND_TIMEOUT_MS = 120_000;
     public static final int MAX_TIMEOUT_MS = FRONTEND_TIMEOUT_MS - 1_000;
@@ -73,6 +81,17 @@ public record LlmChannelSpec(
     /** 参与路由 = 启用且未归档 */
     public boolean routable() {
         return enabled && !archived;
+    }
+
+    /** Per-invocation override; never writes the synchronous channel configuration back. */
+    public LlmChannelSpec withTimeoutMs(int timeoutMs) {
+        return new LlmChannelSpec(name, baseUrl, apiKey, model, temperature, maxTokens, tokenParam,
+                timeoutMs, priority, enabled, archived, remark, supportsImages, imageCapabilitySource);
+    }
+
+    public LlmChannelSpec withMaxTokens(int tokens) {
+        return new LlmChannelSpec(name,baseUrl,apiKey,model,temperature,tokens,tokenParam,
+                timeoutMs,priority,enabled,archived,remark,supportsImages,imageCapabilitySource);
     }
 
     /**

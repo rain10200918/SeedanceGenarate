@@ -13,6 +13,31 @@ public class LlmChannelException extends RuntimeException {
 
     private final boolean failoverable;
     private final String reason;
+    private String code = "MODEL_PROVIDER_ERROR";
+    private boolean retryable;
+    private Integer httpStatus;
+    private String providerCode;
+    private Integer promptTokens;
+    private Integer completionTokens;
+
+    /** Agent retry classification is independent of the synchronous router's failover policy. */
+    public LlmChannelException classified(String code, boolean retryable, Integer httpStatus,
+                                          String providerCode, Integer promptTokens, Integer completionTokens) {
+        this.code = code;
+        this.retryable = retryable;
+        this.httpStatus = httpStatus;
+        this.providerCode = providerCode;
+        this.promptTokens = promptTokens;
+        this.completionTokens = completionTokens;
+        return this;
+    }
+
+    public String code() { return code; }
+    public boolean retryable() { return retryable; }
+    public Integer httpStatus() { return httpStatus; }
+    public String providerCode() { return providerCode; }
+    public Integer promptTokens() { return promptTokens; }
+    public Integer completionTokens() { return completionTokens; }
 
     private LlmChannelException(String userMessage, String reason, boolean failoverable, Throwable cause) {
         super(userMessage, cause);
@@ -29,7 +54,7 @@ public class LlmChannelException extends RuntimeException {
     public static LlmChannelException readTimeout(Throwable cause) {
         return new LlmChannelException(
                 "提示词优化超时：内容较长时模型生成需要更久，请缩短提示词后重试",
-                "read timeout", false, cause);
+                "read timeout", false, cause).classified("MODEL_TIMEOUT", true, null, null, null, null);
     }
 
     /** 不可切也不是超时：线程被中断等 */
