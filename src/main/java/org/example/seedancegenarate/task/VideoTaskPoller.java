@@ -1,44 +1,38 @@
 package org.example.seedancegenarate.task;
 
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.example.seedancegenarate.engine.GenerationState;
-import org.example.seedancegenarate.engine.RemoteStatus;
-import org.example.seedancegenarate.engine.VideoEngine;
-import org.example.seedancegenarate.engine.VideoEngineRegistry;
-import org.example.seedancegenarate.config.DistributedLockProperties;
 import org.example.seedancegenarate.entity.VideoTask;
-import org.example.seedancegenarate.service.DistributedLock;
+import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 后台任务推进器（只服务轮询机制引擎）：
- * <ul>
- *   <li>事件驱动引擎（CALLBACK，如 ComfyUI）：不轮询，等回调；对账任务低频兜底；</li>
- *   <li>轮询引擎（POLL，如 Seedance）：按 {@code next_poll_at} 退避查询，避免固定 2 秒忙等。</li>
- * </ul>
- * 分布式锁保证多实例下同一时刻只有一个实例执行；{@link #advanceTask} 供对账任务复用。
+ * 轮询作业生产器：只从 MySQL Writer 找到期任务并幂等入队 {@link TaskPollConsumer#JOB_TYPE}。
+ * 这里不调 provider；多实例重复扫描由 (job_type,biz_key) 唯一约束收口，Redis 不是正确性前提。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class VideoTaskPoller {
-    private final VideoTaskService videoTaskService;
-    private final VideoEngineRegistry videoEngineRegistry;
-    private final DistributedLock distributedLock;
-    private final DistributedLockProperties lockProperties;
+    private static final int ENQUEUE_MAX_ATTEMPTS = 3;
+    private static final long ENQUEUE_RETRY_MIN_MILLIS = 20;
+    private static final long ENQUEUE_RETRY_MAX_MILLIS = 100;
 
-    /** 锁 TTL：单轮扫描通常远小于此；崩溃后由 TTL 自动让出。 */
-    private static final Duration LOCK_TTL = Duration.ofSeconds(300);
+    private final VideoTaskService videoTaskService;
+    private final AsyncJobService asyncJobService;
+    private final ObjectMapper objectMapper;
 
     @Value("${video.poll.enabled:true}")
     private boolean enabled;
@@ -49,129 +43,90 @@ public class VideoTaskPoller {
     @Value("${video.poll.batch-size:200}")
     private int batchSize;
 
-    @Value("${video.default-provider:seedance}")
-    private String defaultProvider;
-
-    /** 单轮推进的时间预算（毫秒）。默认取锁 TTL 的一半，留出的另一半是「打断不了已发出的那次 HTTP」的余量 */
-    @Value("${video.poll.round-budget-ms:150000}")
-    private long roundBudgetMs;
-
     @Scheduled(fixedDelayString = "${video.poll.interval-ms:2000}",
             initialDelayString = "${video.poll.initial-delay-ms:5000}")
     public void advanceProcessingTasks() {
         if (!enabled) {
             return;
         }
-        if (!lockProperties.isEnabled()) {
-            // 单实例开发：未启用锁，直接执行（兼容旧行为）
-            advanceLocked();
-            return;
-        }
-        // 分布式锁：多实例部署时同一时刻只有一个实例执行扫描；未拿到锁或 Redis 不可用
-        // 都跳过本轮，避免所有实例同时重复轮询同一批任务（fail-closed）。
-        AutoCloseable lock = distributedLock.tryLock("video-poller", LOCK_TTL);
-        if (lock == null) {
-            return;
-        }
-        try (lock) {
-            advanceLocked();
-        } catch (Exception e) {
-            log.warn("推进器执行异常: {}", e.getMessage());
-        }
-    }
-
-    private void advanceLocked() {
-        // 需要轮询的引擎 = POLL 机制 + CALLBACK 但未配置回调（开发环境回退轮询）
-        List<String> pollProviders = videoEngineRegistry.all().stream()
-                .filter(VideoEngine::needsPolling)
-                .map(VideoEngine::provider)
-                .toList();
-        if (pollProviders.isEmpty()) {
-            return; // 全部引擎事件驱动且已配置回调：无任务需要轮询
-        }
         List<VideoTask> tasks;
+        LocalDateTime now = LocalDateTime.now();
         try {
-            // 只轮询「已提交完成」且「已到退避时间」的任务：provider_task_id 是提交链路的
-            // 最后一步才回写，该字段为空说明 submit 仍在进行，此刻轮询会撞上提交竞态。
             tasks = videoTaskService.list(Wrappers.<VideoTask>lambdaQuery()
                     .eq(VideoTask::getStatus, "PROCESSING")
-                    .in(VideoTask::getProvider, pollProviders)
                     .isNotNull(VideoTask::getProviderTaskId)
-                    .ge(VideoTask::getCreateTime, LocalDateTime.now().minusHours(maxAgeHours))
+                    .and(w -> w.isNull(VideoTask::getPhase)
+                            .or().eq(VideoTask::getPhase, "RUNNING"))
+                    .ge(VideoTask::getCreateTime, now.minusHours(Math.max(maxAgeHours, 1)))
                     .and(w -> w.isNull(VideoTask::getNextPollAt)
-                            .or()
-                            .le(VideoTask::getNextPollAt, LocalDateTime.now()))
+                            .or().le(VideoTask::getNextPollAt, now))
                     .orderByAsc(VideoTask::getId)
-                    .last("limit " + Math.max(batchSize, 1)));
+                    .last("limit " + Math.min(Math.max(batchSize, 1), 1000)));
         } catch (Exception e) {
-            log.warn("拉取待推进任务失败: {}", e.getMessage());
+            log.warn("拉取待入队轮询任务失败: {}", e.getMessage());
             return;
         }
-        if (!tasks.isEmpty()) {
-            log.info("轮询推进器扫描到 {} 条任务", tasks.size());
-        }
-        // 单轮时间预算：ComfyUI 进来之后这条路径开始发大量 HTTP，一台 hang 住的节点
-        // 能让一轮跑过 300 秒租约——那时另一个实例会拿到锁并发进来。
-        // 只在两条任务之间检查，第一条永远做得成；被跳过的下一轮按 next_poll_at 自然接着做。
-        long deadline = System.nanoTime() + Math.max(roundBudgetMs, 0) * 1_000_000L;
         int processed = 0;
         for (VideoTask task : tasks) {
-            if (processed > 0 && System.nanoTime() - deadline >= 0) {
-                log.warn("轮询推进超出本轮预算，剩余 {} 条留待下一轮", tasks.size() - processed);
-                break;
-            }
-            processed++;
             try {
-                advanceTask(task);
-            } catch (Exception e) {
-                // 单个任务轮询失败（网络抖动、节点暂时不可达等）不影响其他任务；
-                // 不轻易置为 FAILED（那是提供方明确返回失败才做的），下一轮继续重试
-                log.warn("推进任务 {} 失败: {}", task.businessTaskId(), e.getMessage());
+                enqueuePoll(task);
+                processed++;
+            } catch (PessimisticLockingFailureException e) {
+                // 单条连续三次都成为死锁牺牲者时留给下一轮；不能让它中断整批。
+                log.warn("轮询作业入队连续死锁，留待下一轮: taskId={}", task.getId());
+            }
+        }
+        if (processed > 0) {
+            log.info("已检查 {} 张轮询作业", processed);
+        }
+    }
+
+    /** 对账与周期生产器共用的唯一入队口，无网络 I/O。 */
+    public void enqueuePoll(VideoTask task) {
+        if (task == null || task.getId() == null || task.getId() <= 0
+                || !"PROCESSING".equals(task.getStatus())
+                || (StringUtils.hasText(task.getPhase()) && !"RUNNING".equals(task.getPhase()))
+                || !StringUtils.hasText(task.getProviderTaskId())) {
+            return;
+        }
+        String jobKey = TaskPollConsumer.jobKey(task.getId(), task.getCurrentAttemptId());
+        String payload = pollPayload(task);
+        for (int attempt = 1; attempt <= ENQUEUE_MAX_ATTEMPTS; attempt++) {
+            try {
+                // AsyncJobService 是 Spring 代理；异常越过事务代理后原事务已经回滚，
+                // 下一次调用会进入一张新事务，不能在被回滚的事务内部重试。
+                asyncJobService.enqueue(TaskPollConsumer.JOB_TYPE, jobKey, payload);
+                return;
+            } catch (PessimisticLockingFailureException e) {
+                if (attempt == ENQUEUE_MAX_ATTEMPTS) {
+                    throw e;
+                }
+                sleepBeforeEnqueueRetry();
             }
         }
     }
 
-    /** 推进单个任务（poller 与对账任务共用）：poll → 落库 → 按退避更新下次轮询时间。 */
-    public void advanceTask(VideoTask task) throws Exception {
-        String provider = (task.getProvider() == null || task.getProvider().isBlank())
-                ? defaultProvider : task.getProvider().trim();
-        VideoEngine engine = videoEngineRegistry.get(provider);
-        RemoteStatus status = engine.poll(task);
-        videoTaskService.updateStatus(task, status);
-        updateNextPollAt(task, status, engine);
+    private void sleepBeforeEnqueueRetry() {
+        long delayMillis = ThreadLocalRandom.current().nextLong(
+                ENQUEUE_RETRY_MIN_MILLIS, ENQUEUE_RETRY_MAX_MILLIS + 1);
+        try {
+            Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("轮询作业入队重试被中断", e);
+        }
     }
 
-    /**
-     * 退避策略（按引擎机制区分）：
-     * <ul>
-     *   <li>事件驱动引擎（已配回调）：poll 后 60 秒再兜底查一次——线上 ComfyUI 版本可能
-     *       静默忽略 webhook_url，回调不可用；60 秒是「实时性 vs 查询量」的折中；</li>
-     *   <li>轮询引擎：按任务已运行时长退避；SUCCESS 后 60 秒（等终态 Worker 收尾）。</li>
-     * </ul>
-     */
-    private void updateNextPollAt(VideoTask task, RemoteStatus status, VideoEngine engine) {
-        if (status.getState() == GenerationState.FAILED) {
-            return; // 已落终态，无需再排期
+    private String pollPayload(VideoTask task) {
+        try {
+            return objectMapper.writeValueAsString(new PollPayload(task.getId(),
+                    task.getCurrentAttemptId(), task.getProviderTaskId(), task.getProvider()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("无法序列化轮询作业", e);
         }
-        LocalDateTime now = LocalDateTime.now();
-        long delaySeconds;
-        if (!engine.needsPolling()) {
-            delaySeconds = 60; // 事件驱动：等回调，60 秒兜底查一次
-        } else if (status.getState() == GenerationState.SUCCESS) {
-            delaySeconds = 60; // 已入队终态作业，等待 Worker 收尾，不必高频复查
-        } else {
-            long ageSeconds = task.getCreateTime() == null
-                    ? 0 : Duration.between(task.getCreateTime(), now).getSeconds();
-            if (ageSeconds < 30) {
-                delaySeconds = 2;
-            } else if (ageSeconds < 300) {
-                delaySeconds = 5;
-            } else {
-                delaySeconds = 30;
-            }
-        }
-        videoTaskService.update(new LambdaUpdateWrapper<VideoTask>()
-                .eq(VideoTask::getId, task.getId())
-                .set(VideoTask::getNextPollAt, now.plusSeconds(delaySeconds)));
+    }
+
+    record PollPayload(Long videoTaskId, Long expectedAttemptId,
+                       String expectedProviderTaskId, String expectedProvider) {
     }
 }

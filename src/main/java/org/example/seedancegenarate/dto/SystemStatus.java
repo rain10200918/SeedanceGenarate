@@ -26,7 +26,8 @@ public record SystemStatus(
     public record ProviderCount(String provider, long count) {
     }
 
-    public record StuckTask(String taskId, String provider, long ageMinutes) {
+    public record StuckTask(String taskId, String provider, String phase,
+                            String nodeId, long ageMinutes) {
     }
 
     public record NodeStatus(String id, boolean online, int queueLoad, long latencyMs, String error) {

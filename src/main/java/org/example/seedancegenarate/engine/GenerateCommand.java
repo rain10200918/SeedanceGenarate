@@ -32,6 +32,11 @@ public class GenerateCommand {
     /** 事件驱动引擎的回调地址（框架注入，带鉴权 token）；轮询引擎忽略 */
     private String webhookUrl;
     /**
+     * 调供应商前已持久化的稳定请求号。支持关联查询的引擎必须把它传给供应商，
+     * 不能在 HTTP 边界临时生成，否则响应丢失后无法找回远端任务。
+     */
+    private String providerRequestId;
+    /**
      * 指定跑在哪台 ComfyUI 节点上（<b>管理员专用</b>，为空则正常调度）。
      * <p>
      * 用途只有一个：一台新机器接进来之后，在<b>不放量</b>的前提下先把真实工作流跑通。

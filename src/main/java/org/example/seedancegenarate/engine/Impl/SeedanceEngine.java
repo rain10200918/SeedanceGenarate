@@ -9,6 +9,7 @@ import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.RemoteStatus;
 import org.example.seedancegenarate.engine.SubmitResult;
+import org.example.seedancegenarate.engine.SubmissionNotAcceptedException;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.SeedanceService;
@@ -105,14 +106,14 @@ public class SeedanceEngine implements VideoEngine {
     }
 
     /** 注册标识 → 方舟 API 模型名；标识不存在抛错（与 ComfyUI 的 resolveBuilder 同一风格）。 */
-    private String resolveApiModelName(String modelId) {
+    private String resolveApiModelName(String modelId) throws SubmissionNotAcceptedException {
         String name = effectiveModels().stream()
                 .filter(m -> modelId != null && modelId.equals(m.getId()))
                 .map(SeedanceConfig.SeedanceModel::getName)
                 .findFirst()
                 .orElse(null);
         if (name == null || name.isBlank()) {
-            throw new RuntimeException("不支持的 Seedance 模型: " + modelId);
+            throw new SubmissionNotAcceptedException("不支持的 Seedance 模型: " + modelId);
         }
         return name;
     }

@@ -4,19 +4,22 @@ import cn.hutool.crypto.digest.DigestUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.engine.BillingTiming;
 import org.example.seedancegenarate.engine.CompletionMechanism;
 import org.example.seedancegenarate.engine.EtaCapability;
 import org.example.seedancegenarate.engine.GenerateCommand;
+import org.example.seedancegenarate.engine.GenerationState;
+import org.example.seedancegenarate.engine.ModelSpec;
+import org.example.seedancegenarate.engine.OutputType;
 import org.example.seedancegenarate.engine.RemoteStatus;
+import org.example.seedancegenarate.engine.SubmissionNotAcceptedException;
 import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
-import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiClient;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiFleet;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiNodeScheduler;
 import org.example.seedancegenarate.engine.comfyui.ComfyUiProperties;
-import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.comfyui.ReferenceFiles;
 import org.example.seedancegenarate.engine.comfyui.WorkflowBuilder;
 import org.example.seedancegenarate.entity.VideoTask;
@@ -25,6 +28,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -83,10 +87,29 @@ public class ComfyUiEngine implements VideoEngine {
         return true;
     }
 
+    @Override
+    public boolean supportsSubmissionRecovery() {
+        return true;
+    }
+
+    @Override
+    public SubmitResult findSubmission(String providerRequestId, String nodeId) throws Exception {
+        if (!StringUtils.hasText(providerRequestId) || !StringUtils.hasText(nodeId)) {
+            throw new IllegalArgumentException("ComfyUI 提交恢复缺少请求号或节点");
+        }
+        ComfyUiProperties.Node node = fleet.findNode(nodeId.trim());
+        if (node == null) {
+            throw new IllegalStateException("找不到提交时使用的 ComfyUI 节点: " + nodeId.trim());
+        }
+        String promptId = client.findPromptIdByClientId(node.getBaseUrl(),
+                providerRequestId.trim(), properties.getStatusTimeoutMs());
+        return StringUtils.hasText(promptId) ? SubmitResult.of(promptId.trim(), node.getId()) : null;
+    }
+
     /**
      * 完成机制以<b>这台 ComfyUI 实际有没有 webhook 能力</b>为准，不是想当然。
      * 声明成 CALLBACK 会让 {@code resolveWebhookUrl} 把回调地址（含 token）发出去，
-     * 也会让 {@link #needsPolling()} 变 false 把任务踢出轮询器 —— 声明错了两头都错。
+     * 并让状态查询退到 60 秒兜底节奏；声明错了会同时影响回调与查询压力。
      */
     @Override
     public CompletionMechanism completionMechanism() {
@@ -173,27 +196,39 @@ public class ComfyUiEngine implements VideoEngine {
     public List<ModelSpec> models() {
         return builders.values().stream()
                 .map(WorkflowBuilder::spec)
+                .sorted(Comparator.comparingInt((ModelSpec spec) -> {
+                    if (spec.outputType() == OutputType.VIDEO || spec.outputType() == null) return 0;
+                    if (spec.outputType() == OutputType.IMAGE) return 1;
+                    if (spec.outputType() == OutputType.AUDIO) return 2;
+                    return 3;
+                }).thenComparing(ModelSpec::model))
                 .toList();
     }
 
     @Override
     public SubmitResult submit(GenerateCommand command) throws Exception {
-        WorkflowBuilder builder = resolveBuilder(command.getModel());
-        List<String> imageUrls = command.getImageUrls() == null ? Collections.emptyList() : command.getImageUrls();
-        List<String> videoUrls = command.getVideoUrls() == null ? Collections.emptyList() : command.getVideoUrls();
-        List<String> audioUrls = command.getAudioUrls() == null ? Collections.emptyList() : command.getAudioUrls();
-        validate(builder.spec(), imageUrls, videoUrls, audioUrls, command);
+        return submit(command, ignored -> { });
+    }
 
-        // 1. 选节点。带上 model：装不齐这个工作流的插件、或者显存装不下的机器，
-        //    在这里就被排除，而不是提交过去等它报 missing_node_type / OOM
-        ComfyUiNodeScheduler.NodeSelection selection = scheduler.pick(command.getModel(), command.getNodeId());
-        ComfyUiProperties.Node node = selection.node();
-        log.info("ComfyUI 选中节点 {} 处理任务, model={}", node.getId(), command.getModel());
-
-        // pick() 已经把这台的待发计数 +1（让并发的下一次提交立刻看得见），
-        // 所以从这里往下任何一条失败路径都必须归还，否则这台节点在整个老化窗口里
-        // 都显得比实际忙 —— 而节点出问题时提交失败往往是连续的。
+    @Override
+    public SubmitResult submit(GenerateCommand command, SubmissionObserver observer) throws Exception {
+        ComfyUiNodeScheduler.NodeSelection selection = null;
+        boolean promptSubmissionStarted = false;
         try {
+            WorkflowBuilder builder = resolveBuilder(command.getModel());
+            List<String> imageUrls = command.getImageUrls() == null ? Collections.emptyList() : command.getImageUrls();
+            List<String> videoUrls = command.getVideoUrls() == null ? Collections.emptyList() : command.getVideoUrls();
+            List<String> audioUrls = command.getAudioUrls() == null ? Collections.emptyList() : command.getAudioUrls();
+            validate(builder.spec(), imageUrls, videoUrls, audioUrls, command);
+
+            // 1. 选节点。带上 model：装不齐这个工作流的插件、或者显存装不下的机器，
+            //    在这里就被排除，而不是提交过去等它报 missing_node_type / OOM
+            selection = scheduler.pick(command.getModel(), command.getNodeId());
+            ComfyUiProperties.Node node = selection.node();
+            // 先让 attempt 持久化实际节点。observer 写库失败时仍处于 /prompt 前，允许安全重试。
+            observer.onNodeSelected(node.getId());
+            log.info("ComfyUI 选中节点 {} 处理任务, model={}", node.getId(), command.getModel());
+
             // 2. 上传参考素材到该节点（各类内顺序保持，对应 <Picture 1..N> / <Video 1..N> / <Audio 1..N>）
             // 文件名内容 hash 化：同素材幂等，防止 ComfyUI input 目录无限增长
             ReferenceFiles files = new ReferenceFiles(
@@ -203,15 +238,43 @@ public class ComfyUiEngine implements VideoEngine {
 
             // 3. 构建工作流并提交（附 webhook_url 时事件驱动，完成/失败主动回调）
             JsonNode workflow = builder.build(command, files);
-            String clientId = UUID.randomUUID().toString();
-            String promptId = client.submitPrompt(node.getBaseUrl(), workflow, clientId,
-                    command.getWebhookUrl(), properties.getReadTimeoutMs());
+            String clientId = StringUtils.hasText(command.getProviderRequestId())
+                    ? command.getProviderRequestId().trim()
+                    : UUID.randomUUID().toString();
+            String baseUrl = node.getBaseUrl();
+            String webhookUrl = command.getWebhookUrl();
+            int timeoutMs = properties.getReadTimeoutMs();
+
+            // 从进入 submitPrompt 起就不能再证明 /prompt 没有接单：超时、断连、异常响应都必须停放人工恢复，
+            // 不能包装成 SubmissionNotAcceptedException 后盲目重投。
+            promptSubmissionStarted = true;
+            String promptId = client.submitPrompt(baseUrl, workflow, clientId, webhookUrl, timeoutMs);
 
             return SubmitResult.of(promptId, node.getId());
         } catch (Exception e) {
-            scheduler.releaseDispatch(selection);
+            // pick() 已经把这台的待发计数 +1；不论失败发生在上传、构建还是 /prompt，
+            // 都要精确归还本次 token。归还失败不能掩盖真正的提交结果分类。
+            if (selection != null) {
+                try {
+                    scheduler.releaseDispatch(selection);
+                } catch (RuntimeException releaseError) {
+                    e.addSuppressed(releaseError);
+                    log.warn("归还 ComfyUI 待发名额失败: node={}, err={}",
+                            selection.node().getId(), releaseError.getMessage());
+                }
+            }
+            if (!promptSubmissionStarted) {
+                throw new SubmissionNotAcceptedException(
+                        "ComfyUI 提交前准备失败: " + safeFailureMessage(e), e);
+            }
             throw e;
         }
+    }
+
+    private String safeFailureMessage(Exception error) {
+        return StringUtils.hasText(error.getMessage())
+                ? error.getMessage()
+                : error.getClass().getSimpleName();
     }
 
     /** 下载 OSS URL → 上传到节点 input 目录，返回 LoadImage/LoadAudio/XB_VideoLoader 可用的文件名（内容 hash 幂等） */

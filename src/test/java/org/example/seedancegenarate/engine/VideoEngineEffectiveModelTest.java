@@ -48,7 +48,8 @@ class VideoEngineEffectiveModelTest {
     @Test
     void singleModelMode_submit_unknownModelRejected() {
         SeedanceEngine engine = new SeedanceEngine(mock(SeedanceService.class), singleConfig(), new ObjectMapper());
-        assertThrows(RuntimeException.class, () -> engine.submit(command("不存在的模型")));
+        assertThrows(SubmissionNotAcceptedException.class,
+                () -> engine.submit(command("不存在的模型")));
     }
 
     @Test
@@ -75,7 +76,7 @@ class VideoEngineEffectiveModelTest {
     @Test
     void multiModelMode_submit_unknownModelRejected() {
         SeedanceEngine engine = new SeedanceEngine(mock(SeedanceService.class), multiConfig(), new ObjectMapper());
-        assertThrows(RuntimeException.class, () -> engine.submit(command("nope")));
+        assertThrows(SubmissionNotAcceptedException.class, () -> engine.submit(command("nope")));
     }
 
     @Test

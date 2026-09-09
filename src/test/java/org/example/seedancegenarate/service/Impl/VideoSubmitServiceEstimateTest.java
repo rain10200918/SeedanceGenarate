@@ -4,11 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.config.VideoCompletionProperties;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.engine.OutputType;
-import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.AppUser;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.entity.GenerationAttempt;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
@@ -21,6 +21,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 
@@ -43,6 +46,10 @@ class VideoSubmitServiceEstimateTest {
     private VideoEngine engine;
     private ModelAccessService modelAccessService;
     private PricingService pricingService;
+    private VideoTaskService videoTaskService;
+    private org.example.seedancegenarate.service.GenerationAttemptService attemptService;
+    private org.example.seedancegenarate.service.AsyncJobService asyncJobService;
+    private TransactionTemplate transactionTemplate;
     private VideoSubmitServiceImpl service;
 
     @BeforeEach
@@ -51,9 +58,17 @@ class VideoSubmitServiceEstimateTest {
         engine = mock(VideoEngine.class);
         modelAccessService = mock(ModelAccessService.class);
         pricingService = mock(PricingService.class);
+        videoTaskService = mock(VideoTaskService.class);
+        attemptService = mock(org.example.seedancegenarate.service.GenerationAttemptService.class);
+        asyncJobService = mock(org.example.seedancegenarate.service.AsyncJobService.class);
+        transactionTemplate = mock(TransactionTemplate.class);
+        when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+            TransactionCallback<?> callback = invocation.getArgument(0);
+            return callback.doInTransaction(mock(TransactionStatus.class));
+        });
         service = new VideoSubmitServiceImpl(
                 registry,
-                mock(VideoTaskService.class),
+                videoTaskService,
                 modelAccessService,
                 mock(TaskStatusTransitioner.class),
                 mock(WalletService.class),
@@ -64,7 +79,10 @@ class VideoSubmitServiceEstimateTest {
                 mock(org.example.seedancegenarate.mapper.AppUserMapper.class),
                 mock(org.example.seedancegenarate.mapper.ApiKeyMapper.class),
                 mock(org.example.seedancegenarate.service.ConcurrencyPolicy.class),
-                mock(org.example.seedancegenarate.service.AdmissionControl.class));
+                mock(org.example.seedancegenarate.service.AdmissionControl.class),
+                attemptService,
+                asyncJobService,
+                transactionTemplate);
         ReflectionTestUtils.setField(service, "defaultProvider", "seedance");
         when(registry.get("seedance")).thenReturn(engine);
         when(engine.effectiveModel(any())).thenReturn("seedance-v1-pro");
@@ -144,9 +162,9 @@ class VideoSubmitServiceEstimateTest {
     }
 
     @Test
-    void administratorPinnedNodeReachesTheEngineCommand() throws Exception {
-        // 【测什么】管理员给的 nodeId 穿过统一提交编排，最终进入 GenerateCommand 供调度器指定节点
-        // 【怎么算红】DTO/API 虽然收了 nodeId，但构造 GenerateCommand 时漏掉 `.nodeId(...)` ——
+    void administratorPinnedNodeReachesTheDurableAttempt() throws Exception {
+        // 【测什么】管理员 nodeId 进入持久化 attempt，后续 Worker 才据此指定节点。
+        // 【怎么算红】DTO/API 虽然收了 nodeId，但 stage 时漏传 ——
         //          页面显示“正在验证 gpu-new”，实际仍走普通负载均衡，验证结论完全错误
         AppUser admin = new AppUser();
         admin.setId(1L);
@@ -156,14 +174,32 @@ class VideoSubmitServiceEstimateTest {
         when(engine.effectiveModel("t2v")).thenReturn("t2v");
         when(engine.outputType("t2v")).thenReturn(OutputType.VIDEO);
         when(modelAccessService.isOpen("t2v")).thenReturn(true);
-        when(engine.submit(any())).thenReturn(org.example.seedancegenarate.engine.SubmitResult.of("prompt-1", "gpu-new"));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            VideoTask task = invocation.getArgument(0);
+            task.setId(71L);
+            return true;
+        }).when(videoTaskService).save(any(VideoTask.class));
+        when(attemptService.stageCurrentAttempt(any(VideoTask.class),
+                org.mockito.ArgumentMatchers.eq(1), org.mockito.ArgumentMatchers.eq("gpu-new")))
+                .thenAnswer(invocation -> {
+                    VideoTask task = invocation.getArgument(0);
+                    GenerationAttempt attempt = new GenerationAttempt();
+                    attempt.setId(81L);
+                    task.setCurrentAttemptId(81L);
+                    task.setPhase("QUEUED");
+                    return attempt;
+                });
 
         service.submit(new VideoSubmitService.SubmitRequest(null, "comfyui", "t2v", "test",
                 java.util.List.of(), java.util.List.of(), java.util.List.of(),
                 5, "16:9", null, null, "ui:pin-admin", "gpu-new"));
 
-        ArgumentCaptor<GenerateCommand> command = ArgumentCaptor.forClass(GenerateCommand.class);
-        verify(engine).submit(command.capture());
-        assertEquals("gpu-new", command.getValue().getNodeId());
+        verify(attemptService).stageCurrentAttempt(any(VideoTask.class),
+                org.mockito.ArgumentMatchers.eq(1), org.mockito.ArgumentMatchers.eq("gpu-new"));
+        verify(asyncJobService).enqueue(
+                org.mockito.ArgumentMatchers.eq(org.example.seedancegenarate.service.GenerationAttemptService.JOB_TYPE),
+                org.mockito.ArgumentMatchers.eq("attempt:81"),
+                org.mockito.ArgumentMatchers.eq("{\"attemptId\":81}"));
+        verify(engine, never()).submit(any());
     }
 }

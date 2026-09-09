@@ -122,6 +122,66 @@ public class ComfyUiClient {
         return objectMapper.readTree(resp.body());
     }
 
+    /**
+     * 用 ComfyUI 入队时保存在 extra_data.client_id 的稳定请求号找回 prompt_id。
+     * 顺序与丢失判定一致：history → queue → history，避免作业恰好在两次读取之间完成时漏掉。
+     */
+    public String findPromptIdByClientId(String baseUrl, String clientId, int timeoutMs) throws Exception {
+        if (!StringUtils.hasText(clientId)) {
+            throw new IllegalArgumentException("ComfyUI clientId 不能为空");
+        }
+        JsonNode history = getRecentHistory(baseUrl, timeoutMs);
+        String found = findInHistory(history, clientId);
+        if (found != null) {
+            return found;
+        }
+        JsonNode queue = getQueue(baseUrl, timeoutMs);
+        found = findInQueue(queue, clientId);
+        if (found != null) {
+            return found;
+        }
+        return findInHistory(getRecentHistory(baseUrl, timeoutMs), clientId);
+    }
+
+    private JsonNode getRecentHistory(String baseUrl, int timeoutMs) throws Exception {
+        HttpResponse resp = withAuth(HttpRequest.get(baseUrl + "/history?max_items=200"))
+                .timeout(timeoutMs)
+                .execute();
+        if (!resp.isOk()) {
+            throw new RuntimeException("ComfyUI 查询最近历史失败: " + resp.getStatus() + " " + resp.body());
+        }
+        return objectMapper.readTree(resp.body());
+    }
+
+    static String findInQueue(JsonNode queue, String clientId) {
+        for (String key : new String[]{"queue_running", "queue_pending"}) {
+            for (JsonNode item : queue.path(key)) {
+                if (item.isArray() && item.size() > 3
+                        && clientId.equals(item.get(3).path("client_id").asText(null))) {
+                    String promptId = item.size() > 1 ? item.get(1).asText(null) : null;
+                    return StringUtils.hasText(promptId) ? promptId : null;
+                }
+            }
+        }
+        return null;
+    }
+
+    static String findInHistory(JsonNode history, String clientId) {
+        if (!history.isObject()) {
+            return null;
+        }
+        var fields = history.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            JsonNode prompt = entry.getValue().path("prompt");
+            if (prompt.isArray() && prompt.size() > 3
+                    && clientId.equals(prompt.get(3).path("client_id").asText(null))) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
     /** 队列负载 = 运行中 + 排队中；管理端健康检测用（要顺带拿到延迟与错误明细） */
     public int queueLoad(String baseUrl, int timeoutMs) throws Exception {
         JsonNode n = getQueue(baseUrl, timeoutMs);

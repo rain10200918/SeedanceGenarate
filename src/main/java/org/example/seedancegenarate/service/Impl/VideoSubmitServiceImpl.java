@@ -11,10 +11,10 @@ import org.example.seedancegenarate.engine.CompletionMechanism;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
-import org.example.seedancegenarate.engine.SubmitResult;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.ApiKey;
+import org.example.seedancegenarate.entity.GenerationAttempt;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.exception.ConcurrencyLimitExceededException;
 import org.example.seedancegenarate.exception.BusinessException;
@@ -26,6 +26,8 @@ import org.example.seedancegenarate.service.ConcurrencyLimit;
 import org.example.seedancegenarate.service.ConcurrencyPolicy;
 import org.example.seedancegenarate.event.TaskSubmittedEvent;
 import org.example.seedancegenarate.service.ModelAccessService;
+import org.example.seedancegenarate.service.AsyncJobService;
+import org.example.seedancegenarate.service.GenerationAttemptService;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoSubmitService;
@@ -33,7 +35,11 @@ import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.service.WalletService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
@@ -44,7 +50,7 @@ import java.util.UUID;
 
 /**
  * 提交编排实现。从 {@code VideoController} 提取（UI/API 共用）：
- * 解析实际生效模型 → 开放闸门 → 落库 → 引擎提交 → 回写 → 提交即计费。
+ * 解析实际生效模型 → 开放闸门 → 落库/冻结/attempt/job；供应商 HTTP 只由 Worker 执行。
  */
 @Slf4j
 @Service
@@ -64,6 +70,11 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final ApiKeyMapper apiKeyMapper;
     private final ConcurrencyPolicy concurrencyPolicy;
     private final AdmissionControl admissionControl;
+    private final GenerationAttemptService generationAttemptService;
+    private final AsyncJobService asyncJobService;
+    private final TransactionTemplate transactionTemplate;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.StoredImageReferences storedReferences;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -78,6 +89,12 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                 .eq(VideoTask::getUserId, userId)
                 .eq(VideoTask::getRequestId, requestId.trim())
                 .last("limit 1"), false);
+    }
+
+    @Override
+    public VideoTask findAcceptedByRequestId(Long userId, String requestId) {
+        VideoTask existing = findByRequestId(userId, requestId);
+        return existing == null ? null : requireDurableRequestWinner(existing);
     }
 
     @Override
@@ -119,10 +136,20 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
     @Override
     public VideoTask submit(SubmitRequest request) throws Exception {
+        return submitInternal(request,null);
+    }
+
+    @Override
+    public VideoTask submitApproved(SubmitRequest request, PriceEstimate approved) throws Exception {
+        if(approved==null || approved.amount()==null || approved.amount().signum()<0 || approved.currency()==null)
+            throw BusinessException.badRequest("缺少有效的费用确认");
+        return submitInternal(request,approved);
+    }
+
+    private VideoTask submitInternal(SubmitRequest request, PriceEstimate approved) throws Exception {
         validatePinnedNode(request.provider(), request.nodeId());
         ResolvedSpec spec = resolveSpec(request.provider(), request.model(), request.duration());
         String provider = spec.provider();
-        VideoEngine engine = spec.engine();
         String effectiveModel = spec.effectiveModel();
         Integer duration = spec.duration();
         String ratio = (request.ratio() == null || request.ratio().isBlank()) ? "16:9" : request.ratio();
@@ -131,9 +158,12 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         List<String> imageUrls = request.imageUrls() == null ? Collections.emptyList() : request.imageUrls();
         List<String> videoUrls = request.videoUrls() == null ? Collections.emptyList() : request.videoUrls();
         List<String> audioUrls = request.audioUrls() == null ? Collections.emptyList() : request.audioUrls();
-        boolean hasImages = !imageUrls.isEmpty();
+        var stored=request.storedImageReferences()==null?List.<org.example.seedancegenarate.service.StoredImageReferences.Reference>of():request.storedImageReferences();
+        if(!stored.isEmpty()) {
+            if(storedReferences==null || stored.size()!=1 || !imageUrls.isEmpty()) throw new IllegalArgumentException("内部参考图片无效");
+            for(var reference:stored) storedReferences.validate(request.userId(),reference);
+        }
         OutputType outputType = spec.outputType();
-        GenerationMode mode = GenerationMode.of(hasImages, outputType);
 
         // 幂等键由调用方在重试时复用；未提供时生成一次性键（UI 单次点击仍安全）。
         String requestId = StringUtils.hasText(request.requestId())
@@ -149,7 +179,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
                             .eq(VideoTask::getRequestId, requestId)
                             .last("limit 1"), false);
             if (existing != null) {
-                return existing;
+                return requireDurableRequestWinner(existing);
             }
         }
 
@@ -161,7 +191,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setBizTaskId(bizTaskId);
         task.setTaskId(bizTaskId);
         task.setPrompt(request.prompt());
-        task.setImages(hasImages ? objectMapper.writeValueAsString(imageUrls) : null);
+        task.setImages(imageUrls.isEmpty()?null:objectMapper.writeValueAsString(imageUrls));
+        task.setStoredImageReferences(stored.isEmpty()?null:objectMapper.writeValueAsString(stored));
         task.setReferenceVideos(videoUrls.isEmpty() ? null : objectMapper.writeValueAsString(videoUrls));
         task.setReferenceAudios(audioUrls.isEmpty() ? null : objectMapper.writeValueAsString(audioUrls));
         task.setDuration(duration);
@@ -170,6 +201,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setProvider(provider);
         task.setModel(effectiveModel);
         task.setOutputType(outputType.name());
+        task.setMegapixels(request.megapixels());
         task.setApiKeyId(request.apiKeyId());
         task.setRequestId(requestId);
         // 超时判定基准：本轮尝试起点（首次 = 创建时间）
@@ -177,10 +209,28 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 冻结金额先快照到任务再落库（结算/解冻用快照，防管理员改价后金额漂移）
         PricingService.Price freezePrice = pricingService.price(task);
         BigDecimal freezeAmount = freezePrice.amount();
+        if(approved!=null && (!java.util.Objects.equals(approved.provider(),provider)
+                || !java.util.Objects.equals(approved.model(),effectiveModel)
+                || !java.util.Objects.equals(approved.duration(),duration)
+                || !java.util.Objects.equals(approved.outputType(),outputType.name())
+                || !java.util.Objects.equals(approved.currency(),freezePrice.currency())
+                || freezeAmount==null || freezeAmount.compareTo(approved.amount())!=0))
+            throw BusinessException.conflict("生成报价发生变化，请重新确认费用");
         task.setFreezeAmount(freezeAmount);
         task.setFreezeUnitPrice(freezePrice.unitPrice());
         task.setFreezeCurrency(freezePrice.currency());
-        videoTaskService.save(task);
+        try {
+            if (!videoTaskService.save(task) || task.getId() == null) {
+                throw new IllegalStateException("创建生成任务失败");
+            }
+        } catch (DuplicateKeyException duplicate) {
+            // 两个实例可能同时通过上面的快查；唯一键决定赢家，输家直接返回赢家且不产生副作用。
+            VideoTask winner = findByRequestId(request.userId(), requestId);
+            if (winner != null) {
+                return requireDurableRequestWinner(winner);
+            }
+            throw duplicate;
+        }
 
         // 占并发槽位 + 预授权冻结（提交即占用额度）：任一失败 → 删除刚建的任务行并拒绝，不产生僵尸任务。
         // 冻结幂等（biz_key=task:{id}），超时重试不重复冻结；成功结算/失败解冻在终态入口统一处理。
@@ -190,46 +240,71 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 而且补偿成本一边是一次 ZREM，一边是一整个钱包事务。挑便宜的先做。
         try {
             admit(task);
-            walletService.freeze(request.userId(), freezeAmount, task.getId());
+            GenerationAttempt attempt = transactionTemplate.execute(status -> {
+                walletService.freeze(request.userId(), freezeAmount, task.getId());
+                GenerationAttempt staged = generationAttemptService.stageCurrentAttempt(
+                        task, 1, request.nodeId());
+                asyncJobService.enqueue(GenerationAttemptService.JOB_TYPE,
+                        GenerationAttemptService.jobKey(staged.getId()), jobPayload(staged.getId()));
+                return staged;
+            });
+            if (attempt == null) {
+                throw new IllegalStateException("创建生成提交作业失败");
+            }
         } catch (Exception e) {
+            // commit outcome unknown 时不能直接做破坏性补偿：事务可能已经提交，只是客户端没收到确认。
+            // 必须从数据库重新确认；一旦 attempt/job 的受理事实可见，就按成功受理返回。
+            VideoTask persisted;
+            try {
+                persisted = findByRequestId(request.userId(), requestId);
+            } catch (Exception recheckFailure) {
+                // DB 自身也无法证明事务未提交时，宁可交给对账回收，也不能删除可能已受理的任务。
+                e.addSuppressed(recheckFailure);
+                log.error("生成提交事务结果未知且持久化复查失败，跳过破坏性补偿: taskId={}, requestId={}",
+                        task.businessTaskId(), requestId, recheckFailure);
+                throw e;
+            }
+            if (isDurableRequestWinner(persisted)) {
+                log.warn("生成提交事务返回异常但 durable attempt 已可见，按已受理返回: taskId={}, requestId={}",
+                        persisted.businessTaskId(), requestId);
+                publishAfterCommit(new TaskSubmittedEvent(
+                        request.userId(), persisted.businessTaskId(), imageUrls));
+                return persisted;
+            }
             // ZREM 幂等，没占上也无害；顺序与占用相反，先放最外层的资源
             admissionControl.releaseQuietly(request.userId(), task.getId(), request.apiKeyId());
             videoTaskService.removeById(task.getId());
             throw e;
         }
-
-        GenerateCommand command = GenerateCommand.builder()
-                .mode(mode)
-                .imageUrls(imageUrls)
-                .videoUrls(videoUrls)
-                .audioUrls(audioUrls)
-                .prompt(request.prompt())
-                .duration(duration)
-                .ratio(ratio)
-                .model(effectiveModel)
-                .megapixels(request.megapixels())
-                .webhookUrl(resolveWebhookUrl(engine, provider))
-                .nodeId(StringUtils.hasText(request.nodeId()) ? request.nodeId().trim() : null)
-                .build();
-        log.info("提交生成任务: provider={}, model={}, taskId={}, webhookUrl={}",
-                provider, effectiveModel, task.businessTaskId(),
-                maskToken(command.getWebhookUrl()));
-        SubmitResult submit;
-        try {
-            submit = engine.submit(command);
-        } catch (Exception e) {
-            // 提交失败：统一走终态唯一入口（CAS + 幂等 + SSE）。否则会留下「PROCESSING + 空
-            // provider_task_id」的僵尸行，且 poller 只轮询已提交任务时永远不会碰它（清理不到）。
-            taskStatusTransitioner.markFailed(task.getId(), e.getMessage());
-            throw e;
-        }
-        task.setProviderTaskId(submit.getProviderTaskId());
-        task.setNodeId(submit.getNodeId());
-        videoTaskService.updateById(task);
-        // 这里只完成冻结；用户消费记录和 SETTLE 必须等成功终态，不因提交成功而提前扣费。
-        // 任务提交成功事件：异步提交
-        applicationEventPublisher.publishEvent(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
+        log.info("生成任务已持久化排队: provider={}, model={}, taskId={}, attemptId={}",
+                provider, effectiveModel, task.businessTaskId(), task.getCurrentAttemptId());
+        // 事务已经提交后再发事件；订阅者不会读到尚未可见的 task/attempt/job。
+        publishAfterCommit(new TaskSubmittedEvent(request.userId(), task.businessTaskId(), imageUrls));
         return task;
+    }
+
+    /**
+     * task 首行是独立 autocommit，短事务完成前并不代表请求已经可靠受理。
+     * 此时赢家仍可能因 admission/freeze/attempt/job 失败而补偿删除，不能把这个 ghost taskId 暴露出去。
+     */
+    private VideoTask requireDurableRequestWinner(VideoTask winner) {
+        if (isDurableRequestWinner(winner)) {
+            return winner;
+        }
+        throw BusinessException.conflict("同一请求正在受理，请稍后使用相同 requestId 重试");
+    }
+
+    private boolean isDurableRequestWinner(VideoTask winner) {
+        if (winner == null) {
+            return false;
+        }
+        if ("SUCCESS".equals(winner.getStatus()) || "FAILED".equals(winner.getStatus())) {
+            return true;
+        }
+        return "PROCESSING".equals(winner.getStatus())
+                && (winner.getCurrentAttemptId() != null
+                || StringUtils.hasText(winner.getPhase())
+                || StringUtils.hasText(winner.getProviderTaskId()));
     }
 
     /**
@@ -259,77 +334,88 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         }
     }
 
+    private String jobPayload(Long attemptId) {
+        try {
+            return objectMapper.writeValueAsString(new GenerationAttemptService.JobPayload(attemptId));
+        } catch (Exception e) {
+            throw new IllegalStateException("序列化生成提交作业失败", e);
+        }
+    }
+
+    private void publishAfterCommit(TaskSubmittedEvent event) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()
+                && TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    applicationEventPublisher.publishEvent(event);
+                }
+            });
+            return;
+        }
+        applicationEventPublisher.publishEvent(event);
+    }
+
     /**
-     * 超时自动重试：从已落库任务反推参数重新提交引擎。
+     * 超时自动重试：原子切换到新 attempt 并持久化 GENERATION_SUBMIT job。
      * 同一任务沿用原冻结金额，自动重跑不重复冻结；最终只成功结算一次。
      * <p>
-     * 并发安全：提交后 CAS 抢占 retry_count（{@code WHERE status='PROCESSING' AND retry_count=?}），
-     * 多实例 Worker 竞争时只有一方回写成功，另一方返回 false 收工。
+     * 并发安全：事务内先 CAS retry_count/current_attempt/phase，同时清掉旧远端标识，再 stage + enqueue；
+     * 多实例 Worker 竞争时只有一方能创建下一轮，另一方返回 false 收工。
      *
-     * @return true=本次执行了重提交；false=被其他实例抢先或任务已终态
+     * @return true=本次已把新轮次排队；false=被其他实例抢先或任务已终态
      */
     public boolean resubmit(VideoTask task) throws Exception {
         if (task == null || task.getId() == null || !"PROCESSING".equals(task.getStatus())) {
             return false;
         }
-        String provider = task.getProvider() == null || task.getProvider().isBlank()
-                ? defaultProvider : task.getProvider().trim();
-        VideoEngine engine = videoEngineRegistry.get(provider);
+        // 已经排队/提交中/待人工恢复，说明这个 TASK_RETRY 已完成或已经失去时机。
+        if (StringUtils.hasText(task.getPhase()) && !"RUNNING".equals(task.getPhase())) {
+            return false;
+        }
         String effectiveModel = task.getModel();
         // 重试时模型可能已被管理员关闭 → 不再重试，走失败
         assertModelOpen(effectiveModel);
-
-        List<String> imageUrls = parseJsonList(task.getImages());
-        List<String> videoUrls = parseJsonList(task.getReferenceVideos());
-        List<String> audioUrls = parseJsonList(task.getReferenceAudios());
-        boolean hasImages = !imageUrls.isEmpty();
-        GenerationMode mode = GenerationMode.of(hasImages, engine.outputType(effectiveModel));
-
-        GenerateCommand command = GenerateCommand.builder()
-                .mode(mode)
-                .imageUrls(imageUrls)
-                .videoUrls(videoUrls)
-                .audioUrls(audioUrls)
-                .prompt(task.getPrompt())
-                .duration(task.getDuration())
-                .ratio(task.getRatio())
-                .model(effectiveModel)
-                .webhookUrl(resolveWebhookUrl(engine, provider))
-                .build();
         int currentRetry = task.getRetryCount() == null ? 0 : task.getRetryCount();
-        log.info("超时自动重试提交: taskId={}, provider={}, model={}, 第 {} 次重试",
-                task.businessTaskId(), provider, effectiveModel, currentRetry + 1);
-        SubmitResult submit = engine.submit(command);
-
-        // CAS 抢占：仍 PROCESSING 且 retry_count 未被他人加过才回写；换新 provider_task_id 后
-        // 旧 id 的迟到回调/轮询自然失效（按 provider_task_id 匹配查不到），无需额外清理。
-        boolean updated = videoTaskService.update(new LambdaUpdateWrapper<VideoTask>()
-                .eq(VideoTask::getId, task.getId())
-                .eq(VideoTask::getStatus, "PROCESSING")
-                .eq(VideoTask::getRetryCount, currentRetry)
-                .set(VideoTask::getProviderTaskId, submit.getProviderTaskId())
-                .set(VideoTask::getNodeId, submit.getNodeId())
-                .set(VideoTask::getRetryCount, currentRetry + 1)
-                .set(VideoTask::getLastAttemptAt, LocalDateTime.now())
-                .set(VideoTask::getNextPollAt, null)); // NULL=立即可查，poller/对账立即接管新 id
-        if (!updated) {
-            log.warn("重试回写被抢先（任务已终态或已被重试），本次重试作废: taskId={}", task.businessTaskId());
-            return false;
+        Boolean staged = transactionTemplate.execute(status -> {
+            LambdaUpdateWrapper<VideoTask> claim = new LambdaUpdateWrapper<VideoTask>()
+                    .eq(VideoTask::getId, task.getId())
+                    .eq(VideoTask::getStatus, "PROCESSING")
+                    .eq(VideoTask::getRetryCount, currentRetry);
+            if (task.getCurrentAttemptId() == null) {
+                claim.isNull(VideoTask::getCurrentAttemptId);
+            } else {
+                claim.eq(VideoTask::getCurrentAttemptId, task.getCurrentAttemptId());
+            }
+            if (task.getPhase() == null) {
+                claim.isNull(VideoTask::getPhase);
+            } else {
+                claim.eq(VideoTask::getPhase, task.getPhase());
+            }
+            claim.set(VideoTask::getProviderTaskId, null)
+                    .set(VideoTask::getNodeId, null)
+                    .set(VideoTask::getRetryCount, currentRetry + 1)
+                    .set(VideoTask::getLastAttemptAt, LocalDateTime.now())
+                    .set(VideoTask::getNextPollAt, null);
+            if (!videoTaskService.update(claim)) {
+                return false;
+            }
+            task.setRetryCount(currentRetry + 1);
+            task.setProviderTaskId(null);
+            task.setNodeId(null);
+            GenerationAttempt attempt = generationAttemptService.stageCurrentAttempt(
+                    task, currentRetry + 2, null);
+            asyncJobService.enqueue(GenerationAttemptService.JOB_TYPE,
+                    GenerationAttemptService.jobKey(attempt.getId()), jobPayload(attempt.getId()));
+            return true;
+        });
+        if (Boolean.TRUE.equals(staged)) {
+            log.info("超时自动重试已排队: taskId={}, model={}, 第 {} 次重试, attemptId={}",
+                    task.businessTaskId(), effectiveModel, currentRetry + 1, task.getCurrentAttemptId());
+            return true;
         }
-        return true;
-    }
-
-    private List<String> parseJsonList(String json) {
-        if (!StringUtils.hasText(json)) {
-            return Collections.emptyList();
-        }
-        try {
-            return objectMapper.readValue(json, objectMapper.getTypeFactory()
-                    .constructCollectionType(List.class, String.class));
-        } catch (Exception e) {
-            log.warn("解析任务参考素材失败（按空处理）: {}", e.getMessage());
-            return Collections.emptyList();
-        }
+        log.warn("重试排队被抢先（任务已终态或已被重试）: taskId={}", task.businessTaskId());
+        return false;
     }
 
     /**

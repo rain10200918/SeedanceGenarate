@@ -13,18 +13,18 @@ public interface AsyncJobService {
     /** 延迟入队：available_at = now + delaySeconds 后才可领取（替代 RabbitMQ 延迟消息）。 */
     void enqueueDelayed(String jobType, String bizKey, String payload, long delaySeconds);
 
-    /** 领取一批 READY 作业（行级 CAS，多 Worker 并发安全）。 */
+    /** 领取一批 READY / 租约过期 RUNNING 作业（行锁 + fencing）。 */
     List<AsyncJob> claimBatch(String jobType, int batchSize, long leaseSeconds);
-
-    /** 领取单个作业（供对账补跑等场景）。 */
-    AsyncJob claim(String jobType, String bizKey, long leaseSeconds);
 
     /** 查询作业（供对账判断是否存在/状态）。 */
     AsyncJob find(String jobType, String bizKey);
 
-    /** 持有租约的 Worker 标记成功。 */
-    void complete(Long jobId, String leaseToken);
+    /** 续租；false 表示已被新 generation 接管或不再 RUNNING。 */
+    boolean renew(AsyncJob lease, long leaseSeconds);
 
-    /** 失败：未超次数按退避回 READY，超过则进入 DEAD。 */
-    void failAndRetry(Long jobId, String leaseToken, String error);
+    /** 持有当前 token + generation 的 Worker 标记成功。 */
+    boolean complete(AsyncJob lease);
+
+    /** 原子增加失败次数；false 表示租约已丢失，不得再改业务终态。 */
+    boolean failAndRetry(AsyncJob lease, String error);
 }

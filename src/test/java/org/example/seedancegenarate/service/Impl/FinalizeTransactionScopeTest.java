@@ -1,6 +1,9 @@
 package org.example.seedancegenarate.service.Impl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.entity.VideoTask;
+import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.CostRecordService;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskEtaService;
@@ -63,7 +66,9 @@ class FinalizeTransactionScopeTest {
     private WalletService walletService;
     private CostRecordService costRecordService;
     private TaskEtaService taskEtaService;
+    private AsyncJobService asyncJobService;
     private VideoTaskServiceImpl service;
+    private VideoTask task;
 
     private Boolean inTxDuringDownload;
     private Boolean inTxDuringSettle;
@@ -74,6 +79,7 @@ class FinalizeTransactionScopeTest {
         walletService = mock(WalletService.class);
         costRecordService = mock(CostRecordService.class);
         taskEtaService = mock(TaskEtaService.class);
+        asyncJobService = mock(AsyncJobService.class);
 
         TransactionTemplate template = mock(TransactionTemplate.class);
         when(template.execute(any())).thenAnswer(inv -> {
@@ -87,15 +93,21 @@ class FinalizeTransactionScopeTest {
         });
 
         service = spy(new VideoTaskServiceImpl(downloadService, costRecordService,
-                mock(ApplicationEventPublisher.class), null, taskEtaService, null, null,
+                mock(ApplicationEventPublisher.class), asyncJobService, taskEtaService, null, null,
                 walletService, mock(PricingService.class),
-                mock(org.example.seedancegenarate.service.AdmissionControl.class), template));
+                mock(org.example.seedancegenarate.service.AdmissionControl.class),
+                new ObjectMapper(), template));
 
-        VideoTask task = new VideoTask();
+        task = new VideoTask();
         task.setId(TASK_ID);
         task.setBizTaskId("tsk_910e6f83");
         task.setUserId(2L);
         task.setStatus("PROCESSING");
+        task.setPhase("FINALIZING");
+        task.setCurrentAttemptId(7L);
+        task.setProviderTaskId("remote-7");
+        task.setProvider("comfyui");
+        task.setRetryCount(0);
         task.setModel("minimax-h3-hd");
         task.setFreezeAmount(new BigDecimal("4.50"));
         org.mockito.Mockito.doReturn(task).when(service).getById(TASK_ID);
@@ -103,7 +115,7 @@ class FinalizeTransactionScopeTest {
 
         inTxDuringDownload = null;
         inTxDuringSettle = null;
-        when(downloadService.download(anyString(), anyString())).thenAnswer(inv -> {
+        when(downloadService.download(anyString(), anyString(), any(), anyString())).thenAnswer(inv -> {
             inTxDuringDownload = inTransaction.get();
             return artifact();
         });
@@ -116,7 +128,7 @@ class FinalizeTransactionScopeTest {
     private VideoDownloadService.DownloadedArtifact artifact() {
         return new VideoDownloadService.DownloadedArtifact("tsk_910e6f83.mp4",
                 new org.example.seedancegenarate.service.ArtifactStorage.StoredArtifact(
-                        "outputs/tsk_910e6f83/result.mp4", "video/mp4", 6785774L, "etag"));
+                        "outputs/tsk_910e6f83/attempt-7/result.mp4", "video/mp4", 6785774L, "etag"));
     }
 
     @Test
@@ -125,7 +137,7 @@ class FinalizeTransactionScopeTest {
         // 【怎么算红】把 @Transactional 加回方法上（或把 download 挪进回调）——
         //          一条数据库连接会陪着几十秒的网络 IO 空等，MySQL 侧挂长事务；
         //          实例数一多就是连接池耗尽
-        service.finalizeTask(TASK_ID, "http://node/view?filename=a.mp4");
+        service.finalizeTask(task, "http://node/view?filename=a.mp4");
 
         assertFalse(inTxDuringDownload, "下载不能在事务里");
     }
@@ -135,7 +147,7 @@ class FinalizeTransactionScopeTest {
         // 【测什么】结算仍在事务里（和落库 CAS 同一个）
         // 【怎么算红】事务缩过头，settle 跑到事务外 —— 落库成功但结算失败时不会一起回滚，
         //          任务显示成功却没扣钱，且对账要到第二天才发现
-        service.finalizeTask(TASK_ID, "http://node/view?filename=a.mp4");
+        service.finalizeTask(task, "http://node/view?filename=a.mp4");
 
         assertTrue(inTxDuringSettle, "结算必须在事务里");
         verify(walletService).settle(eq(2L), eq(new BigDecimal("4.50")), eq(TASK_ID));
@@ -150,7 +162,7 @@ class FinalizeTransactionScopeTest {
                 .settle(any(), any(), anyLong());
 
         assertThrows(IllegalStateException.class,
-                () -> service.finalizeTask(TASK_ID, "http://node/a.mp4"));
+                () -> service.finalizeTask(task, "http://node/a.mp4"));
     }
 
     @Test
@@ -160,7 +172,7 @@ class FinalizeTransactionScopeTest {
         //          但那是最后一道防线，不该靠它兜
         org.mockito.Mockito.doReturn(false).when(service).update(any());
 
-        service.finalizeTask(TASK_ID, "http://node/a.mp4");
+        service.finalizeTask(task, "http://node/a.mp4");
 
         verify(walletService, never()).settle(any(), any(), anyLong());
         verify(taskEtaService, never()).refreshAvgDuration(anyString());
@@ -174,7 +186,7 @@ class FinalizeTransactionScopeTest {
         doThrow(new RuntimeException("Redis 连接超时")).when(taskEtaService)
                 .refreshAvgDuration(anyString());
 
-        service.finalizeTask(TASK_ID, "http://node/a.mp4");
+        service.finalizeTask(task, "http://node/a.mp4");
 
         verify(walletService).settle(any(), any(), anyLong());
     }
@@ -188,9 +200,27 @@ class FinalizeTransactionScopeTest {
         done.setStatus("SUCCESS");
         org.mockito.Mockito.doReturn(done).when(service).getById(TASK_ID);
 
-        service.finalizeTask(TASK_ID, "http://node/a.mp4");
+        service.finalizeTask(task, "http://node/a.mp4");
 
-        verify(downloadService, never()).download(anyString(), anyString());
+        verify(downloadService, never()).download(anyString(), anyString(), any(), anyString());
         assertEquals(null, inTxDuringDownload);
+    }
+
+    @Test
+    void lostFinalizeLeaseCannotCommitDownloadedArtifact() throws Exception {
+        // 【测什么】下载结束后若本 generation 的 job lease 已丢失，不得提交产物/结算/complete。
+        // 【怎么算红】只在下载前看身份、最终短事务不 renew，会让旧 Worker 覆盖接管者结果。
+        AsyncJob lease = new AsyncJob();
+        lease.setId(88L);
+        lease.setLeaseToken("old-token");
+        lease.setLeaseGeneration(1L);
+        when(asyncJobService.renew(lease, 300)).thenReturn(false);
+
+        service.finalizeTask(task, "http://node/a.mp4", lease, 300);
+
+        verify(downloadService).download(anyString(), anyString(), eq(7L), eq("comfyui"));
+        verify(service, never()).update(any());
+        verify(walletService, never()).settle(any(), any(), anyLong());
+        verify(asyncJobService, never()).complete(lease);
     }
 }

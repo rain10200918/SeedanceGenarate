@@ -15,10 +15,10 @@ public class AsyncJobProperties {
     private long initialDelayMs = 10_000;
     /** Redis 作业可用通知频道（事件驱动：入队即唤醒消费，无需忙等）。 */
     private String channel = "local:seedance:event:job-available";
-    /** 单轮领取上限。 */
-    private int claimBatchSize = 20;
-    /** 租约时长（秒）：超过后其他 Worker 可接管（崩溃恢复）。 */
-    private long leaseSeconds = 60;
+    /** 每个实例真正执行持久化作业的固定槽位数。 */
+    private int workerThreads = 8;
+    /** 兜底扫描的正负抖动百分比，避免多实例同时查 MySQL。 */
+    private int reconcileJitterPercent = 20;
     /** 默认最大重试次数。 */
     private int maxAttempts = 5;
     /** 失败退避基准秒数（第 n 次失败 = base * 2^(n-1)）。 */

@@ -42,6 +42,9 @@ public interface PipelineService {
     /** 提交分镜节点（作业消费方调用；调用方必须先原子占位防并发双提交） */
     void submitNodeForJob(Long nodeId) throws Exception;
 
+    /** 作业消费方调用：提交及补链都必须属于 payload 固化的运行代际。 */
+    void submitNodeForJob(Long nodeId, String expectedRequestId) throws Exception;
+
     /**
      * 对账一条 RUNNING 流水线：节点全终态则汇总状态；存在 PENDING 节点但没有活跃
      * 提交作业时补插作业（替代旧的「启动时全量置 PARTIAL_FAILED」恢复方式）。

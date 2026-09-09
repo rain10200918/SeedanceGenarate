@@ -19,6 +19,29 @@ public interface VideoEngine {
     SubmitResult submit(GenerateCommand command) throws Exception;
 
     /**
+     * 带提交观察器的入口。多节点引擎在任何不可逆远端调用前报告实际节点；
+     * 单节点/外部引擎沿用默认实现即可。
+     */
+    default SubmitResult submit(GenerateCommand command, SubmissionObserver observer) throws Exception {
+        return submit(command);
+    }
+
+    @FunctionalInterface
+    interface SubmissionObserver {
+        void onNodeSelected(String nodeId);
+    }
+
+    /** 当前引擎能否用稳定请求号找回“已接单但响应丢失”的远端任务。 */
+    default boolean supportsSubmissionRecovery() {
+        return false;
+    }
+
+    /** 找到返回远端任务；可达但未找到返回 null；查询失败抛异常交给持久化作业退避。 */
+    default SubmitResult findSubmission(String providerRequestId, String nodeId) throws Exception {
+        throw new UnsupportedOperationException("该提供方不支持提交恢复");
+    }
+
+    /**
      * 查询任务状态，返回归一化结果。
      */
     RemoteStatus poll(VideoTask task) throws Exception;

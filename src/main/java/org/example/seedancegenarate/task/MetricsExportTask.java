@@ -72,7 +72,7 @@ public class MetricsExportTask {
         }
     }
 
-    /** 生成中任务数（按引擎）+ 卡死数（超过超时阈值仍 PROCESSING）+ 近 5 分钟成功/失败 */
+    /** 生成中任务数（按引擎）+ 需人工恢复/卡死数 + 近 5 分钟成功/失败 */
     private void exportTaskCounts() {
         List<Map<String, Object>> byProvider = videoTaskMapper.selectMaps(
                 Wrappers.<VideoTask>query()
@@ -84,6 +84,12 @@ public class MetricsExportTask {
             long cnt = row.get("cnt") == null ? 0 : ((Number) row.get("cnt")).longValue();
             setGauge("task_processing_count", new String[]{"provider"}, new String[]{provider}, cnt);
         }
+
+        // 提交超时/断连时不能盲目重投；停在这个内部阶段的任务必须立即可见。
+        long recoveryRequired = videoTaskMapper.selectCount(Wrappers.<VideoTask>lambdaQuery()
+                .eq(VideoTask::getStatus, "PROCESSING")
+                .eq(VideoTask::getPhase, "RECOVERY_REQUIRED"));
+        setGauge("task_recovery_required_count", new String[0], new String[0], recoveryRequired);
 
         // 卡死数：超过超时阈值仍 PROCESSING（决策每 30s 处理，正常应接近 0）
         long stuck = videoTaskMapper.selectCount(Wrappers.<VideoTask>lambdaQuery()

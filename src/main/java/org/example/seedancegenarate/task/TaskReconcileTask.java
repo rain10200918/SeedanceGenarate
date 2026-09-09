@@ -5,14 +5,9 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.DistributedLockProperties;
-import org.example.seedancegenarate.engine.GenerationState;
-import org.example.seedancegenarate.engine.RemoteStatus;
-import org.example.seedancegenarate.engine.VideoEngine;
-import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.DistributedLock;
 import org.example.seedancegenarate.service.WalletService;
-import org.example.seedancegenarate.service.TaskRetryPolicy;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,16 +27,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * 任务完成对账（兜底，低频）：四分支，分布式锁保证多实例下只有一台执行：
  * <ol>
  *   <li><b>到期推进</b>：按 next_poll_at 到期兜底（事件驱动任务 60s 查一次；轮询任务仅在 poller 卡死时接管）；</li>
- *   <li><b>超龄决策</b>：本轮尝试（last_attempt_at）超过阈值仍 PROCESSING → 最后 poll 确认 →
- *       ON_SUCCESS 计费引擎（免费）入队 TASK_RETRY 自动重试；提交即计费引擎 / 重试耗尽 → 超时终止；</li>
+ *   <li><b>超龄推进</b>：本轮尝试（last_attempt_at）超过阈值仍 PROCESSING → 入队 TASK_POLL，
+ *       由统一 Worker 完成最后查询与重试决策；</li>
  *   <li><b>提交断裂</b>：PROCESSING 且 provider_task_id 一直为空（提交链路断裂）→ 超时终止；</li>
  *   <li><b>账务补偿</b>：终态任务缺失 SETTLE/RELEASE 流水 → 按 biz_key 幂等补。</li>
  * </ol>
  * 处理结果与回调/轮询走同一入口（updateStatus / TaskStatusTransitioner），CAS + 幂等。
  * <p>
- * <b>四个分支各带独立时间预算</b>（见 {@link #perBranchBudgetMs()}）：分支①②要发网络请求，
- * 一台 hang 住的节点能把整轮拖过锁 TTL——那时另一实例会并发进来，且排在最后的账务补偿
- * 这一轮根本轮不到执行。超预算的活不会丢：四个分支查的都是「还没处理的活」，下一轮接着做。
+ * <b>本定时器只生产持久化作业，不做供应商网络请求。</b>四个分支仍保留独立时间预算
+ * （见 {@link #perBranchBudgetMs()}），避免数据库/钱包异常让后续补偿长期得不到执行。
  */
 @Slf4j
 @Component
@@ -69,11 +63,9 @@ public class TaskReconcileTask {
     private final AtomicLong reconcileRounds = new AtomicLong();
 
     private final VideoTaskService videoTaskService;
-    private final VideoEngineRegistry videoEngineRegistry;
     private final VideoTaskPoller videoTaskPoller;
     private final TaskStatusTransitioner taskStatusTransitioner;
     private final WalletService walletService;
-    private final TaskRetryPolicy taskRetryPolicy;
     private final DistributedLock distributedLock;
     private final DistributedLockProperties lockProperties;
 
@@ -87,9 +79,6 @@ public class TaskReconcileTask {
     /** 提交断裂判定阈值（分钟）：PROCESSING 且 provider_task_id 为空超过该时长视为提交断裂 */
     @Value("${video.submit-stall-minutes:10}")
     private long submitStallMinutes;
-
-    @Value("${video.default-provider:seedance}")
-    private String defaultProvider;
 
     /** 单轮对账的时间预算（毫秒），四个分支平分；实际生效值被锁 TTL 的一半夹死 */
     @Value("${video.reconcile-round-budget-ms:60000}")
@@ -256,12 +245,14 @@ public class TaskReconcileTask {
         }
     }
 
-    /** 分支①：next_poll_at 到期兜底（现状保留）。 */
+    /** 分支①：next_poll_at 到期兜底，只入队，不在定时线程做网络 I/O。 */
     private void reconcileDue(long deadline) {
         LocalDateTime now = LocalDateTime.now();
         LambdaQueryWrapper<VideoTask> wrapper = Wrappers.<VideoTask>lambdaQuery()
                 .eq(VideoTask::getStatus, "PROCESSING")
                 .isNotNull(VideoTask::getProviderTaskId)
+                .and(w -> w.isNull(VideoTask::getPhase)
+                        .or().eq(VideoTask::getPhase, "RUNNING"))
                 .ge(VideoTask::getCreateTime, now.minusHours(maxAgeHours))
                 // NULL = 从未排期（事件驱动任务提交后）→ 立即可查；非 NULL 到期才查
                 .and(w -> w.isNull(VideoTask::getNextPollAt)
@@ -287,7 +278,7 @@ public class TaskReconcileTask {
             }
             processed++;
             try {
-                videoTaskPoller.advanceTask(task);
+                videoTaskPoller.enqueuePoll(task);
             } catch (Exception e) {
                 log.warn("对账推进任务 {} 失败: {}", task.businessTaskId(), e.getMessage());
             }
@@ -295,9 +286,8 @@ public class TaskReconcileTask {
     }
 
     /**
-     * 分支②：超龄任务决策。本轮尝试（last_attempt_at，首次=create_time）超过阈值仍
-     * PROCESSING → 最后 poll 确认（引擎可能刚好完成）→ 仍无结果则按引擎重试能力决策。
-     * 超时是硬截止：poll 异常（节点不可达）也直接终止，不再无限等待。
+     * 分支②：超龄任务推进。本轮尝试超过阈值仍 PROCESSING 时只入队 TASK_POLL；
+     * 最后查询、重投或终止均由带租约/heartbeat 的 Worker 处理。
      */
     private void reconcileStalled(long deadline) {
         LocalDateTime cutoff = LocalDateTime.now().minusMinutes(timeoutMinutes);
@@ -306,6 +296,8 @@ public class TaskReconcileTask {
             stalled = videoTaskService.list(Wrappers.<VideoTask>lambdaQuery()
                     .eq(VideoTask::getStatus, "PROCESSING")
                     .isNotNull(VideoTask::getProviderTaskId)
+                    .and(w -> w.isNull(VideoTask::getPhase)
+                            .or().eq(VideoTask::getPhase, "RUNNING"))
                     .lt(VideoTask::getLastAttemptAt, cutoff)
                     .orderByAsc(VideoTask::getId)
                     .last("limit 50"));
@@ -321,19 +313,9 @@ public class TaskReconcileTask {
             }
             processed++;
             try {
-                VideoEngine engine = engineOf(task);
-                RemoteStatus status = engine.poll(task);
-                if (status.getState() != GenerationState.PROCESSING) {
-                    // 引擎刚好完成：正常终态化（updateStatus 幂等）
-                    videoTaskService.updateStatus(task, status);
-                    continue;
-                }
-                taskRetryPolicy.retryOrFail(task, engine, "任务执行超时");
+                videoTaskPoller.enqueuePoll(task);
             } catch (Exception e) {
-                // poll 异常（节点不可达等）：以前一律硬截止判失败——但节点死了不代表用户的活该失败，
-                // 别的节点可能正闲着。可免费重投的引擎优先重投，重投耗尽才终止。
-                log.warn("超龄任务最后确认失败: taskId={}, reason={}", task.businessTaskId(), e.getMessage());
-                taskRetryPolicy.retryOrFail(task, "任务执行超时，且最后状态查询失败");
+                log.warn("超龄任务入队失败: taskId={}, reason={}", task.businessTaskId(), e.getMessage());
             }
         }
     }
@@ -351,6 +333,11 @@ public class TaskReconcileTask {
             broken = videoTaskService.list(Wrappers.<VideoTask>lambdaQuery()
                     .eq(VideoTask::getStatus, "PROCESSING")
                     .isNull(VideoTask::getProviderTaskId)
+                    // 新异步链路的 QUEUED/SUBMITTING/RECOVERY_REQUIRED 都可能暂时没有 provider id；
+                    // 这里只兜底迁移前没有 attempt 事实的旧任务，避免把健康队列误判为断裂。
+                    .isNull(VideoTask::getCurrentAttemptId)
+                    .and(w -> w.isNull(VideoTask::getPhase)
+                            .or().ne(VideoTask::getPhase, "RECOVERY_REQUIRED"))
                     .lt(VideoTask::getCreateTime, cutoff)
                     .orderByAsc(VideoTask::getId)
                     .last("limit 50"));
@@ -366,13 +353,9 @@ public class TaskReconcileTask {
             }
             processed++;
             log.warn("提交断裂，终止任务: taskId={}, provider={}", task.businessTaskId(), task.getProvider());
-            taskStatusTransitioner.markTimedOut(task.getId(), "任务提交未完成，已终止（可重新提交）");
+            taskStatusTransitioner.markTimedOutIfCurrent(
+                    task, "任务提交未完成，已终止（可重新提交）");
         }
     }
 
-    private VideoEngine engineOf(VideoTask task) {
-        String provider = task.getProvider();
-        return videoEngineRegistry.get((provider == null || provider.isBlank())
-                ? defaultProvider : provider.trim());
-    }
 }

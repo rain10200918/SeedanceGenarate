@@ -1,24 +1,21 @@
 package org.example.seedancegenarate.task;
 
-import com.baomidou.mybatisplus.core.MybatisConfiguration;
-import com.baomidou.mybatisplus.core.conditions.Wrapper;
-import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.ibatis.builder.MapperBuilderAssistant;
-import org.example.seedancegenarate.config.AsyncJobProperties;
 import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -26,59 +23,111 @@ import static org.mockito.Mockito.when;
 
 class TaskFinalizeConsumerTest {
 
-    static {
-        // 纯 mock 环境无 MyBatis-Plus 初始化：手动装载实体元数据，使 LambdaUpdateWrapper 可用
-        TableInfoHelper.initTableInfo(
-                new MapperBuilderAssistant(new MybatisConfiguration(), ""), VideoTask.class);
-    }
-
     @Test
     void completesJobAfterSuccessfulFinalization() throws Exception {
+        // 【测什么】当前 attempt 的转存成功后收掉这一代租约。
+        // 【怎么算红】丢失 payload identity 或 finalizeTask 成功后不 complete 时，这条必须变红。
         AsyncJobService jobs = mock(AsyncJobService.class);
         VideoTaskService tasks = mock(VideoTaskService.class);
-        AsyncJob job = claimedJob(1L, 0, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
-        when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
-                .thenReturn(List.of(job));
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, mock(TaskStatusTransitioner.class), properties(), new ObjectMapper());
+        VideoTask task = finalizingTask(10L, 7L, "remote-7");
+        when(tasks.getById(10L)).thenReturn(task);
+        AsyncJob job = claimedJob(1L, 0, 5, payload(10L, 7L, "remote-7"));
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(
+                jobs, tasks, mock(TaskStatusTransitioner.class), new ObjectMapper(), transactionTemplate());
 
-        consumer.consumePendingFinalizes();
+        consumer.execute(job);
 
-        verify(tasks).finalizeTask(10L, "https://x/a.mp4");
-        verify(jobs).complete(1L, "token");
+        verify(tasks).finalizeTask(task, "https://x/a.mp4", job, 300);
+        verify(jobs, never()).complete(job); // job 与 SUCCESS 由 service 内部同事务完成
     }
 
     @Test
-    void marksTaskFailedAndBacksOffWhenRetriesExhausted() throws Exception {
+    void exhaustedFinalizeTerminalizesTaskBeforeCompletingJob() throws Exception {
+        // 【测什么】最后一次先 renew，再用 execution identity 终态任务，最后 complete job。
+        // 【怎么算红】先 failAndRetry 会重现 DEAD+PROCESSING，或无 identity 会误伤新 attempt。
         AsyncJobService jobs = mock(AsyncJobService.class);
         VideoTaskService tasks = mock(VideoTaskService.class);
-        org.mockito.Mockito.doThrow(new IllegalStateException("下载失败"))
-                .when(tasks).finalizeTask(eq(10L), any());
-        AsyncJob job = claimedJob(1L, 4, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
-        when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
-                .thenReturn(List.of(job));
         TaskStatusTransitioner transitioner = mock(TaskStatusTransitioner.class);
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, transitioner, properties(), new ObjectMapper());
+        VideoTask task = finalizingTask(10L, 7L, "remote-7");
+        when(tasks.getById(10L)).thenReturn(task);
+        AsyncJob job = claimedJob(1L, 4, 5, payload(10L, 7L, "remote-7"));
+        when(jobs.complete(job)).thenReturn(true);
+        doThrow(new IllegalStateException("下载失败")).when(tasks)
+                .finalizeTask(eq(task), any(), eq(job), eq(300L));
+        when(jobs.renew(job, 300)).thenReturn(true);
+        when(transitioner.markFailedIfCurrent(eq(task), any())).thenReturn(true);
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(
+                jobs, tasks, transitioner, new ObjectMapper(), transactionTemplate());
 
-        consumer.consumePendingFinalizes();
+        consumer.execute(job);
 
-        verify(jobs).failAndRetry(eq(1L), eq("token"), any());
-        verify(transitioner).markFailed(eq(10L), any());
+        verify(jobs).renew(job, 300);
+        verify(jobs, never()).failAndRetry(eq(job), any());
+        verify(transitioner).markFailedIfCurrent(eq(task), any());
+        verify(jobs).complete(job);
     }
 
     @Test
-    void completesJobWithoutRetryingWhenTaskAlreadyFinalizedByAnotherWorker() throws Exception {
+    void staleLeaseCannotMarkVideoTaskFailed() throws Exception {
+        // 【测什么】最后一次但 renew 失败的旧 owner 不得写业务终态。
+        // 【怎么算红】忽略 renew false 会让旧 Worker 覆盖新 owner。
         AsyncJobService jobs = mock(AsyncJobService.class);
         VideoTaskService tasks = mock(VideoTaskService.class);
-        // finalizeTask 对已终态任务幂等返回（CAS 失败不抛异常，mock 默认 no-op）
-        AsyncJob job = claimedJob(1L, 0, 5, "{\"videoTaskId\":10,\"remoteVideoUrl\":\"https://x/a.mp4\"}");
-        when(jobs.claimBatch(eq("TASK_FINALIZE"), any(Integer.class), any(Long.class)))
-                .thenReturn(List.of(job));
-        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(jobs, tasks, mock(TaskStatusTransitioner.class), properties(), new ObjectMapper());
+        TaskStatusTransitioner transitioner = mock(TaskStatusTransitioner.class);
+        VideoTask task = finalizingTask(10L, 7L, "remote-7");
+        when(tasks.getById(10L)).thenReturn(task);
+        AsyncJob job = claimedJob(1L, 4, 5, payload(10L, 7L, "remote-7"));
+        when(jobs.complete(job)).thenReturn(true);
+        doThrow(new IllegalStateException("下载失败")).when(tasks)
+                .finalizeTask(eq(task), any(), eq(job), eq(300L));
+        when(jobs.renew(job, 300)).thenReturn(false);
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(
+                jobs, tasks, transitioner, new ObjectMapper(), transactionTemplate());
 
-        consumer.consumePendingFinalizes();
+        consumer.execute(job);
 
-        verify(jobs).complete(1L, "token");
-        verify(tasks, never()).update(any(Wrapper.class));
+        verify(transitioner, never()).markFailedIfCurrent(any(), any());
+        verify(jobs, never()).complete(job);
+    }
+
+    @Test
+    void obsoleteAttemptJobCompletesWithoutDownloading() throws Exception {
+        // 【测什么】旧 attempt 的 finalize payload 遇到新 current attempt 时直接收掉。
+        // 【怎么算红】只按 taskId 处理会下载旧产物并可能覆盖新轮次。
+        AsyncJobService jobs = mock(AsyncJobService.class);
+        VideoTaskService tasks = mock(VideoTaskService.class);
+        VideoTask current = finalizingTask(10L, 8L, "remote-8");
+        when(tasks.getById(10L)).thenReturn(current);
+        AsyncJob job = claimedJob(1L, 0, 5, payload(10L, 7L, "remote-7"));
+        TaskFinalizeConsumer consumer = new TaskFinalizeConsumer(
+                jobs, tasks, mock(TaskStatusTransitioner.class), new ObjectMapper(), transactionTemplate());
+
+        consumer.execute(job);
+
+        verify(tasks, never()).finalizeTask(any(), any(), any(), anyLong());
+        verify(jobs).complete(job);
+    }
+
+    private String payload(long taskId, long attemptId, String providerTaskId) {
+        return "{\"videoTaskId\":" + taskId
+                + ",\"expectedAttemptId\":" + attemptId
+                + ",\"expectedProviderTaskId\":\"" + providerTaskId
+                + "\",\"expectedProvider\":\"seedance\""
+                + ",\"expectedPhase\":\"FINALIZING\""
+                + ",\"expectedRetryCount\":0"
+                + ",\"remoteVideoUrl\":\"https://x/a.mp4\"}";
+    }
+
+    private VideoTask finalizingTask(long id, long attemptId, String providerTaskId) {
+        VideoTask task = new VideoTask();
+        task.setId(id);
+        task.setStatus("PROCESSING");
+        task.setPhase("FINALIZING");
+        task.setRetryCount(0);
+        task.setCurrentAttemptId(attemptId);
+        task.setProviderTaskId(providerTaskId);
+        task.setProvider("seedance");
+        return task;
     }
 
     private AsyncJob claimedJob(Long id, int attempts, int maxAttempts, String payload) {
@@ -90,13 +139,14 @@ class TaskFinalizeConsumerTest {
         job.setAttempts(attempts);
         job.setMaxAttempts(maxAttempts);
         job.setLeaseToken("token");
+        job.setLeaseGeneration(1L);
         return job;
     }
 
-    private AsyncJobProperties properties() {
-        AsyncJobProperties properties = new AsyncJobProperties();
-        properties.setClaimBatchSize(20);
-        properties.setLeaseSeconds(60);
-        return properties;
+    private TransactionTemplate transactionTemplate() {
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        when(manager.getTransaction(any(TransactionDefinition.class)))
+                .thenReturn(mock(TransactionStatus.class));
+        return new TransactionTemplate(manager);
     }
 }

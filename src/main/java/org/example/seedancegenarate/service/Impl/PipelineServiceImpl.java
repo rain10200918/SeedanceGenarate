@@ -16,10 +16,12 @@ import org.example.seedancegenarate.mapper.UserAssetMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.PipelineService;
 import org.example.seedancegenarate.service.VideoSubmitService;
+import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.concurrent.Executor;
@@ -47,9 +49,11 @@ public class PipelineServiceImpl implements PipelineService {
     private final VideoSubmitService videoSubmitService;
     private final ObjectMapper objectMapper;
     private final AsyncJobService asyncJobService;
+    private final VideoTaskService videoTaskService;
     /** 流水线后台提交线程池（单线程串行：引擎一次只吃一个任务）；job-driven 关闭时使用 */
     @Qualifier("pipelineSubmitExecutor")
     private final Executor pipelineSubmitExecutor;
+    private final TransactionTemplate transactionTemplate;
 
     /** 是否走持久化作业驱动（true=默认）；false=旧版本地线程池（仅单实例灰度回滚用） */
     @Value("${pipeline.job-driven:true}")
@@ -186,6 +190,9 @@ public class PipelineServiceImpl implements PipelineService {
             }
             // 每个分镜节点入队持久化作业；biz_key 幂等，重复 run 会重置为 READY
             for (PipelineNode node : scenes) {
+                if ("SUCCESS".equals(node.getStatus()) || "PROCESSING".equals(node.getStatus())) {
+                    continue;
+                }
                 enqueueNodeSubmit(node, true);
             }
             return pipeline;
@@ -203,23 +210,35 @@ public class PipelineServiceImpl implements PipelineService {
     }
 
     /** 节点提交作业的业务幂等键；同一次运行只入队一次，节点重试会生成新的 runId。 */
-    public static String jobKey(Long pipelineId, Long nodeId) {
-        return "pipeline:" + pipelineId + ":node:" + nodeId;
+    public static String jobKey(Long pipelineId, Long nodeId, String requestId) {
+        return "pipeline:" + pipelineId + ":node:" + nodeId + ":request:" + requestId;
     }
 
     private void enqueueNodeSubmit(PipelineNode node, boolean newRun) {
         String requestId = newRun || !StringUtils.hasText(node.getSubmitRequestId())
                 ? newSubmitRequestId(node.getId())
                 : node.getSubmitRequestId();
-        if (!requestId.equals(node.getSubmitRequestId())) {
-            PipelineNode update = new PipelineNode();
-            update.setId(node.getId());
-            update.setSubmitRequestId(requestId);
-            pipelineNodeMapper.updateById(update);
-            node.setSubmitRequestId(requestId);
+        boolean startsNewGeneration = newRun || !StringUtils.hasText(node.getSubmitRequestId());
+        Boolean enqueued = transactionTemplate.execute(tx -> {
+            if (startsNewGeneration
+                    && pipelineNodeMapper.beginRun(node.getId(), node.getStatus(), requestId) != 1) {
+                return false;
+            }
+            asyncJobService.enqueue("PIPELINE_NODE_SUBMIT",
+                    jobKey(node.getPipelineId(), node.getId(), requestId),
+                    writeJobPayload(new NodeSubmitPayload(node.getId(), requestId)));
+            return true;
+        });
+        if (!Boolean.TRUE.equals(enqueued)) {
+            return;
         }
-        asyncJobService.enqueue("PIPELINE_NODE_SUBMIT", jobKey(node.getPipelineId(), node.getId()),
-                "{\"pipelineNodeId\":" + node.getId() + "}");
+        node.setSubmitRequestId(requestId);
+        if (startsNewGeneration) {
+            node.setStatus("PENDING");
+            node.setTaskId(null);
+            node.setVideoUrl(null);
+            node.setErrorMsg(null);
+        }
     }
 
     private String newSubmitRequestId(Long nodeId) {
@@ -244,10 +263,17 @@ public class PipelineServiceImpl implements PipelineService {
             return;
         }
         for (PipelineNode node : scenes) {
-            if (!"PENDING".equals(node.getStatus())) {
-                continue; // PROCESSING 等事件回填；终态节点无需作业
+            if ("PROCESSING".equals(node.getStatus()) && StringUtils.hasText(node.getTaskId())) {
+                catchUpFinishedTask(node);
+                continue;
             }
-            AsyncJob job = asyncJobService.find("PIPELINE_NODE_SUBMIT", jobKey(pipelineId, node.getId()));
+            if (!"PENDING".equals(node.getStatus())) {
+                continue; // 无关联的 PROCESSING 等提交补链；终态节点无需作业
+            }
+            AsyncJob job = StringUtils.hasText(node.getSubmitRequestId())
+                    ? asyncJobService.find("PIPELINE_NODE_SUBMIT",
+                    jobKey(pipelineId, node.getId(), node.getSubmitRequestId()))
+                    : null;
             if (job == null) {
                 // 实例重启丢失了内存提交循环后，这里补插作业让 Worker 接管；
                 // 没有提交过的节点才生成一次新的请求键，避免恢复扫描改变在途重试的幂等语义。
@@ -292,22 +318,32 @@ public class PipelineServiceImpl implements PipelineService {
         if (node == null || !Objects.equals(node.getPipelineId(), pipelineId)) {
             throw new RuntimeException("节点不存在");
         }
-        // 单节点执行：原子占位（PENDING/FAILED → PROCESSING），并发重复点击只有一次成功
-        if (pipelineNodeMapper.occupyForSubmit(nodeId) != 1) {
+        if (jobDriven) {
+            if ("PROCESSING".equals(node.getStatus())) {
+                throw new RuntimeException("该分镜正在生成中，请稍候");
+            }
+            enqueueNodeSubmit(node, true);
+            if (!"RUNNING".equals(pipeline.getStatus())) {
+                Pipeline patch = new Pipeline();
+                patch.setId(pipelineId);
+                patch.setStatus("RUNNING");
+                pipelineMapper.updateById(patch);
+            }
+            return node;
+        }
+        // 旧兼容路径：单节点执行时同步占位并提交。
+        String requestId = newSubmitRequestId(nodeId);
+        PipelineNode current = pipelineNodeMapper.selectById(nodeId);
+        if (current == null || pipelineNodeMapper.beginRun(
+                nodeId, current.getStatus(), requestId) != 1
+                || pipelineNodeMapper.occupyForSubmit(nodeId, requestId) != 1) {
             throw new RuntimeException("该分镜正在生成中，请稍候");
         }
-        // 手动重试代表一次新的业务运行：旧失败任务的 requestId 不能继续复用，
-        // 否则统一提交链路会命中旧任务并阻止真正重试。
-        PipelineNode retryRequest = new PipelineNode();
-        retryRequest.setId(nodeId);
-        retryRequest.setSubmitRequestId(newSubmitRequestId(nodeId));
-        retryRequest.setTaskId(null);
-        pipelineNodeMapper.updateById(retryRequest);
-        node.setSubmitRequestId(retryRequest.getSubmitRequestId());
+        node.setSubmitRequestId(requestId);
         node.setTaskId(null);
         node.setStatus("PROCESSING");
         try {
-            submitNodeForJob(nodeId);
+            submitNodeForJob(nodeId, requestId);
         } catch (Exception e) {
             node.setStatus("FAILED");
             node.setErrorMsg(truncate(e.getMessage()));
@@ -319,26 +355,59 @@ public class PipelineServiceImpl implements PipelineService {
     }
 
     @Override
+    @Transactional
     public void applyTaskFinished(String taskId, String status, String videoUrl, String errorMsg) {
+        applyTaskFinishedInCurrentTransaction(taskId, status, videoUrl, errorMsg);
+    }
+
+    private void applyTaskFinishedInCurrentTransaction(String taskId, String status,
+                                                       String videoUrl, String errorMsg) {
         if (!StringUtils.hasText(taskId)) return;
         PipelineNode node = pipelineNodeMapper.selectOne(
                 new LambdaQueryWrapper<PipelineNode>().eq(PipelineNode::getTaskId, taskId));
         if (node == null) return;
+        String terminalVideoUrl;
+        String terminalError;
         if ("SUCCESS".equals(status)) {
-            node.setStatus("SUCCESS");
-            node.setVideoUrl(videoUrl);
-            node.setErrorMsg(null);
+            terminalVideoUrl = videoUrl;
+            terminalError = "";
         } else if ("FAILED".equals(status)) {
-            node.setStatus("FAILED");
-            node.setErrorMsg(truncate(errorMsg));
+            terminalVideoUrl = null;
+            terminalError = truncate(errorMsg);
         } else {
             return;
         }
-        pipelineNodeMapper.updateById(node);
+        // 查询与事件回填之间可能开始了新一轮；旧 taskId 只能结束它所属的 PROCESSING 代际。
+        if (pipelineNodeMapper.finishTaskIfCurrent(node.getId(), taskId, status,
+                terminalVideoUrl, terminalError) != 1) {
+            return;
+        }
+        node.setStatus(status);
+        if (terminalVideoUrl != null) {
+            node.setVideoUrl(terminalVideoUrl);
+        }
+        node.setErrorMsg(terminalError);
         Pipeline pipeline = pipelineMapper.selectById(node.getPipelineId());
         if (pipeline != null) {
             refreshPipelineStatus(pipeline);
         }
+    }
+
+    /** taskId 补链晚于终态事件时，由对账读取 MySQL 真相补一次代际 CAS。 */
+    private void catchUpFinishedTask(PipelineNode node) {
+        VideoTask task = videoTaskService.getOne(new LambdaQueryWrapper<VideoTask>()
+                .eq(VideoTask::getBizTaskId, node.getTaskId())
+                .last("limit 1"), false);
+        if (task == null || !("SUCCESS".equals(task.getStatus()) || "FAILED".equals(task.getStatus()))) {
+            return;
+        }
+        log.warn("流水线节点补回填：任务已终态但节点仍在生成中 nodeId={} taskId={} status={}",
+                node.getId(), node.getTaskId(), task.getStatus());
+        transactionTemplate.execute(ignored -> {
+            applyTaskFinishedInCurrentTransaction(
+                    node.getTaskId(), task.getStatus(), task.getVideoUrl(), task.getErrorMsg());
+            return null;
+        });
     }
 
     /** 提交分镜节点：校验 + 素材 ID → URL + 复用 submit 链路；成功后回写 taskId */
@@ -347,6 +416,35 @@ public class PipelineServiceImpl implements PipelineService {
         PipelineNode node = pipelineNodeMapper.selectById(nodeId);
         if (node == null) {
             throw new RuntimeException("节点不存在");
+        }
+        String requestId = node.getSubmitRequestId();
+        if (!StringUtils.hasText(requestId)) {
+            requestId = newSubmitRequestId(nodeId);
+            if (pipelineNodeMapper.beginRun(nodeId, node.getStatus(), requestId) != 1) {
+                return;
+            }
+            node.setStatus("PENDING");
+            node.setSubmitRequestId(requestId);
+            node.setTaskId(null);
+        }
+        if (!"PROCESSING".equals(node.getStatus())
+                && pipelineNodeMapper.occupyForSubmit(nodeId, requestId) != 1) {
+            return;
+        }
+        submitNodeForJob(nodeId, requestId);
+    }
+
+    @Override
+    public void submitNodeForJob(Long nodeId, String expectedRequestId) throws Exception {
+        if (!StringUtils.hasText(expectedRequestId)) {
+            return;
+        }
+        PipelineNode node = pipelineNodeMapper.selectById(nodeId);
+        if (node == null) {
+            throw new RuntimeException("节点不存在");
+        }
+        if (!expectedRequestId.equals(node.getSubmitRequestId())) {
+            return;
         }
         Pipeline pipeline = pipelineMapper.selectById(node.getPipelineId());
         if (pipeline == null) {
@@ -362,25 +460,11 @@ public class PipelineServiceImpl implements PipelineService {
         List<String> urls = resolveAssetUrls(pipeline.getUserId(), assetIds);
         // 分镜独立模型优先，空则跟随流水线模型（统一默认由 submit 链路解析）
         String effectiveModel = StringUtils.hasText(node.getModel()) ? node.getModel() : pipeline.getModel();
-        String requestId = StringUtils.hasText(node.getSubmitRequestId())
-                ? node.getSubmitRequestId()
-                : newSubmitRequestId(node.getId());
-        if (!StringUtils.hasText(node.getSubmitRequestId())) {
-            PipelineNode requestUpdate = new PipelineNode();
-            requestUpdate.setId(nodeId);
-            requestUpdate.setSubmitRequestId(requestId);
-            pipelineNodeMapper.updateById(requestUpdate);
-        }
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 pipeline.getUserId(), pipeline.getProvider(), effectiveModel,
                 node.getPrompt(), urls, List.of(), List.of(),
-                node.getDuration(), node.getRatio(), null, null, requestId, null));
-        PipelineNode update = new PipelineNode();
-        update.setId(nodeId);
-        update.setTaskId(task.businessTaskId());
-        update.setStatus("PROCESSING");
-        update.setErrorMsg(null);
-        pipelineNodeMapper.updateById(update);
+                node.getDuration(), node.getRatio(), null, null, expectedRequestId, null));
+        pipelineNodeMapper.linkTaskIfMissing(nodeId, expectedRequestId, task.businessTaskId());
     }
 
     /** 素材 ID 引用 → URL（实体引用：素材换存储位置流水线不受影响） */
@@ -449,6 +533,17 @@ public class PipelineServiceImpl implements PipelineService {
         } catch (Exception e) {
             return "[]";
         }
+    }
+
+    private String writeJobPayload(NodeSubmitPayload payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new IllegalStateException("无法序列化流水线提交作业", e);
+        }
+    }
+
+    private record NodeSubmitPayload(Long pipelineNodeId, String expectedRequestId) {
     }
 
     private String truncate(String message) {

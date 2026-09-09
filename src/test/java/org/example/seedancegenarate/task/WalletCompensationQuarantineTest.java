@@ -2,10 +2,8 @@ package org.example.seedancegenarate.task;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import org.example.seedancegenarate.config.DistributedLockProperties;
-import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.DistributedLock;
-import org.example.seedancegenarate.service.TaskRetryPolicy;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.service.WalletService;
@@ -55,13 +53,12 @@ class WalletCompensationQuarantineTest {
         DistributedLockProperties lockProperties = new DistributedLockProperties();
         lockProperties.setEnabled(false);
 
-        reconcile = new TaskReconcileTask(videoTaskService, mock(VideoEngineRegistry.class),
-                mock(VideoTaskPoller.class), mock(TaskStatusTransitioner.class), walletService,
-                mock(TaskRetryPolicy.class), mock(DistributedLock.class), lockProperties);
+        reconcile = new TaskReconcileTask(videoTaskService, mock(VideoTaskPoller.class),
+                mock(TaskStatusTransitioner.class), walletService,
+                mock(DistributedLock.class), lockProperties);
         ReflectionTestUtils.setField(reconcile, "maxAgeHours", 24L);
         ReflectionTestUtils.setField(reconcile, "timeoutMinutes", 60L);
         ReflectionTestUtils.setField(reconcile, "submitStallMinutes", 10L);
-        ReflectionTestUtils.setField(reconcile, "defaultProvider", "comfyui");
         ReflectionTestUtils.setField(reconcile, "roundBudgetMs", 60_000L);
         // 另外三个分支没活，只留账务补偿这一支
         when(videoTaskService.list(any(Wrapper.class))).thenReturn(List.of());

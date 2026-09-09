@@ -47,7 +47,7 @@ class TaskCallbackControllerTest {
         VideoEngineRegistry registry = mock(VideoEngineRegistry.class);
         when(registry.get("comfyui")).thenReturn(engine);
         VideoTaskService tasks = mock(VideoTaskService.class);
-        when(tasks.getByProviderTaskId("p1")).thenReturn(task);
+        when(tasks.getByProviderTaskId("comfyui", "p1")).thenReturn(task);
         TaskCallbackController controller = new TaskCallbackController(registry, tasks, properties);
 
         ResponseEntity<Void> response = controller.callback("comfyui", "secret",
@@ -66,7 +66,7 @@ class TaskCallbackControllerTest {
         VideoEngineRegistry registry = mock(VideoEngineRegistry.class);
         when(registry.get("comfyui")).thenReturn(engine);
         VideoTaskService tasks = mock(VideoTaskService.class);
-        when(tasks.getByProviderTaskId("p1")).thenReturn(null);
+        when(tasks.getByProviderTaskId("comfyui", "p1")).thenReturn(null);
         TaskCallbackController controller = new TaskCallbackController(registry, tasks, properties);
 
         ResponseEntity<Void> response = controller.callback("comfyui", "secret", "{}");

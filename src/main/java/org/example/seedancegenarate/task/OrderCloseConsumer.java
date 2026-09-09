@@ -4,16 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.example.seedancegenarate.config.AsyncJobProperties;
 import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.mapper.RechargeOrderMapper;
 import org.example.seedancegenarate.service.AsyncJobService;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
-import java.util.List;
 
 /**
  * 充值订单超时关闭消费：领取 ORDER_CLOSE 作业 → CAS 关单（PENDING→CLOSED）→ 完成。
@@ -25,7 +22,7 @@ import java.util.List;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class OrderCloseConsumer {
+public class OrderCloseConsumer implements AsyncJobHandler {
     public static final String JOB_TYPE_ORDER_CLOSE = "ORDER_CLOSE";
 
     /** 关单就是一条 UPDATE，租约短租足够。 */
@@ -33,29 +30,23 @@ public class OrderCloseConsumer {
 
     private final AsyncJobService asyncJobService;
     private final RechargeOrderMapper rechargeOrderMapper;
-    private final AsyncJobProperties properties;
     private final ObjectMapper objectMapper;
 
-    /** 低频兜底扫描（事件通知丢失时接管）；正常由 Redis 通知即时唤醒。 */
-    @Scheduled(fixedDelayString = "${async-job.reconcile-interval-ms:30000}",
-            initialDelayString = "${async-job.initial-delay-ms:10000}")
-    public void consumePendingCloses() {
-        consumeNow();
+    @Override
+    public String jobType() {
+        return JOB_TYPE_ORDER_CLOSE;
     }
 
-    /** 即时消费一轮（Redis 作业通知到达时调用；延迟作业实际靠兜底扫描到期领取）。 */
-    public void consumeNow() {
-        List<AsyncJob> jobs = asyncJobService.claimBatch(JOB_TYPE_ORDER_CLOSE,
-                properties.getClaimBatchSize(), CLOSE_LEASE_SECONDS);
-        for (AsyncJob job : jobs) {
-            consume(job);
-        }
+    @Override
+    public long leaseSeconds() {
+        return CLOSE_LEASE_SECONDS;
     }
 
-    private void consume(AsyncJob job) {
+    @Override
+    public void execute(AsyncJob job) {
         Payload payload = parse(job.getPayload());
         if (payload == null || !StringUtils.hasText(payload.orderNo())) {
-            asyncJobService.complete(job.getId(), job.getLeaseToken());
+            asyncJobService.complete(job);
             return;
         }
         try {
@@ -66,9 +57,9 @@ public class OrderCloseConsumer {
                 // 已被回调置 SUCCESS/CLOSED（或订单不存在）：关单使命完成，收掉作业
                 log.info("充值订单无需关闭（已处理或不存在）: orderNo={}", payload.orderNo());
             }
-            asyncJobService.complete(job.getId(), job.getLeaseToken());
+            asyncJobService.complete(job);
         } catch (Exception e) {
-            asyncJobService.failAndRetry(job.getId(), job.getLeaseToken(), e.getMessage());
+            asyncJobService.failAndRetry(job, e.getMessage());
         }
     }
 

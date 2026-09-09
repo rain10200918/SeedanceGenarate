@@ -51,8 +51,8 @@ spring:
       max-request-size: 200MB
   application:
     name: SeedanceGenarate
-  # @Scheduled 现有 8 处（推进器 / 终态消费 / 流水线消费 / 两个对账 /
-  # token 清理 / 视频清理 / webhook 重试），线程数要留余量
+  # 定时任务线程池只承载低频扫描、对账、清理和 webhook 等后台维护任务；
+  # async_job 消费由独立的 dispatch / worker / heartbeat 执行池负责。
   task:
     scheduling:
       pool:
@@ -75,8 +75,8 @@ server:
       remote-ip-header: X-Forwarded-For
       protocol-header: X-Forwarded-Proto
     threads:
-      # 提交接口同步跑完外部调用链（上传 OSS → 调提供方），单请求可能占线程数十秒，
-      # 所以按「并发提交数」算，不按核数算
+      # 生成接口只落库/冻结/入队后返回；供应商 HTTP 由 async-job Worker 独立执行。
+      # Tomcat 线程数按 API、SSE 和管理面实测并发调整，不再与 Worker 槽位绑定。
       max: ${SERVER_TOMCAT_MAX_THREADS:800}
       min-spare: ${SERVER_TOMCAT_MIN_SPARE_THREADS:50}
     accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:500}
@@ -110,7 +110,7 @@ seedance:
   api-key: ${SEEDANCE_API_KEY}
   model: ${SEEDANCE_MODEL:doubao-seedance-2-0-260128}
   url: ${SEEDANCE_URL:https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks}
-  # 方舟接口超时（元数据接口，秒回）；不设超时会在 Ark 挂起时焊死提交线程与轮询线程
+  # 方舟元数据接口应秒回；不设超时会在 Ark 挂起时长期占用 Worker 槽位。
   connect-timeout-ms: ${SEEDANCE_CONNECT_TIMEOUT_MS:5000}
   read-timeout-ms: ${SEEDANCE_READ_TIMEOUT_MS:30000}
   models:
@@ -237,7 +237,7 @@ cache:
 
 distributed:
   lock:
-    # 多实例部署时开启，保证 VideoTaskPoller / WebhookDispatcher 同一时刻只在一个实例执行。
+    # 多实例部署时开启，供仍需串行的旧定时任务使用；VideoTaskPoller 已由 async_job 唯一键收口。
     enabled: ${DISTRIBUTED_LOCK_ENABLED:false}
     key-prefix: ${DISTRIBUTED_LOCK_KEY_PREFIX:local:seedance:lock}
     default-ttl-seconds: ${DISTRIBUTED_LOCK_TTL_SECONDS:120}
@@ -250,8 +250,8 @@ async-job:
   # 作业可用时经 Redis 通知即时唤醒消费；此间隔仅作通知丢失的兜底扫描。
   reconcile-interval-ms: ${ASYNC_JOB_RECONCILE_INTERVAL_MS:30000}
   initial-delay-ms: ${ASYNC_JOB_INITIAL_DELAY_MS:10000}
-  claim-batch-size: ${ASYNC_JOB_CLAIM_BATCH_SIZE:20}
-  lease-seconds: ${ASYNC_JOB_LEASE_SECONDS:60}
+  worker-threads: ${ASYNC_JOB_WORKER_THREADS:8}
+  reconcile-jitter-percent: ${ASYNC_JOB_RECONCILE_JITTER_PERCENT:20}
   max-attempts: ${ASYNC_JOB_MAX_ATTEMPTS:5}
   backoff-base-seconds: ${ASYNC_JOB_BACKOFF_BASE_SECONDS:30}
   channel: ${ASYNC_JOB_REDIS_CHANNEL:local:seedance:event:job-available}

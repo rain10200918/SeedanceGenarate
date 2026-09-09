@@ -1,5 +1,7 @@
 package org.example.seedancegenarate.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.engine.VideoEngine;
@@ -27,6 +29,7 @@ public class TaskRetryPolicy {
     private final VideoEngineRegistry videoEngineRegistry;
     private final AsyncJobService asyncJobService;
     private final TaskStatusTransitioner taskStatusTransitioner;
+    private final ObjectMapper objectMapper;
 
     @Value("${video.timeout-retry-max:2}")
     private int timeoutRetryMax;
@@ -46,7 +49,7 @@ public class TaskRetryPolicy {
         try {
             engine = videoEngineRegistry.get(providerOf(task));
         } catch (Exception e) {
-            taskStatusTransitioner.markTimedOut(task.getId(), reason);
+            taskStatusTransitioner.markTimedOutIfCurrent(task, reason);
             return false;
         }
         return retryOrFail(task, engine, reason);
@@ -58,20 +61,38 @@ public class TaskRetryPolicy {
         if (engine != null && engine.timeoutRetrySupported() && retryCount < timeoutRetryMax) {
             log.info("入队自动重试: taskId={}, 第 {} 次, 原因={}",
                     task.businessTaskId(), retryCount + 1, reason);
-            // 幂等键 task:{id}：重复入队影响 0 行；重提交由 Worker CAS 抢占只执行一次
-            asyncJobService.enqueue(VideoTaskServiceImpl.JOB_TYPE_TASK_RETRY, "task:" + task.getId(),
-                    "{\"videoTaskId\":" + task.getId() + "}");
+            // 每一轮有独立幂等键；payload 固化期望 retry_count，外层 job 提交后宕机重领
+            // 也不会再创建下一轮 attempt。
+            asyncJobService.enqueue(VideoTaskServiceImpl.JOB_TYPE_TASK_RETRY,
+                    "task:" + task.getId() + ":retry:" + retryCount + ":attempt:"
+                            + (task.getCurrentAttemptId() == null ? "legacy" : task.getCurrentAttemptId()),
+                    retryPayload(task, retryCount));
             return true;
         }
         String finalReason = engine != null && engine.timeoutRetrySupported()
                 ? reason + "，已自动重试 " + retryCount + " 次仍未成功，已终止（可手动重试）"
                 : reason + "，已终止（可手动重试）";
-        taskStatusTransitioner.markTimedOut(task.getId(), finalReason);
+        taskStatusTransitioner.markTimedOutIfCurrent(task, finalReason);
         return false;
     }
 
     private String providerOf(VideoTask task) {
         return task.getProvider() == null || task.getProvider().isBlank()
                 ? defaultProvider : task.getProvider().trim();
+    }
+
+    private String retryPayload(VideoTask task, int retryCount) {
+        try {
+            return objectMapper.writeValueAsString(new RetryPayload(task.getId(), retryCount,
+                    task.getCurrentAttemptId(), task.getProviderTaskId(), task.getPhase(),
+                    task.getProvider()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("无法序列化任务重试作业", e);
+        }
+    }
+
+    record RetryPayload(Long videoTaskId, Integer expectedRetryCount, Long expectedAttemptId,
+                        String expectedProviderTaskId, String expectedPhase,
+                        String expectedProvider) {
     }
 }

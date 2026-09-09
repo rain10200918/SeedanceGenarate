@@ -2,17 +2,15 @@ package org.example.seedancegenarate.task;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import org.example.seedancegenarate.config.DistributedLockProperties;
-import org.example.seedancegenarate.engine.RemoteStatus;
-import org.example.seedancegenarate.engine.VideoEngine;
-import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.service.DistributedLock;
-import org.example.seedancegenarate.service.TaskRetryPolicy;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.service.WalletService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
@@ -40,13 +38,18 @@ import static org.mockito.Mockito.when;
  */
 class TaskReconcileBudgetTest {
 
+    @BeforeAll
+    static void initTableInfo() {
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(
+                        new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""),
+                VideoTask.class);
+    }
+
     private VideoTaskService videoTaskService;
     private VideoTaskPoller videoTaskPoller;
     private TaskStatusTransitioner taskStatusTransitioner;
     private WalletService walletService;
-    private TaskRetryPolicy taskRetryPolicy;
-    private VideoEngineRegistry videoEngineRegistry;
-    private VideoEngine engine;
     private TaskReconcileTask reconcile;
 
     @BeforeEach
@@ -55,21 +58,15 @@ class TaskReconcileBudgetTest {
         videoTaskPoller = mock(VideoTaskPoller.class);
         taskStatusTransitioner = mock(TaskStatusTransitioner.class);
         walletService = mock(WalletService.class);
-        taskRetryPolicy = mock(TaskRetryPolicy.class);
-        videoEngineRegistry = mock(VideoEngineRegistry.class);
-        engine = mock(VideoEngine.class);
-        when(videoEngineRegistry.get(any())).thenReturn(engine);
-
         DistributedLockProperties lockProperties = new DistributedLockProperties();
         lockProperties.setEnabled(false); // 单实例路径：不经 Redis，直接执行
 
-        reconcile = new TaskReconcileTask(videoTaskService, videoEngineRegistry, videoTaskPoller,
-                taskStatusTransitioner, walletService, taskRetryPolicy,
+        reconcile = new TaskReconcileTask(videoTaskService, videoTaskPoller,
+                taskStatusTransitioner, walletService,
                 mock(DistributedLock.class), lockProperties);
         ReflectionTestUtils.setField(reconcile, "maxAgeHours", 24L);
         ReflectionTestUtils.setField(reconcile, "timeoutMinutes", 60L);
         ReflectionTestUtils.setField(reconcile, "submitStallMinutes", 10L);
-        ReflectionTestUtils.setField(reconcile, "defaultProvider", "comfyui");
     }
 
     private List<VideoTask> tasks(int count) {
@@ -95,13 +92,11 @@ class TaskReconcileBudgetTest {
         ReflectionTestUtils.setField(reconcile, "roundBudgetMs", 0L);
         when(videoTaskService.list(any(Wrapper.class))).thenReturn(tasks(3), tasks(3), tasks(3));
         when(videoTaskService.findTerminalMissingWalletTransition(eq(100), any())).thenReturn(tasks(3));
-        when(engine.poll(any())).thenReturn(RemoteStatus.processing());
 
         reconcile.reconcileOverdueTasks();
 
-        verify(videoTaskPoller, times(1)).advanceTask(any());              // 分支①
-        verify(taskRetryPolicy, times(1)).retryOrFail(any(), any(), any()); // 分支②
-        verify(taskStatusTransitioner, times(1)).markTimedOut(anyLong(), any()); // 分支③
+        verify(videoTaskPoller, times(2)).enqueuePoll(any());              // 分支①②各推进一条
+        verify(taskStatusTransitioner, times(1)).markTimedOutIfCurrent(any(VideoTask.class), any()); // 分支③
         verify(walletService, times(1)).release(any(), any(), anyLong());   // 分支④
     }
 
@@ -119,11 +114,11 @@ class TaskReconcileBudgetTest {
         doAnswer(inv -> {
             Thread.sleep(150);
             return null;
-        }).when(videoTaskPoller).advanceTask(any());
+        }).when(videoTaskPoller).enqueuePoll(any());
 
         reconcile.reconcileOverdueTasks();
 
-        verify(videoTaskPoller, times(1)).advanceTask(any());
+        verify(videoTaskPoller, times(1)).enqueuePoll(any());
         verify(walletService, times(3)).release(any(), any(), anyLong());
     }
 
@@ -151,8 +146,24 @@ class TaskReconcileBudgetTest {
 
         reconcile.reconcileOverdueTasks();
 
-        verify(videoTaskPoller, times(3)).advanceTask(any());
+        verify(videoTaskPoller, times(3)).enqueuePoll(any());
         verify(walletService, never()).release(any(), any(), anyLong());
+    }
+
+    @Test
+    void brokenSubmitFallbackOnlyScansLegacyTasksWithoutAnAttempt() {
+        // 【测什么】提交断裂兜底排除 QUEUED/SUBMITTING/RECOVERY_REQUIRED 等新 attempt 任务。
+        // 【怎么算红】仍只按 provider_task_id IS NULL 扫描时，健康排队超过 10 分钟会被退款终止。
+        when(videoTaskService.list(any(Wrapper.class))).thenReturn(List.of(), List.of(), List.of());
+        when(videoTaskService.findTerminalMissingWalletTransition(eq(100), any())).thenReturn(List.of());
+
+        reconcile.reconcileOverdueTasks();
+
+        @SuppressWarnings("rawtypes")
+        ArgumentCaptor<Wrapper> wrappers = ArgumentCaptor.forClass(Wrapper.class);
+        verify(videoTaskService, times(3)).list(wrappers.capture());
+        String brokenSubmitSql = wrappers.getAllValues().get(2).getCustomSqlSegment();
+        assertTrue(brokenSubmitSql.contains("current_attempt_id IS NULL"), brokenSubmitSql);
     }
 
     @Test

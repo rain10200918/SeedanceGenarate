@@ -54,7 +54,7 @@ public class TaskCallbackController {
                 log.warn("回调无法解析任务 ID: provider={}", provider);
                 return ResponseEntity.badRequest().build();
             }
-            VideoTask task = videoTaskService.getByProviderTaskId(providerTaskId);
+            VideoTask task = videoTaskService.getByProviderTaskId(provider, providerTaskId);
             if (task == null) {
                 log.warn("回调对应任务不存在: provider={}, providerTaskId={}", provider, providerTaskId);
                 return ResponseEntity.notFound().build();

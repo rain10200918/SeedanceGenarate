@@ -21,8 +21,20 @@ public interface TaskStatusTransitioner {
     /** 任务失败（引擎明确失败 / 转存失败等）：CAS PROCESSING→FAILED + error_msg + SSE 通知 */
     boolean markFailed(Long videoTaskId, String message);
 
+    /**
+     * 仅当当前 attempt/provider 仍与调用方读取到的快照一致时失败。
+     * 供应商轮询/回调必须使用此入口，防止旧远端任务的迟到结果覆盖新一轮 attempt。
+     */
+    boolean markFailedIfCurrent(VideoTask expectedTask, String message);
+
+    /** 管理员只可终止仍处于同一 RECOVERY_REQUIRED attempt 的任务。 */
+    boolean markRecoveryFailedIfCurrent(VideoTask expectedTask, String message);
+
     /** 超时 / 提交断裂兜底（对账任务调用），语义同 markFailed，日志标注"超时终止" */
     boolean markTimedOut(Long videoTaskId, String message);
+
+    /** 超时语义的 attempt/provider 身份 CAS，约束同 {@link #markFailedIfCurrent(VideoTask, String)}。 */
+    boolean markTimedOutIfCurrent(VideoTask expectedTask, String message);
 
     /** 供读场景使用：返回任务当前状态（null=不存在） */
     String statusOf(Long videoTaskId);

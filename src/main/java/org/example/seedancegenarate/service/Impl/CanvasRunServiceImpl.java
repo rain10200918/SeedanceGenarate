@@ -25,6 +25,7 @@ import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
@@ -57,6 +58,7 @@ public class CanvasRunServiceImpl implements CanvasRunService {
     private final CanvasArtifactResolver artifactResolver;
     private final VideoTaskService videoTaskService;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
 
     @Override
     @Transactional
@@ -123,7 +125,19 @@ public class CanvasRunServiceImpl implements CanvasRunService {
     @Override
     public void submitNodeForJob(Long nodeId) throws Exception {
         CanvasNode node = canvasNodeMapper.selectById(nodeId);
+        submitNodeForJob(nodeId, node == null ? null : node.getSubmitRequestId());
+    }
+
+    @Override
+    public void submitNodeForJob(Long nodeId, String expectedRequestId) throws Exception {
+        if (!StringUtils.hasText(expectedRequestId)) {
+            return;
+        }
+        CanvasNode node = canvasNodeMapper.selectById(nodeId);
         if (node == null) {
+            return;
+        }
+        if (!expectedRequestId.equals(node.getSubmitRequestId())) {
             return;
         }
         Canvas canvas = canvasMapper.selectById(node.getCanvasId());
@@ -139,13 +153,13 @@ public class CanvasRunServiceImpl implements CanvasRunService {
         try {
             inputs = resolveInputs(node, nodes, edgesOf(node.getCanvasId()), true);
         } catch (BusinessException e) {
-            markFailed(node, e.getMessage());
+            canvasNodeMapper.failIfCurrent(node.getId(), expectedRequestId, truncate(e.getMessage()));
             return;
         }
 
         String error = type.readinessError(node, config, inputs);
         if (error != null) {
-            markFailed(node, error);
+            canvasNodeMapper.failIfCurrent(node.getId(), expectedRequestId, truncate(error));
             return;
         }
 
@@ -154,18 +168,23 @@ public class CanvasRunServiceImpl implements CanvasRunService {
                 canvas.getUserId(), plan.provider(), plan.model(), plan.prompt(),
                 plan.imageUrls(), plan.videoUrls(), plan.audioUrls(),
                 plan.duration(), plan.ratio(), plan.megapixels(),
-                null, node.getSubmitRequestId(), null));
+                null, expectedRequestId, null));
 
-        CanvasNode patch = new CanvasNode();
-        patch.setId(node.getId());
-        patch.setTaskId(task.getBizTaskId());
-        canvasNodeMapper.updateById(patch);
+        canvasNodeMapper.linkTaskIfMissing(node.getId(), expectedRequestId, task.getBizTaskId());
     }
 
     @Override
     @Transactional
     public void applyTaskFinished(String taskId, String status, String videoUrl, String errorMsg) {
+        applyTaskFinishedInCurrentTransaction(taskId, status, videoUrl, errorMsg);
+    }
+
+    private void applyTaskFinishedInCurrentTransaction(String taskId, String status,
+                                                       String videoUrl, String errorMsg) {
         if (!StringUtils.hasText(taskId)) {
+            return;
+        }
+        if (!("SUCCESS".equals(status) || "FAILED".equals(status))) {
             return;
         }
         CanvasNode node = canvasNodeMapper.selectOne(new LambdaQueryWrapper<CanvasNode>()
@@ -175,19 +194,20 @@ public class CanvasRunServiceImpl implements CanvasRunService {
             return; // 不是画布的任务（分镜流水或单条生成），本监听器无事可做
         }
 
-        CanvasNode patch = new CanvasNode();
-        patch.setId(node.getId());
-        patch.setStatus(status);
-        // 空串不是偷懒：updateById 跳过 null 字段，写 null 等于「不动这一列」，
-        // 上一次失败的原因就会一直挂在这个已经成功的节点上（与 enqueueSubmit 同一约定）
-        patch.setErrorMsg(StringUtils.hasText(errorMsg) ? truncate(errorMsg) : "");
+        String terminalError = StringUtils.hasText(errorMsg) ? truncate(errorMsg) : "";
+        String terminalOutput = null;
         if ("SUCCESS".equals(status) && StringUtils.hasText(videoUrl)) {
-            patch.setOutput(outputJson(node, videoUrl));
+            terminalOutput = outputJson(node, videoUrl);
         }
-        canvasNodeMapper.updateById(patch);
+        // 查询与事件回填之间用户可能已 beginRun；taskId+PROCESSING CAS 防旧事件覆盖新代际。
+        if (canvasNodeMapper.finishTaskIfCurrent(node.getId(), taskId, status,
+                terminalOutput, terminalError) != 1) {
+            return;
+        }
 
         node.setStatus(status);
-        node.setOutput(patch.getOutput() == null ? node.getOutput() : patch.getOutput());
+        node.setOutput(terminalOutput == null ? node.getOutput() : terminalOutput);
+        node.setErrorMsg(terminalError);
         advanceDownstream(node);
         summarizeCanvas(node.getCanvasId());
     }
@@ -313,21 +333,31 @@ public class CanvasRunServiceImpl implements CanvasRunService {
         String requestId = newRun || !StringUtils.hasText(node.getSubmitRequestId())
                 ? "canvas:" + node.getId() + ":" + UUID.randomUUID().toString().replace("-", "")
                 : node.getSubmitRequestId();
-        CanvasNode patch = new CanvasNode();
-        patch.setId(node.getId());
-        patch.setSubmitRequestId(requestId);
-        patch.setStatus("PENDING");
-        patch.setErrorMsg("");
-        canvasNodeMapper.updateById(patch);
+        boolean startsNewGeneration = newRun || !StringUtils.hasText(node.getSubmitRequestId());
+        Boolean enqueued = transactionTemplate.execute(tx -> {
+            if (startsNewGeneration
+                    && canvasNodeMapper.beginRun(node.getId(), node.getStatus(), requestId) != 1) {
+                return false;
+            }
+            asyncJobService.enqueue(JOB_TYPE, jobKey(node.getCanvasId(), node.getId(), requestId),
+                    writeJobPayload(new NodeSubmitPayload(node.getId(), requestId)));
+            return true;
+        });
+        if (!Boolean.TRUE.equals(enqueued)) {
+            return;
+        }
         node.setSubmitRequestId(requestId);
         node.setStatus("PENDING");
-        asyncJobService.enqueue(JOB_TYPE, jobKey(node.getCanvasId(), node.getId()),
-                "{\"canvasNodeId\":" + node.getId() + "}");
+        if (startsNewGeneration) {
+            node.setTaskId(null);
+            node.setOutput(null);
+            node.setErrorMsg(null);
+        }
     }
 
     /** 作业业务幂等键；同一节点的同一轮运行只入队一次 */
-    public static String jobKey(Long canvasId, Long nodeId) {
-        return "canvas:" + canvasId + ":node:" + nodeId;
+    public static String jobKey(Long canvasId, Long nodeId, String requestId) {
+        return "canvas:" + canvasId + ":node:" + nodeId + ":request:" + requestId;
     }
 
     private void markBlocked(CanvasNode node, String reason) {
@@ -361,6 +391,17 @@ public class CanvasRunServiceImpl implements CanvasRunService {
         }
     }
 
+    private String writeJobPayload(NodeSubmitPayload payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            throw new IllegalStateException("无法序列化画布提交作业", e);
+        }
+    }
+
+    private record NodeSubmitPayload(Long canvasNodeId, String expectedRequestId) {
+    }
+
     @Override
     public void reconcileRunning(Long canvasId) {
         Canvas canvas = canvasMapper.selectById(canvasId);
@@ -378,7 +419,9 @@ public class CanvasRunServiceImpl implements CanvasRunService {
                 // 该提交就提交。那正是丢掉的那次事件本该做的事，不是额外花钱。
                 catchUpFinishedTask(node);
             } else if (running && "PENDING".equals(node.getStatus())
-                    && asyncJobService.find(JOB_TYPE, jobKey(canvasId, node.getId())) == null) {
+                    && (!StringUtils.hasText(node.getSubmitRequestId())
+                    || asyncJobService.find(JOB_TYPE,
+                    jobKey(canvasId, node.getId(), node.getSubmitRequestId())) == null)) {
                 // 补作业会真的提交、真的冻结钱，所以必须先确认画布在运行中：
                 // 新拖出来的生成节点默认就是 PENDING，在 DRAFT 画布上补作业 = 用户没点运行就替他花钱
                 enqueueSubmit(node, false);
@@ -397,7 +440,12 @@ public class CanvasRunServiceImpl implements CanvasRunService {
         }
         log.warn("画布节点补回填：任务已终态但节点仍在生成中 nodeId={} taskId={} status={}",
                 node.getId(), node.getTaskId(), task.getStatus());
-        applyTaskFinished(node.getTaskId(), task.getStatus(), task.getVideoUrl(), task.getErrorMsg());
+        // 同类 self-invocation 不经过 @Transactional 代理；显式短事务让“回填 + 推进下游”同成同败。
+        transactionTemplate.execute(ignored -> {
+            applyTaskFinishedInCurrentTransaction(
+                    node.getTaskId(), task.getStatus(), task.getVideoUrl(), task.getErrorMsg());
+            return null;
+        });
     }
 
     private boolean isRunnableStatus(String status) {

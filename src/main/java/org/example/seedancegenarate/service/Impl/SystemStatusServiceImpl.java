@@ -7,6 +7,7 @@ import org.example.seedancegenarate.dto.SystemStatus;
 import org.example.seedancegenarate.entity.AsyncJob;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.AsyncJobMapper;
+import org.example.seedancegenarate.mapper.GenerationAttemptMapper;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.NodeHealthService;
 import org.example.seedancegenarate.service.SystemStatusService;
@@ -32,6 +33,7 @@ public class SystemStatusServiceImpl implements SystemStatusService {
 
     private final VideoTaskMapper videoTaskMapper;
     private final AsyncJobMapper asyncJobMapper;
+    private final GenerationAttemptMapper generationAttemptMapper;
     private final NodeHealthService nodeHealthService;
 
     @Value("${video.task-timeout-minutes:60}")
@@ -57,15 +59,20 @@ public class SystemStatusServiceImpl implements SystemStatusService {
         LocalDateTime cutoff = now.minusMinutes(timeoutMinutes);
         List<SystemStatus.StuckTask> stuck = videoTaskMapper.selectList(Wrappers.<VideoTask>lambdaQuery()
                         .eq(VideoTask::getStatus, "PROCESSING")
-                        .lt(VideoTask::getLastAttemptAt, cutoff)
+                        .and(q -> q.eq(VideoTask::getPhase, "RECOVERY_REQUIRED")
+                                .or().lt(VideoTask::getLastAttemptAt, cutoff))
                         .select(VideoTask::getId, VideoTask::getTaskId, VideoTask::getProvider,
+                                VideoTask::getPhase, VideoTask::getNodeId,
+                                VideoTask::getCurrentAttemptId,
                                 VideoTask::getCreateTime, VideoTask::getLastAttemptAt)
                         .orderByAsc(VideoTask::getLastAttemptAt)
                         .last("limit " + STUCK_LIMIT))
                 .stream()
                 .map(t -> new SystemStatus.StuckTask(
-                        t.businessTaskId(), t.getProvider(),
-                        Math.max(java.time.Duration.between(t.getLastAttemptAt(), now).toMinutes(), 0)))
+                        t.businessTaskId(), t.getProvider(), t.getPhase(), recoveryNode(t),
+                        Math.max(java.time.Duration.between(
+                                t.getLastAttemptAt() == null ? t.getCreateTime() : t.getLastAttemptAt(), now)
+                                .toMinutes(), 0)))
                 .toList();
 
         // 死信作业
@@ -89,5 +96,20 @@ public class SystemStatusServiceImpl implements SystemStatusService {
 
         return new SystemStatus(processing, stuck, deadJobs,
                 success, failed, rate, nodes, now.format(TIME_FMT));
+    }
+
+    private String recoveryNode(VideoTask task) {
+        if (task.getNodeId() != null && !task.getNodeId().isBlank()) {
+            return task.getNodeId();
+        }
+        if (!"RECOVERY_REQUIRED".equals(task.getPhase()) || task.getCurrentAttemptId() == null) {
+            return null;
+        }
+        var attempt = generationAttemptMapper.selectById(task.getCurrentAttemptId());
+        if (attempt == null) {
+            return null;
+        }
+        return attempt.getNodeId() != null && !attempt.getNodeId().isBlank()
+                ? attempt.getNodeId() : attempt.getRequestedNodeId();
     }
 }

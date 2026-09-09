@@ -23,6 +23,9 @@ public interface CanvasRunService {
     /** 作业消费方调用：真正提交该节点（调用方需先原子占位防并发双提交） */
     void submitNodeForJob(Long nodeId) throws Exception;
 
+    /** 作业消费方调用：提交及补链都必须属于 payload 固化的运行代际。 */
+    void submitNodeForJob(Long nodeId, String expectedRequestId) throws Exception;
+
     /** 终态事件回填：按 taskId 反查节点，写状态与产物，并推进下游 */
     void applyTaskFinished(String taskId, String status, String videoUrl, String errorMsg);
 

@@ -24,6 +24,8 @@ public class AsyncJob {
     private LocalDateTime availableAt;
     private String leaseOwner;
     private String leaseToken;
+    /** 每次领取单调递增；与 token 一起阻断旧 Worker 回写新租约。 */
+    private Long leaseGeneration;
     private LocalDateTime leaseUntil;
     private String lastError;
     @TableField(fill = FieldFill.INSERT,value="created_at")

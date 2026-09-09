@@ -14,6 +14,51 @@ import java.util.Map;
 @Mapper
 public interface VideoTaskMapper extends BaseMapper<VideoTask> {
 
+    @Select("SELECT * FROM video_task WHERE biz_task_id = #{taskId} OR task_id = #{taskId} LIMIT 1")
+    VideoTask findByBusinessTaskId(@Param("taskId") String taskId);
+
+    /** 新 attempt 只能替换调用方看到的 currentAttempt，防并发创建跳过轮次。 */
+    @Update("<script>UPDATE video_task SET current_attempt_id = #{attemptId}, phase = 'QUEUED' "
+            + "WHERE id = #{taskId} AND status = 'PROCESSING' AND "
+            + "<choose><when test='expectedAttemptId == null'>current_attempt_id IS NULL</when>"
+            + "<otherwise>current_attempt_id = #{expectedAttemptId}</otherwise></choose></script>")
+    int activateAttempt(@Param("taskId") Long taskId,
+                        @Param("expectedAttemptId") Long expectedAttemptId,
+                        @Param("attemptId") Long attemptId);
+
+    /**
+     * 与 attempt 的 PENDING -> SUBMITTING CAS 同事务，锁住“仍是当前轮次”这个提交前提。
+     * <p>
+     * provider 那一比必须显式 COLLATE：baseline 进来的库里老表（video_task）是建库时的服务器默认排序规则
+     * utf8mb4_0900_ai_ci，新表按迁移声明是 utf8mb4_unicode_ci，两列直接 = 会报 1267 Illegal mix of collations，
+     * 所有生成提交都卡在这一步。utf8mb4_bin 顺带把 provider 比成精确匹配。
+     */
+    @Update("UPDATE video_task v JOIN generation_attempt a ON a.id = #{attemptId} AND a.video_task_id = v.id "
+            + "SET v.phase = 'SUBMITTING' WHERE v.id = #{taskId} AND v.current_attempt_id = #{attemptId} "
+            + "AND v.status = 'PROCESSING' AND v.provider = a.provider COLLATE utf8mb4_bin AND a.status = 'SUBMITTING'")
+    int markAttemptSubmitting(@Param("taskId") Long taskId, @Param("attemptId") Long attemptId);
+
+    /** 仅当该 attempt 仍是当前轮次时才把供应商结果映射回公开任务。 */
+    @Update("UPDATE video_task SET provider_task_id = #{providerTaskId}, node_id = #{nodeId}, "
+            + "phase = 'RUNNING', last_attempt_at = NOW(), next_poll_at = NULL "
+            + "WHERE id = #{taskId} AND current_attempt_id = #{attemptId} AND status = 'PROCESSING'")
+    int markAttemptSubmitted(@Param("taskId") Long taskId,
+                             @Param("attemptId") Long attemptId,
+                             @Param("providerTaskId") String providerTaskId,
+                             @Param("nodeId") String nodeId);
+
+    /** 明确未入队才回到可重试阶段；不改公开状态和账务列。 */
+    @Update("UPDATE video_task v JOIN generation_attempt a ON a.id = #{attemptId} AND a.video_task_id = v.id "
+            + "SET v.phase = 'QUEUED' WHERE v.id = #{taskId} AND v.current_attempt_id = #{attemptId} "
+            + "AND v.status = 'PROCESSING' AND a.status = 'PENDING'")
+    int markAttemptQueued(@Param("taskId") Long taskId, @Param("attemptId") Long attemptId);
+
+    /** UNKNOWN 只停放内部阶段；冻结、并发槽和公开 PROCESSING 全部保留。 */
+    @Update("UPDATE video_task v JOIN generation_attempt a ON a.id = #{attemptId} AND a.video_task_id = v.id "
+            + "SET v.phase = 'RECOVERY_REQUIRED' WHERE v.id = #{taskId} AND v.current_attempt_id = #{attemptId} "
+            + "AND v.status = 'PROCESSING' AND a.status = 'SUBMIT_UNKNOWN'")
+    int markAttemptRecoveryRequired(@Param("taskId") Long taskId, @Param("attemptId") Long attemptId);
+
     /** 只写审核列；任务终态、账务快照和产物定位列不在 SQL 中，结构上避免屏蔽误伤结算或 OSS。 */
     @Update("UPDATE video_task SET moderation_status = 'BLOCKED', "
             + "moderation_reason_code = #{reasonCode}, moderation_message = #{message}, "

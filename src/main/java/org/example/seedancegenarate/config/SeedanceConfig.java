@@ -24,7 +24,7 @@ public class SeedanceConfig {
     private String url;
     /**
      * 连接超时（毫秒）。方舟创建/查询任务都是元数据接口，正常秒回；
-     * 不设超时 = HttpURLConnection 无限等待，Ark 挂起时会焊死提交线程和轮询线程。
+     * 不设超时 = HttpURLConnection 无限等待，Ark 挂起时会长期占用 Worker 槽位。
      */
     private int connectTimeoutMs = 5000;
     /**

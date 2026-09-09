@@ -24,6 +24,11 @@ import org.example.seedancegenarate.service.VideoTaskService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
@@ -37,10 +42,12 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * 画布 DAG 执行守卫：<b>连线必须真的决定执行顺序</b>。
@@ -59,6 +66,7 @@ class CanvasRunOrderTest {
     private CanvasArtifactResolver artifactResolver;
     private VideoTaskService videoTaskService;
     private VideoEngine engine;
+    private CanvasNodeTypeRegistry typeRegistry;
     private CanvasRunServiceImpl service;
 
     private final List<CanvasNode> nodes = new ArrayList<>();
@@ -82,7 +90,7 @@ class CanvasRunOrderTest {
 
         GenerateNodeType generate = new GenerateNodeType(engineRegistry);
         ReflectionTestUtils.setField(generate, "defaultProvider", "seedance");
-        CanvasNodeTypeRegistry typeRegistry = new CanvasNodeTypeRegistry(
+        typeRegistry = new CanvasNodeTypeRegistry(
                 List.of(new AssetNodeType(), new TextNodeType(), generate));
 
         // 默认原样透传：多数用例不关心地址解析，只有专门的两条才让它换/抛
@@ -91,9 +99,18 @@ class CanvasRunOrderTest {
                 .thenAnswer(inv -> inv.getArgument(1));
 
         videoTaskService = mock(VideoTaskService.class);
+        TransactionTemplate transactionTemplate = mock(TransactionTemplate.class);
+        when(transactionTemplate.execute(any())).thenAnswer(invocation -> {
+            TransactionCallback<?> callback = invocation.getArgument(0);
+            return callback.doInTransaction(mock(TransactionStatus.class));
+        });
+        when(nodeMapper.beginRun(any(), any(), anyString())).thenReturn(1);
+        when(nodeMapper.finishTaskIfCurrent(any(), anyString(), anyString(),
+                nullable(String.class), nullable(String.class))).thenReturn(1);
 
         service = new CanvasRunServiceImpl(canvasMapper, nodeMapper, edgeMapper, typeRegistry,
-                asyncJobService, submitService, artifactResolver, videoTaskService, new ObjectMapper());
+                asyncJobService, submitService, artifactResolver, videoTaskService, new ObjectMapper(),
+                transactionTemplate);
 
         Canvas canvas = new Canvas();
         canvas.setId(CID);
@@ -158,9 +175,9 @@ class CanvasRunOrderTest {
         assertEquals(1, enqueued.size());
         assertEquals("A", enqueued.get(0).getNodeKey());
         verify(asyncJobService).enqueue(eq(CanvasRunServiceImpl.JOB_TYPE),
-                eq(CanvasRunServiceImpl.jobKey(CID, 2L)), anyString());
+                contains("canvas:" + CID + ":node:2:request:canvas:2:"), anyString());
         verify(asyncJobService, never()).enqueue(eq(CanvasRunServiceImpl.JOB_TYPE),
-                eq(CanvasRunServiceImpl.jobKey(CID, 3L)), anyString());
+                contains("canvas:" + CID + ":node:3:request:"), anyString());
 
         // B 被标 BLOCKED 且带原因
         ArgumentCaptor<CanvasNode> patches = ArgumentCaptor.forClass(CanvasNode.class);
@@ -185,7 +202,7 @@ class CanvasRunOrderTest {
         service.applyTaskFinished("tsk_A", "SUCCESS", "http://cdn/a.mp4", null);
 
         verify(asyncJobService).enqueue(eq(CanvasRunServiceImpl.JOB_TYPE),
-                eq(CanvasRunServiceImpl.jobKey(CID, 3L)), anyString());
+                contains("canvas:" + CID + ":node:3:request:canvas:3:"), anyString());
     }
 
     @Test
@@ -203,7 +220,30 @@ class CanvasRunOrderTest {
         service.applyTaskFinished("tsk_A", "FAILED", null, "内容审核未通过");
 
         verify(asyncJobService, never()).enqueue(anyString(),
-                eq(CanvasRunServiceImpl.jobKey(CID, 3L)), anyString());
+                contains("canvas:" + CID + ":node:3:request:"), anyString());
+    }
+
+    @Test
+    void staleTerminalEventCannotAdvanceANewerNodeGeneration() {
+        // 【测什么】查到旧 task 后用户已 beginRun，terminal CAS=0 时不推进下游、不汇总画布。
+        // 【怎么算红】退回 updateById(PK) 或忽略 rows，会让旧产物覆盖新轮并触发下游花钱。
+        asset(1L, "a", "http://cdn/i.png");
+        CanvasNode old = gen(2L, "A", "PROCESSING");
+        old.setTaskId("tsk_old");
+        gen(3L, "B", "BLOCKED");
+        link("a", "A", "image");
+        link("A", "B", "image");
+        when(nodeMapper.selectOne(any())).thenReturn(old);
+        when(nodeMapper.finishTaskIfCurrent(eq(2L), eq("tsk_old"), eq("SUCCESS"),
+                org.mockito.ArgumentMatchers.anyString(), eq(""))).thenReturn(0);
+
+        service.applyTaskFinished("tsk_old", "SUCCESS", "http://cdn/old.mp4", null);
+
+        verify(nodeMapper).finishTaskIfCurrent(eq(2L), eq("tsk_old"), eq("SUCCESS"),
+                contains("http://cdn/old.mp4"), eq(""));
+        verify(asyncJobService, never()).enqueue(anyString(),
+                contains("canvas:" + CID + ":node:3:request:"), anyString());
+        verify(canvasMapper, never()).updateById(any(Canvas.class));
     }
 
     @Test
@@ -239,22 +279,23 @@ class CanvasRunOrderTest {
         assertEquals(List.of("http://cdn/ref.png"), req.imageUrls());
         assertTrue(req.prompt().contains("赛博朋克风格"), "提示词口的文本要并进 prompt: " + req.prompt());
         assertEquals("canvas:2:req", req.requestId(), "复用节点上的幂等键，重试不重复建任务");
+        verify(nodeMapper).linkTaskIfMissing(2L, "canvas:2:req", "tsk_new");
     }
 
     @Test
     void missingRequiredPortFailsNodeInsteadOfSubmitting() throws Exception {
         // 测什么：模型要求参考图但一张都没接 → 直接标 FAILED，不提交
         // 怎么算红：照样提交 —— 冻结额度后被提供方拒绝，用户白等一轮还得自己看日志找原因
-        gen(2L, "A", "PROCESSING");
+        CanvasNode node = gen(2L, "A", "PROCESSING");
+        node.setSubmitRequestId("canvas:2:req");
         when(nodeMapper.selectById(2L)).thenReturn(nodes.get(0));
 
         service.submitNodeForJob(2L);
 
         verify(submitService, never()).submit(any());
-        ArgumentCaptor<CanvasNode> patch = ArgumentCaptor.forClass(CanvasNode.class);
-        verify(nodeMapper).updateById(patch.capture());
-        assertEquals("FAILED", patch.getValue().getStatus());
-        assertTrue(patch.getValue().getErrorMsg().contains("参考图"));
+        ArgumentCaptor<String> error = ArgumentCaptor.forClass(String.class);
+        verify(nodeMapper).failIfCurrent(eq(2L), eq("canvas:2:req"), error.capture());
+        assertTrue(error.getValue().contains("参考图"));
     }
 
     @Test
@@ -290,7 +331,7 @@ class CanvasRunOrderTest {
         assertEquals(1, enqueued.size(), "只有 A 该入队");
         assertEquals("A", enqueued.get(0).getNodeKey());
         verify(asyncJobService, never()).enqueue(eq(CanvasRunServiceImpl.JOB_TYPE),
-                eq(CanvasRunServiceImpl.jobKey(CID, 3L)), anyString());
+                contains("canvas:" + CID + ":node:3:request:"), anyString());
     }
 
     @Test
@@ -327,13 +368,8 @@ class CanvasRunOrderTest {
 
         service.applyTaskFinished("tsk_A", "SUCCESS", "http://cdn/a.mp4", null);
 
-        ArgumentCaptor<CanvasNode> patches = ArgumentCaptor.forClass(CanvasNode.class);
-        verify(nodeMapper, org.mockito.Mockito.atLeastOnce()).updateById(patches.capture());
-        CanvasNode patch = patches.getAllValues().stream()
-                .filter(p -> "SUCCESS".equals(p.getStatus()))
-                .findFirst().orElseThrow(() -> new AssertionError("没有写入 SUCCESS 的 patch"));
-        assertEquals("", patch.getErrorMsg(),
-                "成功回填必须显式写空串清掉旧失败原因；写 null 会被 updateById 跳过");
+        verify(nodeMapper).finishTaskIfCurrent(eq(2L), eq("tsk_A"), eq("SUCCESS"),
+                contains("http://cdn/a.mp4"), eq(""));
     }
 
     @Test
@@ -376,6 +412,7 @@ class CanvasRunOrderTest {
         up.setTaskId("tsk_up");
         up.setOutput("{\"mediaType\":\"IMAGE\",\"url\":\"tsk_up.png\"}");
         CanvasNode down = gen(3L, "B", "PENDING");
+        down.setSubmitRequestId("canvas:3:req");
         link("A", "B", "image");
         when(nodeMapper.selectById(3L)).thenReturn(down);
         when(artifactResolver.toFetchable(any(), any()))
@@ -384,12 +421,9 @@ class CanvasRunOrderTest {
         service.submitNodeForJob(3L);
 
         verify(submitService, never()).submit(any());
-        ArgumentCaptor<CanvasNode> patches = ArgumentCaptor.forClass(CanvasNode.class);
-        verify(nodeMapper, org.mockito.Mockito.atLeastOnce()).updateById(patches.capture());
-        assertTrue(patches.getAllValues().stream().anyMatch(p ->
-                        "FAILED".equals(p.getStatus()) && p.getErrorMsg() != null
-                                && p.getErrorMsg().contains("无法作为下游输入")),
-                "必须标 FAILED 并写明原因");
+        ArgumentCaptor<String> error = ArgumentCaptor.forClass(String.class);
+        verify(nodeMapper).failIfCurrent(eq(3L), eq("canvas:3:req"), error.capture());
+        assertTrue(error.getValue().contains("无法作为下游输入"), "必须标 FAILED 并写明原因");
     }
 
     @Test
@@ -410,11 +444,38 @@ class CanvasRunOrderTest {
 
         service.reconcileRunning(CID);
 
-        ArgumentCaptor<CanvasNode> patches = ArgumentCaptor.forClass(CanvasNode.class);
-        verify(nodeMapper, org.mockito.Mockito.atLeastOnce()).updateById(patches.capture());
-        assertTrue(patches.getAllValues().stream().anyMatch(p ->
-                        "FAILED".equals(p.getStatus()) && p.getId().equals(2L)),
-                "任务已 FAILED，对账必须把节点也推到 FAILED");
+        verify(nodeMapper).finishTaskIfCurrent(
+                2L, "tsk_A", "FAILED", null, "Unexpected end of file from server");
+    }
+
+    @Test
+    void reconcileCatchUpRollsBackNodeFinishWhenDownstreamEnqueueFails() {
+        // 【测什么】对账补回填的 CAS 与下游推进处于同一显式事务；推进失败时整段回滚可重放。
+        // 【怎么算红】依赖同类 @Transactional self-invocation 时 CAS 已自动提交，下游仍 BLOCKED 且不再被扫描。
+        CanvasNode upstream = gen(2L, "A", "PROCESSING");
+        upstream.setTaskId("tsk_A");
+        gen(3L, "B", "BLOCKED");
+        link("A", "B", "image");
+        when(nodeMapper.selectOne(any())).thenReturn(upstream);
+        VideoTask finished = new VideoTask();
+        finished.setBizTaskId("tsk_A");
+        finished.setStatus("SUCCESS");
+        finished.setVideoUrl("http://cdn/a.mp4");
+        when(videoTaskService.getOne(any(), anyBoolean())).thenReturn(finished);
+        doThrow(new IllegalStateException("enqueue failed")).when(asyncJobService)
+                .enqueue(eq(CanvasRunServiceImpl.JOB_TYPE), contains(":node:3:request:"), anyString());
+        PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
+        TransactionStatus status = mock(TransactionStatus.class);
+        when(manager.getTransaction(any(TransactionDefinition.class))).thenReturn(status);
+        CanvasRunServiceImpl local = new CanvasRunServiceImpl(
+                canvasMapper, nodeMapper, edgeMapper, typeRegistry, asyncJobService, submitService,
+                artifactResolver, videoTaskService, new ObjectMapper(), new TransactionTemplate(manager));
+
+        assertThrows(IllegalStateException.class, () -> local.reconcileRunning(CID));
+
+        verify(nodeMapper).finishTaskIfCurrent(eq(2L), eq("tsk_A"), eq("SUCCESS"),
+                contains("http://cdn/a.mp4"), eq(""));
+        verify(manager, org.mockito.Mockito.atLeastOnce()).rollback(status);
     }
 
     @Test
@@ -455,13 +516,35 @@ class CanvasRunOrderTest {
                 .findMergedAnnotation(
                         org.springframework.util.ReflectionUtils.findMethod(
                                 org.example.seedancegenarate.mapper.CanvasNodeMapper.class,
-                                "occupyForSubmit", Long.class),
+                                "occupyForSubmit", Long.class, String.class),
                         org.apache.ibatis.annotations.Update.class)
                 .value()[0].replaceAll("\\s+", " ");
 
         assertTrue(sql.contains("error_msg = NULL"), "占位语句必须一并清 error_msg，实际: " + sql);
         assertTrue(sql.contains("status = 'PROCESSING'") && sql.contains("'PENDING', 'FAILED', 'BLOCKED'"),
                 "占位的状态门不能被改动（它同时是防并发双提交的闸），实际: " + sql);
+    }
+
+    @Test
+    void canvasGenerationSqlClearsOldTaskAndFencesTerminalEvent() {
+        // 【测什么】rerun 原子清旧 taskId，终态回填必须匹配 PROCESSING+taskId。
+        // 【怎么算红】旧 taskId 留在新代际或终态仅按 PK 写，迟到 Worker/事件会污染新一轮。
+        String begin = mapperSql("beginRun", Long.class, String.class, String.class);
+        String finish = mapperSql("finishTaskIfCurrent", Long.class, String.class,
+                String.class, String.class, String.class);
+
+        assertTrue(begin.contains("task_id = NULL"), begin);
+        assertTrue(begin.contains("submit_request_id = #{requestId}"), begin);
+        assertTrue(finish.contains("status = 'PROCESSING'"), finish);
+        assertTrue(finish.contains("task_id = #{taskId}"), finish);
+    }
+
+    private String mapperSql(String method, Class<?>... parameterTypes) {
+        var reflected = org.springframework.util.ReflectionUtils.findMethod(
+                CanvasNodeMapper.class, method, parameterTypes);
+        var update = org.springframework.core.annotation.AnnotatedElementUtils.findMergedAnnotation(
+                reflected, org.apache.ibatis.annotations.Update.class);
+        return String.join(" ", update.value()).replaceAll("\\s+", " ");
     }
 
 }

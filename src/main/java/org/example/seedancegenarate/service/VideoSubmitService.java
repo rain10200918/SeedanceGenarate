@@ -39,12 +39,18 @@ public interface VideoSubmitService {
     /** 查询当前用户指定幂等键对应的任务；用于在上传参考素材前短路重复 UI 请求。 */
     VideoTask findByRequestId(Long userId, String requestId);
 
+    /** UI 上传素材前的幂等快路：无记录返回 null；durable 返回任务；半成品统一抛 409。 */
+    VideoTask findAcceptedByRequestId(Long userId, String requestId);
+
     /**
      * 完整提交编排：解析实际生效模型 → 开放闸门 → 生成业务 ID 并落库 PROCESSING
-     * → 引擎提交 → 回写 providerTaskId/nodeId。
+     * → 冻结 → 持久化 generation attempt 与提交 job；供应商 HTTP 由异步 Worker 执行。
      * 提交时冻结额度；只有成功终态才结算并记录消费，失败/超时释放冻结；请求幂等键贯穿任务。
      */
     VideoTask submit(SubmitRequest request) throws Exception;
+
+    /** 已获用户确认的报价：实际冻结前核验同模型/时长/输出类型/币种及金额，不允许涨价绕过审批。 */
+    VideoTask submitApproved(SubmitRequest request, PriceEstimate approved) throws Exception;
 
     /** 统一提交入参；{@code imageUrls}/{@code videoUrls}/{@code audioUrls} 为已上传到 OSS 的参考素材 URL（两条入口各自负责素材获取）。 */
     record SubmitRequest(
@@ -60,8 +66,14 @@ public interface VideoSubmitService {
             Double megapixels,
             Long apiKeyId,
             String requestId,
-            String nodeId
+            String nodeId,
+            List<StoredImageReferences.Reference> storedImageReferences
     ) {
+        public SubmitRequest(Long userId,String provider,String model,String prompt,List<String> imageUrls,
+                             List<String> videoUrls,List<String> audioUrls,Integer duration,String ratio,
+                             Double megapixels,Long apiKeyId,String requestId,String nodeId) {
+            this(userId,provider,model,prompt,imageUrls,videoUrls,audioUrls,duration,ratio,megapixels,apiKeyId,requestId,nodeId,List.of());
+        }
         /** 兼容旧调用方：没有显式幂等键时由提交服务生成一次性键。 */
         public SubmitRequest(Long userId, String provider, String model, String prompt,
                              List<String> imageUrls, List<String> videoUrls, List<String> audioUrls,

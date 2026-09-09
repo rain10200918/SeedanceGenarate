@@ -24,6 +24,16 @@ groups:
           summary: '存在死信作业'
           description: '{{ $value }} 个 async_job 重试耗尽进入 DEAD，查看 async_job 表确认原因。'
 
+      # 供应商是否已接单无法判定：系统为避免重复付费生成会保守停放，需人工核对。
+      - alert: TaskRecoveryRequired
+        expr: task_recovery_required_count > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: '存在待人工核对的提交任务'
+          description: '{{ $value }} 个任务的供应商提交结果不确定，请核对 generation_attempt 与供应商后台，禁止盲目重投。'
+
       # 成功率下降：近 5 分钟窗口成功率低于 90%（引擎批量故障信号）。
       - alert: TaskSuccessRateLow
         expr: task_success_total / (task_success_total + task_failed_total) < 0.9

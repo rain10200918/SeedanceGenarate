@@ -123,7 +123,7 @@ public class VideoController {
                 ? idempotencyKey.trim()
                 : (StringUtils.hasText(formRequestId) ? formRequestId.trim()
                 : "ui:" + UUID.randomUUID().toString().replace("-", ""));
-        VideoTask existing = videoSubmitService.findByRequestId(userId, requestId);
+        VideoTask existing = videoSubmitService.findAcceptedByRequestId(userId, requestId);
         if (existing != null) {
             return Result.success(existing);
         }
@@ -243,7 +243,7 @@ public class VideoController {
                 ? idempotencyKey.trim()
                 : (StringUtils.hasText(request.getRequestId()) ? request.getRequestId().trim()
                 : "ui:" + UUID.randomUUID().toString().replace("-", ""));
-        VideoTask existing = videoSubmitService.findByRequestId(userId, requestId);
+        VideoTask existing = videoSubmitService.findAcceptedByRequestId(userId, requestId);
         if (existing != null) {
             return Result.success(existing);
         }
@@ -411,7 +411,7 @@ public class VideoController {
                 .orderByDesc(VideoTask::getId);
         // 列表瘦身：只取列表列（列表展示提示词/缩略图，砍掉 error_msg 大文本）
         wrapper.select(VideoTask::getId, VideoTask::getTaskId, VideoTask::getBizTaskId, VideoTask::getUserId,
-                VideoTask::getStatus, VideoTask::getVideoUrl, VideoTask::getImages,
+                VideoTask::getStatus, VideoTask::getPhase, VideoTask::getVideoUrl, VideoTask::getImages,
                 VideoTask::getDuration, VideoTask::getRatio, VideoTask::getProvider, VideoTask::getNodeId,
                 VideoTask::getModel, VideoTask::getOutputType, VideoTask::getCostAmount,
                 VideoTask::getPrompt, VideoTask::getCreateTime, VideoTask::getUpdateTime,

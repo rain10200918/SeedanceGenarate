@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.config.SeedanceConfig;
+import org.example.seedancegenarate.engine.SubmissionNotAcceptedException;
 import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.mapper.VideoTaskMapper;
 import org.example.seedancegenarate.service.SeedanceService;
@@ -138,11 +139,13 @@ public class SeedanceServiceImpl implements SeedanceService {
 
 
         if(!response.isOk()){
-
-            throw new RuntimeException(
-                    "Seedance调用失败:"
-                            + response.body()
-            );
+            int status = response.getStatus();
+            String message = "Seedance调用失败(" + status + "):" + response.body();
+            // 已收到非超时 4xx，说明服务端明确拒绝且未创建任务；408 仍可能在服务端已接单。
+            if (status >= 400 && status < 500 && status != 408) {
+                throw new SubmissionNotAcceptedException(message);
+            }
+            throw new RuntimeException(message);
         }
 
         JsonNode node =

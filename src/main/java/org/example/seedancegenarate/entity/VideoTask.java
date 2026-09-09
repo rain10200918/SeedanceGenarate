@@ -2,6 +2,7 @@ package org.example.seedancegenarate.entity;
 
 import com.baomidou.mybatisplus.annotation.*;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -23,16 +24,28 @@ public class VideoTask {
     /** 提供方任务 ID；调用引擎提交成功后回写，轮询时必须使用此字段。 */
     @JsonIgnore
     private String providerTaskId;
+    /** 当前远程生成轮次；旧任务可为 null。 */
+    @JsonIgnore
+    private Long currentAttemptId;
     private String prompt;
     /** 参考图片 OSS URL 的 JSON 数组（顺序对应 <Picture 1..N>） */
     private String images;
+    /** Internal, owner-validated source task/object identities; never exposed as public URLs. */
+    @JsonIgnore
+    private String storedImageReferences;
     /** 参考视频 OSS URL 的 JSON 数组（顺序对应 <Video 1..N>） */
     private String referenceVideos;
     /** 参考音频 OSS URL 的 JSON 数组（顺序对应 <Audio 1..N>） */
     private String referenceAudios;
     private Integer duration;
     private String ratio;
+    /** 提交时分辨率快照，供异步 Worker 重建完整命令。 */
+    @JsonIgnore
+    private Double megapixels;
     private String status;
+    /** 内部执行阶段，不改变对外 PROCESSING / SUCCESS / FAILED 契约。 */
+    @JsonIgnore
+    private String phase;
     /** 对前端公开的稳定媒体路由标识；旧记录为 data/videos/ 本地路径，新记录为业务 ID 文件名。 */
     private String videoUrl;
     /** 正式产物存储类型（当前为 OSS）。 */
@@ -107,5 +120,24 @@ public class VideoTask {
     /** 调用 Seedance / ComfyUI 时使用的提供方任务 ID；旧数据回退到历史 task_id。 */
     public String remoteTaskId() {
         return providerTaskId == null || providerTaskId.isBlank() ? taskId : providerTaskId;
+    }
+
+    /** 前端不需要知道内部 phase 全集，只拿稳定的用户可见处理语义。 */
+    @JsonProperty("processingState")
+    public String processingState() {
+        if (!"PROCESSING".equals(status)) {
+            return null;
+        }
+        return "RECOVERY_REQUIRED".equals(phase) ? "RECOVERING" : "GENERATING";
+    }
+
+    @JsonProperty("processingMessage")
+    public String processingMessage() {
+        if (!"PROCESSING".equals(status)) {
+            return null;
+        }
+        return "RECOVERY_REQUIRED".equals(phase)
+                ? "生成节点响应异常，系统正在恢复或等待管理员处理，请勿重复提交"
+                : "任务正在生成";
     }
 }
