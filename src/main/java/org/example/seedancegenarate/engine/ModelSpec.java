@@ -30,8 +30,20 @@ public record ModelSpec(
         List<Double> megapixels,
         int videoMax,
         int audioMax,
-        boolean needImageOrVideo
+        boolean needImageOrVideo,
+        ImageInputMode imageInputMode
 ) {
+    public enum ImageInputMode { NONE, UNSPECIFIED, REFERENCE_IMAGE, FIRST_FRAME, FIRST_LAST_FRAME }
+    public ModelSpec(String provider,String model,String label,boolean needImages,int imageMin,int imageMax,
+                     List<String> ratios,int durationMin,int durationMax,List<Integer> durations,OutputType outputType,
+                     List<Double> megapixels,int videoMax,int audioMax,boolean needImageOrVideo) {
+        this(provider,model,label,needImages,imageMin,imageMax,ratios,durationMin,durationMax,durations,outputType,
+                megapixels,videoMax,audioMax,needImageOrVideo,imageMax==0?ImageInputMode.NONE:ImageInputMode.UNSPECIFIED);
+    }
+    public ModelSpec withImageInputMode(ImageInputMode mode) {
+        return new ModelSpec(provider,model,label,needImages,imageMin,imageMax,ratios,durationMin,durationMax,
+                durations,outputType,megapixels,videoMax,audioMax,needImageOrVideo,mode);
+    }
     /** 兼容：不指定 outputType（默认视频）、不支持分辨率选择（megapixels 空）、不支持视频/音频参考。 */
     public ModelSpec(String provider, String model, String label, boolean needImages,
                      int imageMin, int imageMax, List<String> ratios,

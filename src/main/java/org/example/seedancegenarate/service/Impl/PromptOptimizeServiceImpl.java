@@ -4,15 +4,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.service.PromptContext;
 import org.example.seedancegenarate.service.PromptOptimizeService;
+import org.example.seedancegenarate.service.PromptTemplateService;
 import org.example.seedancegenarate.service.llm.LlmCallMeta;
 import org.example.seedancegenarate.service.llm.LlmChatResponse;
 import org.example.seedancegenarate.service.llm.LlmRouter;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,9 +23,7 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
     /** 通用输出铁律，追加在任何模板末尾，保证输出可直接使用。输出语言由各模板自行规定（如 h3 模板要求英文正文、对白保留原文）。 */
     private static final String OUTPUT_FOOTER =
             "只输出最终优化后的提示词本身，不要输出分析过程、标题、说明、引号或任何额外内容；输出语言、结构与格式一律以模板要求为准。";
-    /** 模板文件都缺失时的兜底指导 */
-    private static final String FALLBACK_GUIDE =
-            "你是 AI 生成提示词专家，请把用户的粗略描述改写成一条高质量、结构清晰的提示词。";
+    private final PromptTemplateService templates = new PromptTemplateService();
 
     /** 用哪条 LLM 通道由路由决定；这里只关心模板和消息。「未配置」也由路由报 */
     private final LlmRouter llmRouter;
@@ -67,48 +62,7 @@ public class PromptOptimizeServiceImpl implements PromptOptimizeService {
 
     /** 系统提示 = 按 model 选中的模板（注入上下文）+ 通用输出铁律 */
     String buildSystemPrompt(PromptContext context) {
-        String model = context == null ? null : context.model();
-        String guide = injectContext(loadGuide(model), context);
-        return guide + "\n\n" + OUTPUT_FOOTER;
-    }
-
-    /** 载入 prompts/{model}.md；缺失回退 prompts/default.md；再缺失用兜底常量 */
-    private String loadGuide(String model) {
-        String guide = null;
-        if (model != null && !model.isBlank()) {
-            guide = readClasspath("prompts/" + model + ".md");
-        }
-        if (guide == null) {
-            guide = readClasspath("prompts/default.md");
-        }
-        return guide == null ? FALLBACK_GUIDE : guide;
-    }
-
-    private String readClasspath(String path) {
-        ClassPathResource res = new ClassPathResource(path);
-        if (!res.exists()) {
-            return null;
-        }
-        try (InputStream in = res.getInputStream()) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
-        } catch (IOException e) {
-            log.warn("读取提示词模板失败: {}", path);
-            return null;
-        }
-    }
-
-    /** 把上下文注入模板占位符；未提供的置为空/0 */
-    private String injectContext(String template, PromptContext ctx) {
-        if (ctx == null) {
-            return template;
-        }
-        return template
-                .replace("{imageCount}", String.valueOf(ctx.imageCount() == null ? 0 : ctx.imageCount()))
-                .replace("{videoCount}", String.valueOf(ctx.videoCount() == null ? 0 : ctx.videoCount()))
-                .replace("{audioCount}", String.valueOf(ctx.audioCount() == null ? 0 : ctx.audioCount()))
-                .replace("{duration}", ctx.duration() == null ? "" : String.valueOf(ctx.duration()))
-                .replace("{ratio}", ctx.ratio() == null ? "" : ctx.ratio())
-                .replace("{model}", ctx.model() == null ? "" : ctx.model());
+        return templates.guide(context) + "\n\n" + OUTPUT_FOOTER;
     }
 
     private Map<String, Object> message(String role, String content) {

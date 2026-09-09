@@ -1,0 +1,33 @@
+package org.example.seedancegenarate.agent.api;
+
+import lombok.RequiredArgsConstructor;
+import org.example.seedancegenarate.agent.application.*;
+import org.example.seedancegenarate.config.RateLimitConfig;
+import org.example.seedancegenarate.context.UserContext;
+import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.exception.BusinessException;
+import org.example.seedancegenarate.service.TokenBucketRateLimitService;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
+@RestController @RequiredArgsConstructor @RequestMapping("/api/agent/conversations")
+public class AgentBatchController {
+    private final AgentBatchApplication batches;private final AgentApplication app;private final TokenBucketRateLimitService rate;
+    private static final RateLimitConfig.Bucket COMMANDS=new RateLimitConfig.Bucket(true,20,10,60L);
+    @PostMapping("/{id}/approval-grants/{grantId}")
+    public Result<AgentViews.Snapshot> answer(@PathVariable long id,@PathVariable String grantId,@RequestBody AgentBatchApplication.Answer answer) {
+        Long user=UserContext.getUserId();if(user==null)throw BusinessException.unauthorized("请先登录");
+        if(id<1)throw BusinessException.badRequest("会话编号无效");
+        if(!rate.tryAcquireDistributed("agent:command:"+user,COMMANDS).allowed())throw new BusinessException(429,"操作太频繁，请稍后再试");
+        batches.answer(user,id,grantId,answer);return Result.success(app.snapshot(user,id));
+    }
+    @ExceptionHandler(BusinessException.class) public ResponseEntity<Result<?>> rejected(BusinessException e) {
+        int code=java.util.Set.of(400,401,403,404,409,429).contains(e.getCode())?e.getCode():500;
+        return ResponseEntity.status(code).body(Result.fail(code,code==500?"批次确认暂未确认，请重试原请求":e.getMessage()));
+    }
+    @ExceptionHandler({HttpMessageNotReadableException.class,MethodArgumentTypeMismatchException.class})
+    public ResponseEntity<Result<?>> malformed(){return ResponseEntity.badRequest().body(Result.fail(400,"批次确认格式无效"));}
+    @ExceptionHandler(Exception.class) public ResponseEntity<Result<?>> unavailable(){return ResponseEntity.internalServerError().body(Result.fail(500,"批次确认暂未确认，请重试原请求"));}
+}

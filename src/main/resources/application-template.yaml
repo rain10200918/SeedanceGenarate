@@ -1,3 +1,26 @@
+agent:
+  runtime:
+    max-decisions-per-turn: ${AGENT_RUNTIME_MAX_DECISIONS_PER_TURN:16}
+    max-plan-steps: ${AGENT_RUNTIME_MAX_PLAN_STEPS:100}
+    max-human-resumes: ${AGENT_RUNTIME_MAX_HUMAN_RESUMES:8}
+  decision-diagnostics:
+    # Local development only: contains raw rejected LLM output. Disable after troubleshooting.
+    enabled: ${AGENT_DECISION_DIAGNOSTICS_ENABLED:false}
+    directory: ${AGENT_DECISION_DIAGNOSTICS_DIRECTORY:./.agent-diagnostics}
+  model-call:
+    # 旧版本兼容：仅支持图片能力尚为NULL的旧通道读取此名单。
+    # 日常在管理后台「AI 通道」勾选「支持图片理解」，DB显式true/false优先，无需改YAML。
+    image-channels: []
+    # 仅后台 Agent 模型调用；1000..600000ms，同步优化/试跑/技能编译仍使用通道超时。
+    timeout-ms: ${AGENT_MODEL_CALL_TIMEOUT_MS:300000}
+    # 后台单次输出预算（1024..24576），保留更高通道配置；NONE不传token参数。
+    # length仅沿原模型操作修复一次：提升预算（自动上限24576）并精简指令，总尝试仍最多3次。
+    planner-tokens: ${AGENT_PLANNER_OUTPUT_TOKENS:4096}
+    plan-tokens: ${AGENT_PLAN_OUTPUT_TOKENS:8192}
+    script-tokens: ${AGENT_SCRIPT_OUTPUT_TOKENS:8192}
+    storyboard-tokens: ${AGENT_STORYBOARD_OUTPUT_TOKENS:12288}
+    prompt-tokens: ${AGENT_PROMPT_OUTPUT_TOKENS:4096}
+
 spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL}

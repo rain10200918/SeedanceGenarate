@@ -11,3 +11,5 @@ mvnw.cmd
 src
 pom.xml
 !target/*.jar
+# Development diagnostics can contain private model responses.
+.agent-diagnostics/

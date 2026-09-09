@@ -70,6 +70,7 @@ public class ConversationService {
 
     public List<ConversationView> list(Long userId, boolean includeArchived) {
         LambdaQueryWrapper<Conversation> q = new LambdaQueryWrapper<Conversation>()
+                .eq(Conversation::getCreationMode, "LEGACY")
                 .eq(Conversation::getUserId, userId)
                 .orderByDesc(Conversation::getLastMessageAt)
                 .orderByDesc(Conversation::getId)
@@ -157,7 +158,7 @@ public class ConversationService {
         // ① 锁对话、幂等重放、预留整轮 seq、落用户气泡
         Turn turn = transactionTemplate.execute(status -> {
             Conversation conv = conversationMapper.lockForOwner(conversationId, userId);
-            if (conv == null) {
+            if (conv == null || "AGENT".equals(conv.getCreationMode())) {
                 throw BusinessException.notFound("对话不存在");
             }
             if (Boolean.TRUE.equals(conv.getArchived())) {
@@ -372,7 +373,7 @@ public class ConversationService {
         Conversation c = conversationMapper.selectOne(new LambdaQueryWrapper<Conversation>()
                 .eq(Conversation::getId, id)
                 .eq(Conversation::getUserId, userId));
-        if (c == null) {
+        if (c == null || "AGENT".equals(c.getCreationMode())) {
             throw BusinessException.notFound("对话不存在");
         }
         return c;

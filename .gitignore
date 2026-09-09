@@ -78,3 +78,9 @@ src/main/resources/alipay/
 # 运行时产物：data/images 是用户上传（file.upload-path），data/videos 是迁移 OSS 前的本地视频，
 # 由应用写入、VideoCleanupTask 按 48h 删除。之前有 98MB 视频进了历史，每次清理都在 status 里刷出几十行删除。
 data/
+# Local opt-in Agent diagnostics may contain user/model content.
+.agent-diagnostics/
+
+# 本地 AI 开发工作区：Claude Code 配置与 my-loop 笔记（个人机器，不入库）
+.claude/
+.my-loop/

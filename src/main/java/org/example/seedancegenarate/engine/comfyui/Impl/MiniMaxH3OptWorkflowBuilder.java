@@ -96,7 +96,7 @@ public class MiniMaxH3OptWorkflowBuilder implements WorkflowBuilder {
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3多参生视频 优化版",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),
-                OutputType.VIDEO, MEGAPIXELS, VIDEO_MAX, AUDIO_MAX, true);
+                OutputType.VIDEO, MEGAPIXELS, VIDEO_MAX, AUDIO_MAX, true).withImageInputMode(ModelSpec.ImageInputMode.REFERENCE_IMAGE);
     }
 
     @Override

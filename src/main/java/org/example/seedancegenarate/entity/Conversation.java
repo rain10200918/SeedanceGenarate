@@ -22,6 +22,8 @@ public class Conversation {
     private String title;
     /** AUTO 由首条消息生成 / USER 用户改过名，之后不再自动覆盖 */
     private String titleSource;
+    /** LEGACY 对话与持久化 AGENT 的写入入口隔离。 */
+    private String creationMode;
     private LocalDateTime lastMessageAt;
     /** 已分配的 seq 上限：发一轮消息时在行锁内一次预留整轮的槽位 */
     private Integer messageCount;
