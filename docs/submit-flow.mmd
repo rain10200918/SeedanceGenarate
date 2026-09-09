@@ -1,0 +1,212 @@
+# 提交一个任务：从点击到出片的完整分支图（Mermaid）
+# 用法：把任意一张图（``` 之间的内容）整体复制到 https://mermaid.live 渲染。
+#
+# ⚠ 历史图：口径止于 2026-08-28，已被 2026-09-02 的持久化 Worker 改造取代。
+# 当前链路请以 README「一次生成的任务生命周期」和 .my-loop/SHARED.md 为准；
+# 本文件仅保留用于理解旧同步流程，禁止作为上线或故障处置依据。
+# 当时约定改了下面这些地方之一，这张图就要跟着改：
+#   VideoSubmitServiceImpl.submit / admit · ComfyUiEngine.submit / poll / probeQueueOrLost
+#   ComfyUiNodeScheduler.pick · TaskRetryPolicy.retryOrFail · ComfyUiProber
+#
+# 过期的图比没有图更危险 —— 它让人自信地做出错误判断。
+
+# ============================================================
+# 图 1 · 主干：从请求进来到发给 ComfyUI
+# ============================================================
+
+flowchart TB
+    START(["用户点「生成」"]) --> ENTRY{"从哪个入口进来？"}
+
+    ENTRY -->|"POST /api/v1/videos<br/>对外 API"| TB1["令牌桶：按<b>账号</b>分桶<br/>没席位 10 突发/5 每分<br/>有席位按席位推导"]
+    ENTRY -->|"/api/video/text2video<br/>网页"| TB2["令牌桶：按用户<br/>3 突发 / 1 每分"]
+    ENTRY -->|"画布 / 流水线"| TB3["<b>没有令牌桶</b><br/>（已知缺口）"]
+
+    TB1 --> BUCKET{"桶里还有令牌？"}
+    TB2 --> BUCKET
+    TB3 --> SPEC
+    BUCKET -->|"空了"| T1(["<b>终局 T1</b><br/>429 + Retry-After<br/>任务没建 · 钱没动"]):::stop
+    BUCKET -->|"Redis 挂了"| T1
+    BUCKET -->|"有"| SPEC
+
+    SPEC{"resolveSpec<br/>provider / model / 时长"}
+    SPEC -->|"model 不认识"| T3
+    SPEC -->|"模型被管理员关闭"| T3(["<b>终局 T3</b><br/>抛异常<br/>任务没建 · 钱没动"]):::stop
+    SPEC -->|"ok"| VALID{"素材数量对得上<br/>模型能力吗？"}
+    VALID -->|"传了 3 张图<br/>模型只吃 2 张"| T3
+    VALID -->|"ok"| IDEM
+
+    IDEM{"requestId 之前<br/>用过吗？"}
+    IDEM -->|"命中"| T2(["<b>终局 T2</b><br/>直接返回上次那条任务<br/>零副作用"]):::ok
+    IDEM -->|"新的"| SAVE
+
+    SAVE["建 VideoTask（PROCESSING）<br/>算价 → <b>金额快照写进任务行</b><br/>save()"]
+    SAVE --> ADMIT
+
+    ADMIT{"这个账号<br/>有并发额度限制吗？"}
+    ADMIT -->|"不限额<br/>（全体个人用户）"| FREEZE
+    ADMIT -->|"有额度"| SLOT{"Redis ZSET<br/>槽位够吗？"}
+    SLOT -->|"Redis 挂了"| FREEZE
+    SLOT -->|"账号总量满"| T4
+    SLOT -->|"key 份额满"| T4(["<b>终局 T4</b><br/>放槽位 + <b>删任务行</b><br/>钱一分没动<br/>两个原因分开说"]):::stop
+    SLOT -->|"占上了"| FREEZE
+
+    FREEZE{"walletService.freeze<br/>余额够吗？"}
+    FREEZE -->|"不足"| T5(["<b>终局 T5</b><br/>放槽位 + <b>删任务行</b><br/>「余额不足，请先充值」"]):::stop
+    FREEZE -->|"已冻过<br/>biz_key 撞唯一键"| PICK
+    FREEZE -->|"够"| PICK
+
+    PICK["<b>pick(model, pinnedNodeId)</b><br/>见图 2 · 纯内存零 IO"]
+    PICK -->|"选不出"| T6(["<b>终局 T6</b><br/>markFailed<br/>解冻 + 放槽位<br/><b>任务行保留</b>，带逐节点理由"]):::stop
+    PICK -->|"选中 gpu-6"| MARK["fleet.markDispatched('gpu-6')<br/><b>同步 +1</b>，下一次 pick 立刻看得见"]
+
+    MARK --> UPLOAD["下载参考素材（OSS）<br/>→ 上传到 gpu-6（文件名 = 内容 md5）<br/>→ 构建工作流 JSON<br/>→ POST /prompt"]
+    UPLOAD -->|"任一步失败"| T7(["<b>终局 T7</b><br/><b>releaseDispatch 还名额</b><br/>markFailed → 解冻 + 放槽位<br/>任务行保留，可手动重试"]):::stop
+    UPLOAD -->|"成功"| WRITEBACK
+
+    WRITEBACK["回写 providerTaskId<br/>回写 <b>node_id = gpu-6</b><br/>发 TaskSubmittedEvent"]
+    WRITEBACK --> T8(["<b>T8</b><br/>返回任务给用户<br/>进入轮询（图 3）"]):::ok
+
+    classDef stop fill:#ffe6e6,stroke:#c00,stroke-width:2px
+    classDef ok fill:#e6f7e6,stroke:#0a0,stroke-width:2px
+
+# ============================================================
+# 图 2 · pick() 内部：过滤链 + 有效负载
+# ============================================================
+
+flowchart TB
+    P0(["pick(model, pinnedNodeId)"]) --> PIN{"管理员指定了节点吗？"}
+
+    PIN -->|"指定了"| PINFIND{"这个 id 存在吗？"}
+    PINFIND -->|"不存在"| PERR(["抛「指定的节点不存在: gpu-typo」<br/><b>不静默回退到正常调度</b><br/>否则你以为在验证新机器<br/>其实活跑在老机器上"]):::stop
+    PINFIND -->|"存在"| PINUSE["<b>绕过全部过滤</b>（含 enabled、含归档）<br/>但把过滤链本来会说的话打进 WARN<br/>待发计数照样 +1"]
+    PINUSE --> DONE
+
+    PIN -->|"没指定"| F1
+
+    subgraph CHAIN["过滤链（按 @Order，第一个不过就出局并记下理由）"]
+        F1["<b>@Order(10) EnabledFilter</b><br/>硬 · 「未启用（人工关闭）」<br/>「已归档（退役）」"]
+        F2["<b>@Order(20) HealthyFilter</b><br/><b>软</b> · 「探测失败 12 次，最后一次: 502」"]
+        F3["<b>@Order(30) CapabilityFilter</b><br/>硬 · 「缺 node type: [MinimaxLoader]」<br/><b>能力未知 → 放行</b>"]
+        F4["<b>@Order(40) VramFilter</b><br/>硬 · 「显存不足: 需要 53.0 只有 32.0 GiB」<br/>判据是 <b>vram_total</b> 不是 vram_free<br/><b>没配 → 放行</b>"]
+        F1 --> F2 --> F3 --> F4
+    end
+
+    F4 --> LEFT{"还剩几台？"}
+    LEFT -->|"≥ 1 台"| LOAD
+    LEFT -->|"0 台"| DEGRADE["<b>丢掉「健康」这条软条件</b><br/>用三条硬条件重来一遍<br/>WARN：降级为忽略健康状态派活"]
+
+    DEGRADE --> LEFT2{"还剩几台？"}
+    LEFT2 -->|"≥ 1 台"| LOAD
+    LEFT2 -->|"还是 0 台"| FAIL(["抛异常，逐节点列<b>硬</b>原因：<br/>gpu-0 未启用（人工关闭）<br/>gpu-spark 缺 node type: [MinimaxLoader]<br/>gpu-5090 显存不足: 需要 53.0 只有 32.0<br/><br/><b>刻意不报「探测失败」</b>——健康那条<br/>已被主动放弃，报它会让运维修错东西"]):::stop
+
+    LOAD["<b>有效负载 = (队列深度 + 待发) ÷ 权重</b><br/>取最小的那台"]
+    LOAD --> DONE(["markDispatched(选中的)<br/>返回节点"]):::ok
+
+    classDef stop fill:#ffe6e6,stroke:#c00,stroke-width:2px
+    classDef ok fill:#e6f7e6,stroke:#0a0,stroke-width:2px
+
+# ============================================================
+# 图 3 · 轮询推进与终态（每 2 秒一轮）
+# ============================================================
+
+flowchart TB
+    POLL(["轮询器扫到一条 PROCESSING 任务"]) --> NID{"node_id 有值吗？"}
+
+    NID -->|"空"| WAIT(["返回 processing，下轮再说<br/><b>绝不能判失败</b>——node_id 是<br/>提交返回后才写回的，<br/>正常提交会被误杀"]):::wait
+    NID -->|"有"| FIND{"快照里找得到这台吗？<br/>fleet.findNode(nodeId)"}
+
+    FIND -->|"找不到"| T13(["<b>终局 T13</b><br/>failed「找不到处理该任务的节点」<br/><b>这是终态不是重试</b><br/>← 这就是为什么没有删除接口<br/>（归档不会触发：归档的节点仍在快照里）"]):::stop
+    FIND -->|"找到了"| HIST{"GET /history/{promptId}"}
+
+    HIST -->|"有记录<br/>status_str = success"| SUCC
+    HIST -->|"有记录<br/>status_str = error"| T10(["<b>终局 T10</b><br/>FAILED<br/>解冻退款 + 放槽位"]):::stop
+    HIST -->|"<b>空</b>"| LOST1
+
+    SUCC["<b>事务外</b>：下载产物 → 存 OSS<br/><b>同一事务内</b>：落 SUCCESS + 记消费<br/>+ 结算（真扣钱）+ 发事件<br/>然后放并发槽位"]
+    SUCC --> T9(["<b>终局 T9</b><br/>SUCCESS<br/>frozen 扣掉，钱真扣了"]):::ok
+
+    subgraph LOSTCHK["丢失判定：三段式，顺序不可交换"]
+        LOST1["① history 空<br/>（「还在跑」和「作业没了」响应一模一样<br/>—— ComfyUI 队列是内存态，重启即清空）"]
+        LOST1 --> LOST2{"② 查 /queue（3 秒缓存）<br/>在队列里吗？"}
+        LOST2 -->|"在"| WAIT
+        LOST2 -->|"<b>查询抛异常</b>"| WAIT
+        LOST2 -->|"不在"| LOST3{"③ <b>再读一次 history</b>"}
+        LOST3 -->|"有了"| SUCC
+        LOST3 -->|"还是空"| ISLOST["判定 <b>LOST</b>"]
+    end
+
+    ISLOST --> RETRY
+    AGED(["任务超龄<br/>（60 分钟）"]) --> RETRY
+
+    RETRY{"<b>TaskRetryPolicy.retryOrFail</b><br/>唯一出口"}
+    RETRY -->|"引擎不支持免费重试<br/>（如 Seedance：跑一次就是钱）"| T12
+    RETRY -->|"重试次数 ≥ 2"| T12(["<b>终局 T12</b><br/>markTimedOut<br/>解冻退款 + 放槽位<br/>「已自动重试 N 次仍未成功」"]):::stop
+    RETRY -->|"支持 且 次数 &lt; 2"| T11(["<b>T11</b> 入队重试（幂等键 task:id）<br/>Worker CAS 抢占 retry_count<br/><b>重新选节点</b> · <b>不重复冻钱</b><br/>⚠ 原节点上留下孤儿 prompt"]):::wait
+
+    T11 -.->|"重跑一遍图 1 的<br/>pick → 上传 → 提交"| POLL
+
+    classDef stop fill:#ffe6e6,stroke:#c00,stroke-width:2px
+    classDef ok fill:#e6f7e6,stroke:#0a0,stroke-width:2px
+    classDef wait fill:#fff4e0,stroke:#e90,stroke-width:2px
+
+# ============================================================
+# 图 4 · 后台一直在转的三个循环（与主干并行）
+# ============================================================
+
+flowchart LR
+    subgraph L1["循环 A · 快探测（3 秒）"]
+        A1["GET /prompt<br/><b>37 字节</b><br/>（不是 /queue，那个几 MB）"]
+        A1 --> A2{"通吗？"}
+        A2 -->|"通"| A3["queueDepth 更新<br/>失败计数清零<br/><b>立刻回到 3 秒全速</b>"]
+        A2 -->|"不通"| A4{"连续失败<br/>≥ 3 次？"}
+        A4 -->|"还没到"| A5["计数 +1<br/><b>仍然全速探</b><br/>（正在分辨抖动 vs 真死）"]
+        A4 -->|"到了"| A6["healthy = false<br/><b>退避</b> 3→6→12→24→48→60s 封顶"]
+        A6 -.->|"退避期间被跳过的节点<br/><b>状态原样保留</b><br/>不算失败、不刷新时间戳"| A1
+    end
+
+    subgraph L2["循环 B · 慢探测（60 秒）"]
+        B1["GET /object_info<br/>→ 装了哪些 node type（几 MB）"]
+        B2["GET /system_stats<br/>→ 显存 / comfyui / torch / python"]
+        B1 --> B3["能力集合 + vram_total<br/>合并进快照"]
+        B2 --> B3
+        B3 --> B4{"机队版本分布<br/>签名变了吗？"}
+        B4 -->|"没变"| B5["<b>一个字都不说</b><br/>（Spark 的差异永远存在，<br/>每轮都报 = 等于没有告警）"]
+        B4 -->|"变了"| B6["WARN 一次<br/>只告警不淘汰"]
+    end
+
+    subgraph L3["循环 C · 节点清单（30 秒缓存）"]
+        C1["SELECT * FROM comfy_node"]
+        C1 --> C2{"查得到吗？"}
+        C2 -->|"能"| C3["更新缓存"]
+        C2 -->|"炸了 且 之前成功过"| C4["<b>沿用上一次的清单</b><br/>MySQL 抖一下不能让全站提交不了"]
+        C2 -->|"炸了 且 从没成功过"| C5["回落 application.yaml<br/>（只有「进程刚起来+库不通」才会走到）"]
+        C6["管理端改完节点<br/>→ invalidate()"] --> C1
+    end
+
+    L1 --> SNAP[("<b>内存快照</b><br/>不可变 · 整体替换<br/>pick() 只读这里")]
+    L2 --> SNAP
+    L3 --> L1
+    L3 --> L2
+
+# ============================================================
+# 图 5 · 三条生命线：任务行 / 钱 / 并发槽位
+# ============================================================
+
+flowchart TB
+    subgraph ROW["任务行的两种命运"]
+        R1["<b>删除</b><br/>并发额度满 · 余额不足<br/>→ 用户从没见过它，留着就是僵尸"]
+        R2["<b>保留 + 标终态</b><br/>选不出节点 · 提交失败 · 跑失败 · 超时<br/>→ 用户已经看得到，得让他知道原因、能重试"]
+    end
+
+    subgraph MONEY["钱的三种结局"]
+        M1["<b>从没冻过</b><br/>阶段四/五就挂了<br/>→ 一分没动"]
+        M2["<b>解冻</b><br/>失败 / 超时终态<br/>→ frozen 减、balance 加<br/>总资产不变"]
+        M3["<b>结算</b><br/>成功终态<br/>→ frozen 减、总资产减<br/>（真扣）"]
+    end
+
+    subgraph SLOTS["并发槽位的三个释放点 + 一道兜底"]
+        S1["VideoSubmitServiceImpl:177<br/>占了槽位但冻钱失败"]
+        S2["TaskStatusTransitionerImpl:76<br/>失败 / 超时终态"]
+        S3["VideoTaskServiceImpl:140<br/>成功终态"]
+        S4["<b>兜底</b>：对账每 2 秒按集合差双向修复<br/>老化窗口 6 小时<br/>→ 上面三条全漏了，最多 2 秒补回来"]
+    end

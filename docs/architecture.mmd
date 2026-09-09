@@ -1,239 +1,205 @@
-# SeedanceGenarate 架构图（Mermaid）
-# 用法：把任意一张图（``` 之间的内容）整体复制到 https://mermaid.live 渲染，
-# 或导出 PNG/SVG 用于面试演示。README 已内嵌同款图，GitHub 上可直接查看。
+# SeedanceGenarate 架构图（Mermaid · Worker V31）
+# 用法：把任意一张图（flowchart / sequenceDiagram 开始，到下一条分隔线之前）
+# 整体复制到 https://mermaid.live 渲染。异步作业真相以 MySQL V31 为准。
 
 # ============================================================
 # 图 1 · 系统总览（组件视图）
 # ============================================================
 
 flowchart TB
-    subgraph CLI["客户端"]
-        FE["Vue3 前端<br/>Pinia + Element Plus + axios"]
-        DEV["外部开发者<br/>持 sk- API Key"]
+    subgraph CLIENT["客户端"]
+        FE["Vue3 前端<br/>Pinia + Element Plus + axios + SSE"]
+        DEV["外部开发者<br/>Bearer sk- API Key"]
     end
 
-    subgraph BE["Spring Boot 后端 (Java 17 · :8080)"]
-        IN["拦截器链<br/>Auth / ApiKey / RateLimit（令牌桶）"]
-        CTRL["Controller 层<br/>Auth / Video / ApiVideo / Admin"]
-        SUB["VideoSubmitService<br/>UI 与 API 共用提交编排"]
-        REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;"]
-        SE["SeedanceEngine"]
-        CE["ComfyUiEngine"]
-        WB["WorkflowBuilder 策略集<br/>MiniMaxH3 / ZImageTurbo / ..."]
-        GATE["ModelAccessService<br/>模型开放闸门"]
-        BILL["PricingService<br/>+ CostRecordService"]
-        POLL["VideoTaskPoller<br/>后台推进器（2s 一轮）"]
-        SSE["TaskStreamManager<br/>SSE 推送"]
-        WH["WebhookDispatcher<br/>HMAC 回调 + 重试"]
+    subgraph API["Spring Boot API 实例（可多实例）"]
+        IN["Auth / ApiKey / RateLimit"]
+        CTRL["Video / ApiVideo / Admin / Callback Controller"]
+        SUB["VideoSubmitService<br/>校验 + 受理编排"]
+        TX["MySQL 短事务<br/>task + freeze + attempt<br/>+ GENERATION_SUBMIT"]
+        SSE["TaskStreamManager<br/>终态 SSE"]
     end
 
-    subgraph STORE["存储"]
-        DB[("MySQL<br/>video_task / cost_record<br/>api_key / model_access")]
-        OSS[("阿里云 OSS<br/>参考图")]
-        LOCAL[("本地磁盘 data/videos<br/>生成产物")]
+    subgraph WORKER["分布式 Worker（可多实例）"]
+        RT["AsyncJobWorkerRuntime<br/>有界执行池 + heartbeat<br/>token + generation fencing"]
+        H1["GENERATION_SUBMIT"]
+        H2["TASK_POLL"]
+        H3["TASK_FINALIZE"]
+        H4["TASK_RETRY"]
+        H5["CANVAS_NODE_SUBMIT"]
+        H6["PIPELINE_NODE_SUBMIT"]
+        H7["ORDER_CLOSE"]
+        POLLER["VideoTaskPoller<br/>只扫描到期任务并幂等入队"]
+        RECON["TaskReconcileTask<br/>低频补漏"]
     end
 
-    subgraph PROV["提供方"]
-        SD["Seedance 云端 API<br/>火山方舟"]
-        CF["ComfyUI 多实例<br/>gpu-0/1/3/6 · 共享模型"]
+    subgraph DATA["持久化与通知"]
+        DB[("MySQL · Flyway V31<br/>video_task / generation_attempt / async_job<br/>wallet / cost_record")]
+        BELL[("Redis job-available<br/>仅作唤醒门铃，可丢失")]
+        OSS[("阿里云 OSS<br/>参考素材 + 生成产物")]
     end
 
-    FE -->|"HTTP + SSE ?token="| IN
-    DEV -->|"POST /api/v1/** · Bearer sk-"| IN
+    subgraph PROVIDERS["生成提供方"]
+        REG["VideoEngineRegistry"]
+        SD["Seedance API<br/>2s / 5s / 30s 退避轮询"]
+        CF["ComfyUI 多实例<br/>callback + 60s poll fallback"]
+    end
+
+    FE -->|"HTTP / SSE"| IN
+    DEV -->|"HTTP API"| IN
     IN --> CTRL
     CTRL --> SUB
-    SUB --> GATE
-    SUB --> BILL
-    SUB --> REG
-    REG --> SE
-    REG --> CE
-    CE --> WB
-    SE --> SD
-    CE --> CF
-    CE -->|"下载/上传参考图"| OSS
-    POLL --> REG
-    POLL --> DB
-    SUB --> DB
-    CTRL --> LOCAL
-    SSE -.->|"终态推送"| FE
-    WH -.->|"异步回调"| DEV
+    SUB --> TX
+    TX --> DB
+    TX -->|"提交后立即返回稳定 taskId"| CTRL
+    CTRL --> FE
+    CTRL --> DEV
+    TX -.->|"afterCommit"| BELL
+    BELL -.->|"即时唤醒"| RT
+    DB -.->|"30s 带抖动扫描兜底"| RT
+    RT --> H1
+    RT --> H2
+    RT --> H3
+    RT --> H4
+    RT --> H5
+    RT --> H6
+    RT --> H7
+    H1 --> REG
+    H2 --> REG
+    H3 -->|"事务外下载"| REG
+    H3 -->|"事务外上传"| OSS
+    REG --> SD
+    REG --> CF
+    CF -.->|"完成回调"| CTRL
+    POLLER -->|"幂等 enqueue TASK_POLL"| DB
+    RECON --> DB
+    RT -->|"最终短事务：renew + 业务身份 CAS + complete<br/>生成成功同时 cost / settle"| DB
+    DB -.->|"AFTER_COMMIT 终态事件"| SSE
+    SSE -.-> FE
 
 # ============================================================
-# 图 2 · 核心设计：两层「策略 + 注册表」
+# 图 2 · 两层策略 + Worker 边界
 # ============================================================
 
 flowchart TD
-    OPT["GET /api/video/options<br/>遍历注册表下发 ModelSpec<br/>（输出类型 / 时长 / 比例 / 图数 / 分辨率）"] --> REG
+    OPT["GET /api/video/options<br/>按 ModelSpec 下发能力"] --> REG
 
     subgraph L1["第一层 · 提供方（VideoEngine）"]
         REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;"]
-        SE["SeedanceEngine<br/>云端 · ON_SUBMIT"]
-        CE["ComfyUiEngine<br/>自建 · ON_SUCCESS"]
+        SE["SeedanceEngine<br/>POLL · BASIC ETA<br/>成功后结算"]
+        CE["ComfyUiEngine<br/>CALLBACK + 60s fallback<br/>FULL ETA · 成功后结算"]
         REG --> SE
         REG --> CE
     end
 
     subgraph L2["第二层 · ComfyUI 模型（WorkflowBuilder）"]
         CE --> WM["Map&lt;model, WorkflowBuilder&gt;"]
-        WM --> M1["MiniMaxH3WorkflowBuilder<br/>参考生视频"]
-        WM --> M2["MiniMaxH3TextToVideoWorkflowBuilder<br/>文生视频"]
-        WM --> M3["MiniMaxH3AccelWorkflowBuilder<br/>参考生视频 · 官方加速"]
-        WM --> M4["ZImageTurboWorkflowBuilder<br/>文生图（输出 PNG）"]
-        WM --> M5["QwenImageEditWorkflowBuilder<br/>图生图（≤3 张参考图）"]
+        WM --> M1["MiniMaxH3WorkflowBuilder"]
+        WM --> M2["MiniMaxH3TextToVideoWorkflowBuilder"]
+        WM --> M3["MiniMaxH3AccelWorkflowBuilder"]
+        WM --> M4["ZImageTurboWorkflowBuilder"]
+        WM --> M5["QwenImageEditWorkflowBuilder"]
     end
 
-    SD[("火山方舟 API")]
-    CF["ComfyUI 实例池<br/>least-queue / round-robin 选节点"]
-    SE --> SD
-    CE --> CF
+    GS["GENERATION_SUBMIT handler<br/>事务外调用 provider HTTP"] --> REG
+    SE --> SD[("火山方舟 API")]
+    CE --> CF["ComfyUI 实例池<br/>least-queue / round-robin"]
+    GS --> RESULT{"提交结果是否可证明？"}
+    RESULT -->|"已接单"| SUBMITTED["SUBMITTED<br/>保存 providerTaskId"]
+    RESULT -->|"明确未接单"| RETRY["SubmissionNotAccepted<br/>允许 SAFE_RETRY"]
+    RESULT -->|"超时 / 断连 / 5xx / 空 ID"| UNKNOWN["SUBMIT_UNKNOWN<br/>RECOVERY_REQUIRED<br/>禁止盲目重投"]
 
     style L1 fill:#eef4ff,stroke:#6b8ef0
     style L2 fill:#eefaf1,stroke:#4fbf6a
+    style UNKNOWN fill:#fff0f0,stroke:#d95c5c
 
 # ============================================================
-# 图 3 · 一次生成的任务生命周期（时序图）
+# 图 3 · async_job 多实例故障接管
+# ============================================================
+
+flowchart LR
+    subgraph WA["Worker 实例 A"]
+        RA["AsyncJobWorkerRuntime"]
+        PA["先取本机 permit<br/>再单张 claim"]
+        RA --> PA
+    end
+
+    subgraph WB["Worker 实例 B"]
+        RB["AsyncJobWorkerRuntime"]
+        PB["先取本机 permit<br/>再单张 claim"]
+        RB --> PB
+    end
+
+    DB[("MySQL V31 · async_job<br/>READY / RUNNING / SUCCEEDED / DEAD<br/>lease_token + lease_generation")]
+    REDIS[("Redis<br/>job-available 门铃")]
+    HANDLERS["7 类 AsyncJobHandler<br/>GENERATION_SUBMIT · TASK_POLL · TASK_FINALIZE<br/>TASK_RETRY · CANVAS_NODE_SUBMIT<br/>PIPELINE_NODE_SUBMIT · ORDER_CLOSE"]
+    IO["事务外 I/O<br/>Provider HTTP / 下载 / OSS"]
+    FINAL["按 handler 最终短事务<br/>renew(token+generation)<br/>→ 当前业务身份校验 → fenced CAS<br/>→ complete；生成成功同时 cost/settle"]
+
+    REDIS -.-> RA
+    REDIS -.-> RB
+    DB -.->|"30s 扫描兜底"| RA
+    DB -.->|"30s 扫描兜底"| RB
+    PA -->|"FOR UPDATE SKIP LOCKED<br/>MySQL NOW()"| DB
+    PB -->|"FOR UPDATE SKIP LOCKED<br/>MySQL NOW()"| DB
+    DB -->|"唯一 token + generation 租约"| HANDLERS
+    HANDLERS --> IO
+    IO --> FINAL
+    FINAL --> DB
+    DB -.->|"租约过期可接管；generation 变化<br/>拒绝旧 Worker 迟到回写"| HANDLERS
+
+# ============================================================
+# 图 4 · 一次生成的任务生命周期
 # ============================================================
 
 sequenceDiagram
     autonumber
     participant U as 前端 / 外部开发者
-    participant C as Controller
-    participant S as VideoSubmitService
-    participant G as ModelAccessService
-    participant E as VideoEngine
-    participant B as Seedance / ComfyUI
-    participant P as VideoTaskPoller
-    participant DB as MySQL
-    participant SSE as TaskStreamManager
-    participant COST as CostRecordService
+    participant A as API / VideoSubmitService
+    participant DB as MySQL V31
+    participant R as Redis 门铃
+    participant W as AsyncJobWorkerRuntime
+    participant E as VideoEngine / Provider
+    participant P as Poller / Callback / Reconcile
+    participant O as OSS
+    participant S as SSE
 
-    U->>C: POST /text2video · /image2video · /api/v1/videos
-    C->>S: submit(request)
-    S->>G: 校验模型是否开放（effectiveModel 闸门）
-    S->>DB: 落库 video_task（PROCESSING + provider/model/node）
-    S->>E: submit(command)
-    E->>B: 选节点 → 上传参考图 → 构建工作流 → /prompt
-    E-->>S: 回写 providerTaskId / nodeId
-    S-->>C: 返回 taskId
-    C-->>U: 200（UI）/ 202（API）
+    U->>A: POST 生成请求
+    A->>DB: 短事务：task + freeze + attempt + GENERATION_SUBMIT
+    DB-->>A: commit
+    A-->>R: afterCommit job-available（只唤醒）
+    A-->>U: 立即返回稳定 taskId
 
-    loop 每 2s 扫最近 24h 的 PROCESSING 任务
-        P->>DB: 查询待推进任务
-        P->>E: poll(task) → 归一化 RemoteStatus
-        E-->>P: 状态
-        P->>DB: updateStatus（幂等）
-        alt 到达终态
-            P-->>COST: recordOnSuccess（ON_SUCCESS 计费，幂等）
-            P-->>SSE: TaskStatusChangedEvent（AFTER_COMMIT）
-            SSE-->>U: SSE 推送 {taskId, status}
+    R-->>W: 唤醒（丢失由 30s MySQL 扫描恢复）
+    W->>DB: claim GENERATION_SUBMIT（token + generation）
+    W->>DB: attempt PENDING → SUBMITTING
+    W->>E: 事务外 provider HTTP
+    alt providerTaskId 已确认
+        W->>DB: fenced 短事务：attempt SUBMITTED + task RUNNING + complete
+    else 可证明未接单
+        W->>DB: fenced failAndRetry（SAFE_RETRY）
+    else 结果无法确认
+        W->>DB: SUBMIT_UNKNOWN / RECOVERY_REQUIRED + complete
+        Note over W,DB: 保持公开 PROCESSING、冻结和槽位；禁止盲目重投
+    end
+
+    par ComfyUI 完成路径
+        E-->>P: callback（主路径）
+        P->>DB: 身份 CAS + 幂等入队 TASK_FINALIZE
+    and ComfyUI 查询兜底
+        loop 每 60s 到期
+            P->>DB: 幂等入队 TASK_POLL
+        end
+    and Seedance 轮询
+        loop 2s / 5s / 30s 退避
+            P->>DB: 幂等入队 TASK_POLL
         end
     end
 
-# ============================================================
-# 图 4 · 整体架构总览（含账务/充值链路，2026-08 更新）
-# 注：图 1 已过时（缺 wallet/recharge/Alipay 层），以本图为准
-# 单独文件：docs/architecture-full.mmd · 已渲染 PNG：docs/architecture-full.png
-# ============================================================
-
-flowchart TB
-    subgraph CLIENTS["客户端"]
-        FE["Vue3 前端（用户端 + 管理端）<br/>Pinia + Element Plus + axios + SSE"]
-        DEV["外部开发者<br/>持 sk- API Key"]
-    end
-
-    subgraph BE["Spring Boot 3 后端（Java 17 · API/Worker 一体 · 可多实例）"]
-        IN["拦截器链<br/>Auth(Redis Token) / ApiKey / RateLimit(Redis Lua 令牌桶)"]
-
-        subgraph CTRL["Controller 层（25 个）"]
-            C1["用户侧：Video · Asset · Wallet · Recharge<br/>Announcement · Invite · Auth · PromptOptimize"]
-            C2["管理端：Admin* 8（用户 / 统计 / 钱包 / 定价 / 公告 / 流水）"]
-            C3["开放 API：ApiVideo · ApiModel · ApiDoc"]
-            C4["回调：TaskCallback(ComfyUI webhook)<br/>AlipayNotify(支付宝验签 + 入账)"]
-        end
-
-        subgraph CORE["编排与账务"]
-            SUB["VideoSubmitService<br/>UI / 开放 API / 流水线 共用提交编排"]
-            GATE["ModelAccessService<br/>模型开放闸门 + 缓存"]
-            PRICE["PricingService + CostRecordService<br/>价格快照 · 唯一索引幂等"]
-            WALLET["WalletService（预授权）<br/>冻结 → 结算 / 解冻<br/>CAS + biz_key 幂等"]
-            RECH["RechargeService + ChannelRegistry<br/>alipay / admin 渠道策略 · 订单超时关闭 · 兜底入账"]
-        end
-
-        subgraph ENGINE["提供方层：两层策略 + 注册表"]
-            REG["VideoEngineRegistry"]
-            SE["SeedanceEngine<br/>云端 · 按秒计费 · 退避轮询"]
-            CE["ComfyUiEngine<br/>自建 · 按成功计费 · webhook 回调"]
-            SCHED["ComfyUiNodeScheduler<br/>least-queue / round-robin 选节点"]
-            WB["WorkflowBuilder 集（6 个）<br/>MiniMax-H3 系列 · Z-Image · Qwen-Image"]
-        end
-
-        subgraph ASYNC["异步与后台（async_job + 行级租约 · 多 Worker 并行）"]
-            POLL["VideoTaskPoller<br/>退避轮询 2s / 5s / 30s"]
-            RECON["TaskReconcileTask<br/>低频兜底对账"]
-            FIN["TaskFinalizeConsumer<br/>终态收尾：下载 → OSS → 结算 / 解冻"]
-            PNC["PipelineNodeSubmitConsumer<br/>流水线节点提交"]
-            WH["WebhookDispatcher<br/>HMAC-SHA256 + 退避重试 3 次"]
-        end
-
-        STREAM["TaskStreamManager<br/>终态事件(AFTER_COMMIT) → SSE 推送"]
-    end
-
-    subgraph INFRA["基础设施"]
-        DB[("MySQL（Flyway V1–V17）<br/>user · wallet · balance_transaction · recharge_order<br/>video_task · async_job · cost_record · api_key")]
-        REDIS[("Redis<br/>Lua 限流 · 登录 Token · Pub/Sub<br/>分布式锁 · ETA 统计")]
-        OSS[("阿里云 OSS<br/>参考素材 + 生成产物")]
-    end
-
-    subgraph EXT["外部服务"]
-        SD["Seedance 云端 API（火山方舟）"]
-        NG["nginx（X-Comfy-Token 校验）"]
-        CF["ComfyUI 多实例 GPU 集群<br/>同主机多端口 · 共享一套模型"]
-        ALI["支付宝网关（沙箱 / 生产）"]
-    end
-
-    FE -->|"HTTP + SSE ?token="| IN
-    DEV -->|"POST /api/v1/** · Bearer sk-"| IN
-    ALI -.->|"异步 notify 验签入账"| C4
-    IN --> C1
-    IN --> C2
-    IN --> C3
-    IN --> C4
-    C1 --> SUB
-    C3 --> SUB
-    C1 --> RECH
-    C1 --> WALLET
-    C2 --> WALLET
-    C4 --> RECH
-    SUB --> GATE
-    SUB --> WALLET
-    SUB --> PRICE
-    SUB --> REG
-    SUB --> DB
-    RECH --> ALI
-    RECH --> DB
-    WALLET --> DB
-    REG --> SE
-    REG --> CE
-    CE --> SCHED
-    CE --> WB
-    SE --> SD
-    CE --> NG
-    NG --> CF
-    CE -->|"参考素材上传 / 下载"| OSS
-    POLL --> REG
-    POLL --> DB
-    RECON --> DB
-    FIN --> DB
-    FIN --> OSS
-    PNC --> DB
-    ASYNC -.->|"job-available 即时唤醒"| REDIS
-    POLL -.-> REDIS
-    FIN -.->|"终态事件"| STREAM
-    FIN -.->|"终态事件"| WH
-    STREAM -.->|"SSE 推送"| FE
-    STREAM -.->|"Redis Pub/Sub 跨实例广播"| REDIS
-    WH -.->|"webhook 回调"| DEV
-
-    style CORE fill:#fff7e8,stroke:#e0a83c
-    style ENGINE fill:#eefaf1,stroke:#4fbf6a
-    style ASYNC fill:#eef4ff,stroke:#6b8ef0
+    W->>DB: claim TASK_POLL / TASK_FINALIZE
+    W->>E: 事务外 poll / 下载
+    W->>O: 事务外上传生成产物
+    W->>DB: 最终短事务：renew + current attempt 身份校验
+    W->>DB: fenced CAS SUCCESS + cost_record + 钱包结算 + complete
+    DB-->>S: AFTER_COMMIT 终态事件
+    S-->>U: SSE {taskId, status}
