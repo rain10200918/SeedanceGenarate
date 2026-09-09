@@ -382,6 +382,11 @@ aliyun:
     artifact-prefix: ${ALIYUN_OSS_ARTIFACT_PREFIX:outputs}
     # 后端鉴权后签发的播放/下载 URL 有效期（秒）。
     signed-url-ttl-seconds: ${ALIYUN_OSS_SIGNED_URL_TTL_SECONDS:300}
+    # 对外 API 直传只能写入该 staging 前缀；请在 OSS 侧为它配置 1 天后删除的生命周期规则。
+    api-upload-prefix: ${ALIYUN_OSS_API_UPLOAD_PREFIX:api-uploads}
+    api-upload-policy-ttl-seconds: ${ALIYUN_OSS_API_UPLOAD_POLICY_TTL_SECONDS:600}
+    api-upload-read-ttl-seconds: ${ALIYUN_OSS_API_UPLOAD_READ_TTL_SECONDS:3600}
+    api-upload-max-bytes: ${ALIYUN_OSS_API_UPLOAD_MAX_BYTES:31457280}
 # 可观测性：/actuator/prometheus 暴露 Prometheus 指标（业务指标见 MetricsExportTask）
 management:
   endpoints:

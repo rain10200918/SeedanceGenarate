@@ -1,6 +1,8 @@
 package org.example.seedancegenarate.service.Impl;
 
+import org.example.seedancegenarate.entity.ApiCallLog;
 import org.example.seedancegenarate.entity.ApiKey;
+import org.example.seedancegenarate.entity.VideoTask;
 import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.OutputType;
 import org.example.seedancegenarate.engine.VideoEngine;
@@ -21,6 +23,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 
 import java.net.InetAddress;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -108,5 +112,49 @@ class ApiVideoServiceImplTest {
         assertEquals("INSUFFICIENT_BALANCE", ex.getCode());
         assertEquals(HttpStatus.PAYMENT_REQUIRED, ex.getHttpStatus());
         assertTrue(ex.getMessage().contains("余额不足"));
+    }
+
+    @Test
+    @DisplayName("API 幂等恢复: 日志未链 taskId 时按 requestId 追认快速终态任务")
+    void recoversUnlinkedCallLogAndCatchesUpFastTerminalTask() throws Exception {
+        ApiKey key = new ApiKey();
+        key.setId(1L);
+        key.setUserId(100L);
+        ApiVideoService.CreateContext context = new ApiVideoService.CreateContext(
+                key, "req_fast", "1.1.1.1", "TestAgent",
+                "test prompt", "test-model", List.of(),
+                5, "16:9", null);
+
+        ApiCallLog callLog = new ApiCallLog();
+        callLog.setId(9L);
+        callLog.setRequestId("req_fast");
+        callLog.setApiKeyId(1L);
+        callLog.setUserId(100L);
+        callLog.setStatus("RECEIVED");
+        callLog.setCreateTime(LocalDateTime.now().minusSeconds(2));
+        when(apiCallLogMapper.selectOne(any())).thenReturn(callLog);
+
+        VideoTask terminal = new VideoTask();
+        terminal.setId(19L);
+        terminal.setTaskId("tsk_fast");
+        terminal.setBizTaskId("tsk_fast");
+        terminal.setApiKeyId(1L);
+        terminal.setUserId(100L);
+        terminal.setStatus("SUCCESS");
+        terminal.setCostAmount(new BigDecimal("1.20"));
+        when(videoSubmitService.findByRequestId(100L, "api:req_fast")).thenReturn(terminal);
+        when(videoTaskService.getOne(any(), eq(false))).thenReturn(terminal);
+        when(apiCallLogMapper.linkTaskByRequestId(9L, 1L, "req_fast", "tsk_fast", null))
+                .thenReturn(1);
+
+        VideoTask result = apiVideoService.create(context);
+
+        assertSame(terminal, result);
+        verify(videoSubmitService).findByRequestId(100L, "api:req_fast");
+        verify(apiCallLogMapper).linkTaskByRequestId(9L, 1L, "req_fast", "tsk_fast", null);
+        verify(apiCallLogMapper).finishReceived(eq(9L), eq("tsk_fast"), eq("SUCCESS"), isNull(),
+                eq(new BigDecimal("1.20")), any(Long.class));
+        verify(videoSubmitService, never()).submit(any());
+        verify(videoEngineRegistry, never()).all();
     }
 }

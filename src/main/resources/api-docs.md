@@ -27,7 +27,7 @@ https://api-generate.creator.ascent-ai.cn/api/v1
 
 - 所有接口均需携带 `Authorization: Bearer <key>` 头；
 - 请求与响应均为 `application/json`（下载接口除外）；
-- 失败统一返回标准错误结构（见 §7）；
+- 失败统一返回标准错误结构（见 §8）；
 - 提交类接口有**按钥匙限流**（默认 10 次/分钟，突发 5），超限返回 `429` 并带 `Retry-After` 响应头；
 - 全链路支持标准 HTTPS 安全传输。
 
@@ -35,14 +35,125 @@ https://api-generate.creator.ascent-ai.cn/api/v1
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/generations/quote` | 计算真实提交将冻结的金额（无写入） |
+| POST | `/assets/upload-url` | 获取参考图 OSS 直传表单凭证 |
+| POST | `/prompts/optimize` | 按目标模型优化提示词（P0 免费） |
 | POST | `/videos` | 提交生成任务（异步处理，返回 202 Accepted） |
 | GET | `/videos/{taskId}` | 查询任务状态与产物 URL |
 | GET | `/videos` | 任务列表（支持分页查询） |
 | GET | `/videos/{taskId}/content` | 下载生成的视频/图片产物（重定向至安全签名下载 URL） |
 | GET | `/models` | 查询当前开放可用的模型清单与参数能力 |
+| GET | `/account/balance` | 查询 API Key 对应账号的余额 |
 | GET | `/videos/docs` | 本文档（原始 Markdown 格式） |
 
-## 4. 提交生成任务
+## 4. 生成前辅助接口
+
+### 4.1 获取报价
+
+```http
+POST /api/v1/generations/quote
+Content-Type: application/json
+```
+
+```bash
+curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/generations/quote \
+  -H "Authorization: Bearer sk-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"minimax-h3-t2v-hd","duration":6}'
+```
+
+```json
+{
+  "provider": "comfyui",
+  "model": "minimax-h3-t2v-hd",
+  "duration": 6,
+  "outputType": "VIDEO",
+  "unitPrice": 0.30,
+  "amount": 1.80,
+  "currency": "CNY"
+}
+```
+
+`amount` 与紧接着提交同样参数时的冻结金额使用同一计价链路。报价本身不创建任务、
+不写调用日志、不冻结余额。价格可能由管理员调整，应在提交前实时调用。
+
+### 4.2 上传本地参考图
+
+P0 仅支持 `image/jpeg`、`image/png`、`image/webp`，单文件最大 30 MiB。先申请受限凭证：
+
+```bash
+curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/assets/upload-url \
+  -H "Authorization: Bearer sk-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"first-frame.png","contentType":"image/png","sizeBytes":123456}'
+```
+
+响应示例（字段值有截断）：
+
+```json
+{
+  "method": "POST",
+  "uploadUrl": "https://bucket.oss-cn-beijing.aliyuncs.com",
+  "fields": {
+    "key": "api-uploads/42/3c0f...a91.png",
+    "Content-Type": "image/png",
+    "success_action_status": "204",
+    "policy": "eyJleHBpcmF0aW9uIjo...",
+    "OSSAccessKeyId": "LTAI...",
+    "Signature": "..."
+  },
+  "assetUrl": "https://bucket.oss-cn-beijing.aliyuncs.com/api-uploads/...?Expires=...",
+  "uploadExpiresAt": "2026-09-03T08:10:00Z",
+  "assetExpiresAt": "2026-09-03T09:00:00Z"
+}
+```
+
+将 `fields` 的每个字段原样放入 `multipart/form-data`，**`file` 必须最后放**：
+
+```bash
+curl -X POST "$uploadUrl" \
+  -F "key=$key" \
+  -F "Content-Type=image/png" \
+  -F "success_action_status=204" \
+  -F "policy=$policy" \
+  -F "OSSAccessKeyId=$OSSAccessKeyId" \
+  -F "Signature=$Signature" \
+  -F "file=@first-frame.png;type=image/png"
+```
+
+上传成功会返回 HTTP `204`。随后把 `assetUrl` 放入 `/videos` 的 `images`，并在
+`assetExpiresAt` 前提交。凭证只能写入当前 API Key 属主的随机 staging key，且会校验 MIME
+与声明字节数；未被任务消费的 `api-uploads/` 对象应由 OSS 生命周期规则在 1 天后清理。
+
+### 4.3 优化提示词
+
+```bash
+curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/prompts/optimize \
+  -H "Authorization: Bearer sk-xxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt":"雨夜里的跑车",
+    "model":"minimax-h3-t2v-hd",
+    "imageCount":0,
+    "videoCount":0,
+    "audioCount":0,
+    "duration":6,
+    "ratio":"16:9"
+  }'
+```
+
+```json
+{
+  "originalPrompt": "雨夜里的跑车",
+  "optimizedPrompt": "超广角电影镜头下……",
+  "model": "minimax-h3-t2v-hd"
+}
+```
+
+`prompt` 最长 5000 字符；参考素材数量各为 0~20，`duration` 为 1~600。显式传入的
+`model` 必须存在且已开放。P0 不扣除钱包余额，但有按账号与 IP 的共享 Redis 限流。
+
+## 5. 提交生成任务
 
 ```
 POST /api/v1/videos
@@ -53,7 +164,7 @@ POST /api/v1/videos
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `prompt` | string | ✅ | 提示词，描述画面、镜头运动、光影风格 |
-| `model` | string | ✅ | 模型标识（见 §6 `GET /models`，如 `minimax-h3-fl2va-hd`） |
+| `model` | string | ✅ | 模型标识（见 §7 `GET /models`，如 `minimax-h3-fl2va-hd`） |
 | `images` | string[] | 图生必填 | 参考图 URL 列表（`fl2va` 模式传 2 张：第 1 张首帧，第 2 张尾帧） |
 | `duration` | int | 视频模型 | 时长（秒），支持 5-15 秒（如 6, 8, 10 等），默认 6 或 8 |
 | `ratio` | string | 否 | 画面比例，如 `16:9`、`9:16`、`1:1`、`4:3`、`3:4`，默认 `16:9` |
@@ -97,7 +208,6 @@ curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/videos \
   -d '{
     "prompt": "蜘蛛侠从大楼顶端纵身跃下，穿梭在城市高楼之间",
     "model": "minimax-h3-fl2va-hd",
-    "mode": "fl2va",
     "images": [
       "https://your-domain.com/first-frame.jpg",
       "https://your-domain.com/last-frame.jpg"
@@ -118,13 +228,41 @@ curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/videos \
 }
 ```
 
-## 5. 幂等控制（Idempotency）
+## 6. 幂等控制（Idempotency）
 
 提交请求携带 `Idempotency-Key` 请求头（推荐使用标准 UUID）：
 - 同一 Key **在网络超时重试时返回同一个 `taskId`**，不会重复扣费，不会重复创建 GPU 任务；
 - 建议 Key 长度 16~64 位字符。
 
-## 6. 查询与下载
+## 7. 查询与下载
+
+### 查询账户余额
+
+```
+GET /api/v1/account/balance
+Authorization: Bearer sk-xxxxxxxx...
+```
+
+该接口使用与其他 `/api/v1/**` 接口相同的 API Key 认证。余额属于当前 API Key 对应的账号，
+请求不接受 `userId` 等账号查询参数。
+
+成功响应：
+
+```json
+{
+  "available": 98.20,
+  "frozen": 1.80,
+  "total": 100.00,
+  "currency": "CNY"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `available` | number | 当前可用于提交生成任务的余额 |
+| `frozen` | number | 已被处理中任务冻结、尚未结算或退回的余额 |
+| `total` | number | 账号总余额，始终等于 `available + frozen` |
+| `currency` | string | 币种，当前固定为 `CNY` |
 
 ### 查询任务状态
 
@@ -199,7 +337,7 @@ GET /api/v1/models
 每个模型支持的比例、时长范围、参考图张数以 `GET /api/v1/models` 返回的字段为准，
 不要按上表推断——传错会被 `VALIDATION_ERROR` 拒绝。
 
-## 7. 错误响应码
+## 8. 错误响应码
 
 发生错误时统一返回标准结构：
 
@@ -225,10 +363,13 @@ GET /api/v1/models
 | 410 | `ARTIFACT_EXPIRED` | 产物已过 30 天保留期并被删除，**重试无用**，需重新提交生成 | ❌ 重新生成 |
 | 402 | `INSUFFICIENT_BALANCE` | 账号可用余额不足，请先充值 | ❌ 充值后重试 |
 | 429 | `RATE_LIMITED` | 触发并发或速率限制，请参考 `Retry-After` 头 | ✅ 延迟重试 |
+| 503 | `RATE_LIMIT_UNAVAILABLE` | 共享 Redis 限流暂不可用；提示词优化入口会失败关闭 | ✅ 延迟重试 |
+| 503 | `UPLOAD_CREDENTIAL_UNAVAILABLE` | OSS 直传凭证暂时无法签发 | ✅ 延迟重试 |
+| 503 | `PROMPT_OPTIMIZE_UNAVAILABLE` | 提示词优化的 LLM 通道暂不可用 | ✅ 延迟重试 |
 | 503 | `PROVIDER_UNAVAILABLE` | GPU 节点全忙或渲染集群临时维护 | ✅ 指数退避重试 |
 | 500 | `INTERNAL_ERROR` | 服务器内部未知异常 | ✅ 带幂等键重试 |
 
-## 8. Webhook 异步回调通知
+## 9. Webhook 异步回调通知
 
 如果您在平台配置了 `callbackUrl`，任务完成时系统会自动向您的服务器发送 POST 通知：
 
@@ -267,7 +408,7 @@ def verify_signature(secret: str, raw_body: str, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 ```
 
-## 9. 完整快速接入示例（Python）
+## 10. 完整快速接入示例（Python）
 
 ```python
 import requests

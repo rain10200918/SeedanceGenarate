@@ -7,6 +7,8 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.config.RateLimitConfig;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.entity.Result;
+import org.example.seedancegenarate.exception.ApiErrorResponse;
+import org.example.seedancegenarate.exception.ApiExceptionHandler;
 import org.example.seedancegenarate.service.RateLimitResult;
 import org.example.seedancegenarate.service.TokenBucketRateLimitService;
 import org.example.seedancegenarate.util.IpUtils;
@@ -32,14 +34,21 @@ public class PromptOptimizeRateLimitInterceptor implements HandlerInterceptor {
         }
         Long userId = UserContext.requireUserId();
         String ip = IpUtils.getClientIp(request);
-        RateLimitResult userResult = tokenBucketRateLimitService.tryAcquire(
-                "prompt:user:" + userId,
-                rateLimitConfig.getPromptOptimizeUser()
-        );
-        RateLimitResult ipResult = tokenBucketRateLimitService.tryAcquire(
-                "prompt:ip:" + ip,
-                rateLimitConfig.getPromptOptimizeIp()
-        );
+        boolean publicApi = request.getRequestURI().startsWith("/api/v1/");
+        RateLimitResult userResult;
+        RateLimitResult ipResult;
+        try {
+            // 对外 API 可以多实例扩容，必须强制用 Redis 共享桶；UI 保留本地开发回退。
+            userResult = acquire("prompt:user:" + userId, rateLimitConfig.getPromptOptimizeUser(), publicApi);
+            ipResult = acquire("prompt:ip:" + ip, rateLimitConfig.getPromptOptimizeIp(), publicApi);
+        } catch (RuntimeException e) {
+            if (!publicApi) {
+                throw e;
+            }
+            writeApiError(response, request, 503, "RATE_LIMIT_UNAVAILABLE",
+                    "限流服务暂不可用，请稍后重试");
+            return false;
+        }
         if (userResult.allowed() && ipResult.allowed()) {
             return true;
         }
@@ -49,7 +58,28 @@ public class PromptOptimizeRateLimitInterceptor implements HandlerInterceptor {
                 ipResult.allowed() ? 0 : ipResult.retryAfterSeconds())));
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");
-        response.getWriter().write(objectMapper.writeValueAsString(Result.tooManyRequests("优化过于频繁，请稍后再试")));
+        Object body = publicApi
+                ? new ApiErrorResponse(new ApiErrorResponse.ApiError(
+                        "RATE_LIMITED", "优化过于频繁，请稍后再试",
+                        ApiExceptionHandler.requestId(request)))
+                : Result.tooManyRequests("优化过于频繁，请稍后再试");
+        response.getWriter().write(objectMapper.writeValueAsString(body));
         return false;
+    }
+
+    private RateLimitResult acquire(String key, RateLimitConfig.Bucket bucket, boolean distributed) {
+        return distributed
+                ? tokenBucketRateLimitService.tryAcquireDistributed(key, bucket)
+                : tokenBucketRateLimitService.tryAcquire(key, bucket);
+    }
+
+    private void writeApiError(HttpServletResponse response, HttpServletRequest request,
+                               int status, String code, String message) throws Exception {
+        response.setStatus(status);
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.setContentType("application/json;charset=UTF-8");
+        response.getWriter().write(objectMapper.writeValueAsString(
+                new ApiErrorResponse(new ApiErrorResponse.ApiError(
+                        code, message, ApiExceptionHandler.requestId(request)))));
     }
 }

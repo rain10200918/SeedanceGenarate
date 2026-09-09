@@ -11,6 +11,9 @@ import java.util.List;
  */
 public interface ApiVideoService {
 
+    record ModelTarget(String provider, String model) {
+    }
+
     /** 提交上下文（controller 组装，含调用侧元数据） */
     record CreateContext(
             ApiKey apiKey,
@@ -31,4 +34,10 @@ public interface ApiVideoService {
      * 失败抛 {@link org.example.seedancegenarate.exception.ApiException}，并落 REJECTED 调用日志。
      */
     VideoTask create(CreateContext context);
+
+    /** 全局模型解析后按真实提交口径计价；纯读，不创建任务也不冻结余额。 */
+    VideoSubmitService.PriceEstimate quote(String model, Integer duration);
+
+    /** 校验全局模型存在且已开放，返回规范化后的模型定位。 */
+    ModelTarget validateModel(String model);
 }

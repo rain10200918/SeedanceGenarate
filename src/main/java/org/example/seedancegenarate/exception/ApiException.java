@@ -3,7 +3,7 @@ package org.example.seedancegenarate.exception;
 import org.springframework.http.HttpStatus;
 
 /**
- * 对外 API 的错误契约：统一 {@code {error:{code,message,request_id}}} 输出（见 API_SERVICE_DESIGN.md §5）。
+ * 对外 API 的错误契约：统一 {@code {error:{code,message,requestId}}} 输出。
  * 与 UI 侧的 RuntimeException → Result.fail 分离，避免 API 失败被全局兜底成 500。
  */
 public class ApiException extends RuntimeException {
@@ -83,6 +83,16 @@ public class ApiException extends RuntimeException {
 
     public static ApiException providerUnavailable(String message) {
         return new ApiException("PROVIDER_UNAVAILABLE", HttpStatus.SERVICE_UNAVAILABLE, message);
+    }
+
+    public static ApiException uploadCredentialUnavailable() {
+        return new ApiException("UPLOAD_CREDENTIAL_UNAVAILABLE", HttpStatus.SERVICE_UNAVAILABLE,
+                "上传凭证服务暂不可用，请稍后重试");
+    }
+
+    public static ApiException promptOptimizeUnavailable() {
+        return new ApiException("PROMPT_OPTIMIZE_UNAVAILABLE", HttpStatus.SERVICE_UNAVAILABLE,
+                "提示词优化服务暂不可用，请稍后重试");
     }
 
     public static ApiException insufficientBalance() {

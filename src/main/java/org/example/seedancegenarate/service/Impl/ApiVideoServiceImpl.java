@@ -31,8 +31,11 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -50,16 +53,45 @@ public class ApiVideoServiceImpl implements ApiVideoService {
     private final VideoTaskService videoTaskService;
 
     @Override
+    public VideoSubmitService.PriceEstimate quote(String model, Integer duration) {
+        if (duration != null && (duration < 1 || duration > 600)) {
+            throw ApiException.validation("duration 必须在 1 到 600 之间");
+        }
+        String normalizedModel = normalizeModel(model);
+        VideoEngine engine = resolveEngineForModel(normalizedModel);
+        try {
+            return videoSubmitService.estimate(engine.provider(), normalizedModel, duration);
+        } catch (Exception e) {
+            throw toApiException(e, normalizedModel);
+        }
+    }
+
+    @Override
+    public ModelTarget validateModel(String model) {
+        String normalizedModel = normalizeModel(model);
+        VideoEngine engine = resolveEngineForModel(normalizedModel);
+        try {
+            videoSubmitService.validate(engine.provider(), normalizedModel);
+            return new ModelTarget(engine.provider(), normalizedModel);
+        } catch (Exception e) {
+            throw toApiException(e, normalizedModel);
+        }
+    }
+
+    @Override
     public VideoTask create(CreateContext context) {
-        // 幂等快路径：同幂等键且已完成 → 直接返回原任务（同一钥匙；不重复生成、不重复扣费）
+        // 幂等快路径：日志可能已写 taskId，也可能旧实例死在「任务落库 → 日志补链」窗口。
         ApiCallLog existing = apiCallLogMapper.selectOne(
                 Wrappers.<ApiCallLog>lambdaQuery().eq(ApiCallLog::getRequestId, context.requestId()));
-        if (existing != null && existing.getTaskId() != null
-                && context.apiKey().getId().equals(existing.getApiKeyId())) {
-            VideoTask task = findByTaskId(existing.getTaskId(), context.apiKey().getId());
-            if (task != null) {
-                return task;
+        if (existing != null) {
+            if (Objects.equals(context.apiKey().getId(), existing.getApiKeyId())) {
+                VideoTask recovered = recoverLoggedTask(context, existing, null);
+                if (recovered != null) {
+                    return recovered;
+                }
             }
+            // 已占用的幂等键绝不能继续下载参考图/重复提交；赢家尚未完成时让客户端稍后重放。
+            throw requestInProgress();
         }
 
         // 模型定位（全局 id → 提供方）+ 开放闸门，均在图片副作用之前
@@ -77,42 +109,131 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             // 并发同幂等键：赢家可能刚插入尚未提交完
             ApiCallLog winner = apiCallLogMapper.selectOne(
                     Wrappers.<ApiCallLog>lambdaQuery().eq(ApiCallLog::getRequestId, context.requestId()));
-            if (winner != null && winner.getTaskId() != null) {
-                VideoTask task = findByTaskId(winner.getTaskId(), context.apiKey().getId());
-                if (task != null) {
-                    return task;
+            if (winner != null && Objects.equals(context.apiKey().getId(), winner.getApiKeyId())) {
+                VideoTask recovered = recoverLoggedTask(context, winner,
+                        System.currentTimeMillis() - startMs);
+                if (recovered != null) {
+                    return recovered;
                 }
             }
-            throw new ApiException("REQUEST_IN_PROGRESS", HttpStatus.CONFLICT,
-                    "同一 Idempotency-Key 的请求正在处理中，请稍后查询");
+            throw requestInProgress();
         }
 
+        VideoTask task;
         try {
-            VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
+            task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                     context.apiKey().getUserId(), engine.provider(), context.model(), context.prompt(),
                     imageUrls, List.of(), List.of(), context.duration(), context.ratio(), context.megapixels(),
                     context.apiKey().getId(), "api:" + context.requestId(), null));
-            // 两阶段日志：回写 taskId + 排队耗时（终态由 ApiCallLogUpdater 收尾）
-            ApiCallLog update = new ApiCallLog();
-            update.setId(callLog.getId());
-            update.setTaskId(task.businessTaskId());
-            update.setQueuedMs(System.currentTimeMillis() - startMs);
-            apiCallLogMapper.updateById(update);
-            return task;
         } catch (Exception e) {
             // 记录原始堆栈（错误码映射会丢失它）
             log.warn("API 提交失败: model={} requestId={}", context.model(), context.requestId(), e);
             markRejected(callLog, e);
             throw toApiException(e, context.model());
         }
+
+        try {
+            // 先按 requestId 条件补 taskId，再重读任务终态。这样 Worker 无论在补链前还是补链后
+            // 完成，ApiCallLogUpdater 与这里至少有一方能把 RECEIVED 收尾。
+            return linkAndCatchUp(context, callLog, task, System.currentTimeMillis() - startMs);
+        } catch (RuntimeException e) {
+            // 任务已经受理，不能把日志伪装成 REJECTED。相同幂等键重放会再次按 requestId 补链。
+            log.error("API 任务已受理但调用日志补链失败: requestId={}, taskId={}",
+                    context.requestId(), task.businessTaskId(), e);
+            throw ApiException.internal("任务已受理但状态关联暂时失败，请使用相同 Idempotency-Key 重试");
+        }
+    }
+
+    /** 已有日志按 taskId 快查；taskId 尚未回写时，改用 video_task.request_id 追认。 */
+    private VideoTask recoverLoggedTask(CreateContext context, ApiCallLog callLog, Long queuedMs) {
+        VideoTask task;
+        if (StringUtils.hasText(callLog.getTaskId())) {
+            task = findByTaskId(callLog.getTaskId(), context.apiKey().getId());
+        } else {
+            task = videoSubmitService.findByRequestId(
+                    context.apiKey().getUserId(), "api:" + context.requestId());
+            // video_task 在 attempt/job 短事务之前已经可见；半成品随后可能被补偿删除，不能提前追认。
+            if (!isDurablyQueued(task)) {
+                return null;
+            }
+        }
+        if (task == null || !Objects.equals(context.apiKey().getId(), task.getApiKeyId())) {
+            return null;
+        }
+        return linkAndCatchUp(context, callLog, task, queuedMs);
+    }
+
+    private VideoTask linkAndCatchUp(CreateContext context, ApiCallLog callLog,
+                                     VideoTask task, Long queuedMs) {
+        String taskId = task.businessTaskId();
+        if (!StringUtils.hasText(taskId)) {
+            throw new IllegalStateException("生成任务缺少业务 taskId");
+        }
+        if (!StringUtils.hasText(callLog.getTaskId())) {
+            Long normalizedQueuedMs = queuedMs == null ? null : Math.max(0L, queuedMs);
+            int changed = apiCallLogMapper.linkTaskByRequestId(
+                    callLog.getId(), context.apiKey().getId(), context.requestId(), taskId, normalizedQueuedMs);
+            if (changed != 1) {
+                ApiCallLog latestLog = apiCallLogMapper.selectOne(
+                        Wrappers.<ApiCallLog>lambdaQuery()
+                                .eq(ApiCallLog::getRequestId, context.requestId())
+                                .eq(ApiCallLog::getApiKeyId, context.apiKey().getId()));
+                if (latestLog == null || !taskId.equals(latestLog.getTaskId())) {
+                    throw new IllegalStateException("API 调用日志 taskId 补链失败");
+                }
+                callLog = latestLog;
+            } else {
+                callLog.setTaskId(taskId);
+                if (normalizedQueuedMs != null) {
+                    callLog.setQueuedMs(normalizedQueuedMs);
+                }
+            }
+        }
+
+        // 补链完成后重读：若快速 Worker 已经先发完终态事件，就在这里补收尾；若尚未终态，
+        // 后续事件会按刚落下的 taskId 正常命中。两种时序都不会永久停在 RECEIVED。
+        VideoTask latestTask = findByTaskId(taskId, context.apiKey().getId());
+        if (latestTask == null) {
+            latestTask = task;
+        }
+        catchUpTerminalLog(callLog, latestTask);
+        return latestTask;
+    }
+
+    private void catchUpTerminalLog(ApiCallLog callLog, VideoTask task) {
+        if (!("SUCCESS".equals(task.getStatus()) || "FAILED".equals(task.getStatus()))) {
+            return;
+        }
+        Long totalMs = null;
+        LocalDateTime start = callLog.getCreateTime();
+        if (start != null) {
+            totalMs = Math.max(0L, Duration.between(start, LocalDateTime.now()).toMillis());
+        }
+        apiCallLogMapper.finishReceived(callLog.getId(), task.businessTaskId(), task.getStatus(),
+                StringUtils.hasText(task.getErrorMsg()) ? task.getErrorMsg() : null,
+                task.getCostAmount(), totalMs);
+    }
+
+    private boolean isDurablyQueued(VideoTask task) {
+        if (task == null || !StringUtils.hasText(task.businessTaskId())) {
+            return false;
+        }
+        if (!"PROCESSING".equals(task.getStatus())) {
+            return true;
+        }
+        return task.getCurrentAttemptId() != null
+                || StringUtils.hasText(task.getPhase())
+                || StringUtils.hasText(task.getProviderTaskId());
+    }
+
+    private ApiException requestInProgress() {
+        return new ApiException("REQUEST_IN_PROGRESS", HttpStatus.CONFLICT,
+                "同一 Idempotency-Key 的请求正在处理中，请稍后查询");
     }
 
     /** 全局模型 id → 提供方引擎；找不到抛 400 */
     private VideoEngine resolveEngineForModel(String model) {
-        String trimmed = model == null ? null : model.trim();
-        if (!StringUtils.hasText(trimmed)) {
-            throw ApiException.validation("model 不能为空");
-        }
+        String trimmed = normalizeModel(model);
         for (VideoEngine engine : videoEngineRegistry.all()) {
             boolean known = engine.models().stream().anyMatch(spec -> spec.model().equals(trimmed));
             if (known) {
@@ -120,6 +241,14 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             }
         }
         throw ApiException.modelNotFound(trimmed);
+    }
+
+    private String normalizeModel(String model) {
+        String trimmed = model == null ? null : model.trim();
+        if (!StringUtils.hasText(trimmed)) {
+            throw ApiException.validation("model 不能为空");
+        }
+        return trimmed;
     }
 
     /** 按新业务 ID 查询，同时兼容迁移前的 legacy task_id。 */

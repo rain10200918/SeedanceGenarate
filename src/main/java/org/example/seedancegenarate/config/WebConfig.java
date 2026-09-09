@@ -27,7 +27,7 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addInterceptor(apiKeyInterceptor)
                 .addPathPatterns("/api/v1/**");
         registry.addInterceptor(apiKeyRateLimitInterceptor)
-                .addPathPatterns("/api/v1/videos");
+                .addPathPatterns("/api/v1/videos", "/api/v1/assets/upload-url");
 
         registry.addInterceptor(authInterceptor)
                 .addPathPatterns("/api/**")
@@ -59,6 +59,6 @@ public class WebConfig implements WebMvcConfigurer {
                 );
 
         registry.addInterceptor(promptOptimizeRateLimitInterceptor)
-                .addPathPatterns("/api/video/optimize-prompt");
+                .addPathPatterns("/api/video/optimize-prompt", "/api/v1/prompts/optimize");
     }
 }
