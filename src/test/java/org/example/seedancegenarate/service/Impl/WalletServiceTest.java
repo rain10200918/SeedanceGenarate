@@ -30,6 +30,9 @@ class WalletServiceTest {
 
     @BeforeEach
     void setUp() {
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(new com.baomidou.mybatisplus.core.MybatisConfiguration(), "wallet-unit"),
+                BalanceTransaction.class);
         // 模拟 MyBatis-Plus insert 自动填充自增 ID
         when(btMapper.insert(any(BalanceTransaction.class))).thenAnswer(inv -> {
             BalanceTransaction bt = inv.getArgument(0);
@@ -37,13 +40,13 @@ class WalletServiceTest {
             return 1;
         });
         when(btMapper.updateBalanceAfter(any(), any(), any())).thenReturn(1);
-        // 默认：任务确实冻结过（settle/release 的正常前提）。「没冻结过」的用例自己覆盖成 0。
-        when(btMapper.selectCount(any())).thenReturn(1L);
+        // 默认：任务确实冻结过（settle/release 的正常前提）。未冻结用例覆盖为空列表。
+        when(btMapper.selectList(any())).thenReturn(java.util.List.of(new BalanceTransaction()));
     }
 
     /** 让被测任务表现为「从未成功冻结过」——提交时 FREEZE 事务回滚过 */
     private void neverFrozen() {
-        when(btMapper.selectCount(any())).thenReturn(0L);
+        when(btMapper.selectList(any())).thenReturn(java.util.List.of());
     }
 
     private static WalletService.CreditContext adminCtx(String bizKey) {
