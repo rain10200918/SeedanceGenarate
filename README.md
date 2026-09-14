@@ -1,554 +1,347 @@
-# SeedanceGenarate — 多提供方 AI 视频 / 图片生成后端
+# Ascent AI 创作平台 · 后端
 
-> 一个把「文字 / 图片 → 视频 / 图片」的生成能力抽象成**可插拔提供方**的 Spring Boot 后端。
-> 通过两层「策略 + 注册表」设计，把云端 API（Seedance）与自建 GPU 集群（ComfyUI 多实例）统一到同一套任务生命周期、计费、鉴权与开放能力之下，并附带一套对外售卖用的 API 服务。
+本仓库是 Ascent 的 Spring Boot 后端，提供图片、视频、音频生成，以及 Agent 创作、任务管理、钱包计费和开放 API。面向接手开发与部署的同事，本文按「理解系统 → 配置 → 启动 → 部署 → 排障」组织。
 
----
+- 后端仓库：[api-generate-backend](https://github.com/hengshengzhisuan/api-generate-backend)
+- 前端仓库：[api-generate-front](https://github.com/hengshengzhisuan/api-generate-front)
+- 构建：Java 17、Maven Wrapper；当前使用 Spring Boot 3.5.16。
+- 数据：MySQL（建议用 MySQL 8.4 演练部署）、Redis、阿里云 OSS。
 
-## Agent 上下文预算（开发配置）
+## 1. 系统做什么
 
-`agent.model-call.max-input-tokens` 默认 24000，是本地估算输入预算，不是模型真实窗口。
-`agent.model-call.context-windows` 可按**通道名**配置已经核实的模型总窗口，例如
-`agent.model-call.context-windows.my-channel=65536`（示例值，必须换成部署的真实限制）。
-未配置的通道日志显示 `configuredContextWindow=unknown`，不会按模型名字猜测。
-更换该通道模型时须同步核实此配置；配置值不自动读取上游，也不会扩大上游窗口。
+| 业务 | 说明 |
+| --- | --- |
+| 生成与任务 | 统一受理云端 Seedance、自建 ComfyUI 等提供方任务，查询状态、预览和下载产物 |
+| Agent 创作 | 从需求到计划、脚本、分镜、生成准备与费用审批，支持批量生成和局部修复 |
+| 素材与画布 | 素材引用、节点编排、任务关联、作品展示 |
+| 账号与钱包 | 登录、验证码、邮箱注册、钱包冻结/结算/释放、充值 |
+| 开放 API | API Key、幂等提交、模型能力、任务查询、Webhook、Key 月度预算 |
+| 管理后台 | 用户、模型开放、价格、LLM 通道、ComfyUI 节点、任务与账务管理 |
 
-预算包含 system、Schema、结构化请求、图片估算预留和 `safety-tokens`（默认1024）；
-已配置总窗口还扣除本次实际发送的输出额度。`image-token-reserve` 默认每张4096；
-文本按 UTF-8 字节数/3 向上取整估算，**不是模型 tokenizer**，图片实际计费也可能不同。
-`tokenParam=NONE` 只做输出估算预留，不声称输出已由请求约束。
-既有32000字符输入硬上限仍保留。日志 `Agent context budget` 仅输出分段数字，不输出正文；
-上游返回的 `promptTokens`/`completionTokens` 才是实际用量。
+模型清单与参数以运行时能力接口为准，不以 README 中的静态列表作为契约。
 
-当前步、直接依赖、已确认约束与审批事实保留；其余步骤只传身份/状态摘要；
-历史优先复用持久摘要与最近消息，相关作品优先，准确引用的原文仍由执行Skill读取。
-不新增模型摘要调用；Recipe全局自然语言规则不能安全自动拆解，仍保留完整规则和当前阶段。
-必要请求自身超预算会拒绝并保留计划，不通过截断必需正文或改变模型/输出额度勉强发送。
-
-## 目录
-
-- [项目简介](#项目简介)
-- [核心亮点](#核心亮点)
-- [技术栈](#技术栈)
-- [整体架构](#整体架构)
-- [功能特性](#功能特性)
-- [对外 API 服务](#对外-api-服务)
-- [目录结构](#目录结构)
-- [快速开始](#快速开始)
-- [关键配置](#关键配置)
-- [测试](#测试)
-- [已知事项与演进](#已知事项与演进)
-- [相关文档](#相关文档)
-
----
-
-## 项目简介
-
-**SeedanceGenarate** 是一个全栈项目（个人开发，前后端分离）：
-
-- **后端（本仓库）**：Spring Boot 3 服务，统一承接「文本 / 图片 → 视频 / 图片」的生成请求，把生成能力抽象成可插拔的 provider：
-  - **Seedance**：火山方舟（Volcano Ark）云端 API，按秒计费。
-  - **ComfyUI**：自建多实例 GPU 集群（同主机多端口、共享一套模型），按成功计费。
-- **前端**（配对仓库）：Vue3 + Pinia + Element Plus，由 `/api/video/options` 接口驱动「提供方 / 模型 / 比例 / 时长」选择器，**加新模型前端无需改代码**。
-
-配套能力包括：注册 / 登录（token 鉴权）、邀请码、按次 / 按秒计费、令牌桶限流、阿里云 OSS 参考媒体存储、提示词优化（后端代理大模型，密钥不下发前端）、SSE 实时状态推送，以及一套面向外部开发者的 **API 售卖层**（`sk-` 钥匙、HMAC 签名 webhook、幂等提交、两阶段调用日志）。
-
----
-
-## 核心亮点
-
-1. **两层「策略 + 注册表」抽象，扩展成本极低**
-   - 第一层 **提供方**：`VideoEngine` 接口 + `VideoEngineRegistry`，新增一个提供方 = 新增一个 `@Component implements VideoEngine`，其余零改动。
-   - 第二层 **ComfyUI 模型**：`ComfyUiEngine` 内部再持有 `Map<model, WorkflowBuilder>`，每个模型一份 `WorkflowBuilder`（把 prompt / 图片 / 时长 / 比例注入工作流 JSON），新增一个模型 = 新增一个类 + 一份模板 JSON。
-   - 前端 `/options` 遍历注册表下发 `ModelSpec` 能力约束（输出类型 / 时长档位 / 比例 / 图数量 / 分辨率），驱动选择器渲染——**加模型、改能力，前端零代码**。
-
-2. **单一路径、单一事实源**
-   - 所有生成任务共用 `video_task` 一张表 + `biz_task_id` / `provider_task_id` / `provider` / `node_id` / `model` 判别列，不为 ComfyUI / 对外 API 另开并行子系统，历史记录不割裂；旧 `task_id` 在过渡期继续兼容。
-   - UI 与对外 API **共用 `VideoSubmitService` 受理编排**（模型解析 → 开放闸门 → 落库/冻结 → `generation_attempt` + 提交作业）；请求线程立即返回稳定 taskId，供应商 HTTP 由 Worker 接管。
-
-3. **计费时机由引擎声明，幂等记账**
-   - 所有提供方都是“提交时冻结、成功时结算、失败时解冻”；外部提供方自身的成本时点不改变用户账务口径。
-   - `cost_record.task_id` 和钱包 biz_key 由唯一索引做最终幂等兜底，重放终态 Worker 不会重复扣费。
-
-4. **前端不轮询，改为服务端驱动 + SSE 推送**
-   - 后台 `VideoTaskPoller` 只把到期任务幂等写入 `TASK_POLL`；Worker 查供应商，成功后再通过 `TASK_FINALIZE` 转存 OSS。终态提交后发事件 → SSE 推给对应浏览器。
-   - SSE 尽力而为、非权威，**DB 仍是唯一真相**；断线由前端 `EventSource` 自动重连 + refetch 兜底。
-
-5. **对外 API 的工程化细节**
-   - [Key月度消费预算](docs/api-key-budget.md)：管理员设置、属主收紧；MySQL任务级预占/结算/释放与账号钱包同事务，多实例共享额度。上线需V58及全部实例切换。
-   - API Key 只存 SHA-256 哈希 + 明文仅创建时返回一次；webhook 带 HMAC-SHA256 签名防伪造，`(task_id, status)` 唯一索引防重复建投递记录；最多投递 3 次（含首发，失败后约 30 秒/2 分钟重试）。
-   - 提交幂等（`Idempotency-Key` / `request_id`）、两阶段调用日志（RECEIVED → 终态）、按Key属主账号令牌桶限流（429 带 `Retry-After`）、统一 `{error:{code,message,request_id}}` 错误契约。
-
-6. **面向多实例的分布式能力（Redis + 持久化作业）**
-   - **Redis Lua 分布式限流**：`feature.redis-rate-limit` 开启后全局限流额度一致，多实例不会放大配额。
-   - **登录 Token 存 Redis**：Hash 保存 userId + 有效期，TTL 低于阈值自动续期；MySQL 不再保存登录态。
-   - **跨实例 SSE**：`feature.redis-task-events` 开启后终态经 Redis Pub/Sub 广播，所有 API 实例都能推给自己的 SSE 连接。
-   - **全局定时任务锁**：`distributed.lock.enabled` 开启后，仍需单例执行的对账/清理任务不会多实例重复跑；Poller 可多实例扫描，由作业唯一键收口。
-   - **持久化作业（async_job）**：生成提交、轮询、终态转存、超时重试、画布/流水线节点和订单关单共用 MySQL 作业表 + token/generation 租约；中央 runtime 先拿空闲槽位再单张领取，崩溃后可跨实例接管。Redis 只做提交后门铃，30s 带抖动的 MySQL 扫描兜底。
-   - **不确定提交保护**：每轮供应商提交都有 `generation_attempt`；超时/断连无法证明未接单时进 `RECOVERY_REQUIRED` 告警人工核对，禁止盲目重复生成。
-   - **事件驱动完成通知**：ComfyUI 提交时注入 webhook_url（完成后主动回调）并保留 60s 状态查询兜底，Seedance 按 `next_poll_at` 做 2s/5s/30s 退避轮询。
-   - **ETA 预计完成时间**：ComfyUI 直接查真实队列给出排队位置（`GET /api/video/task/{id}/eta`），平均耗时按 model 统计并 Redis 共享缓存，前端详情页展示进度与预计剩余。
-
----
-
-## 技术栈
-
-| 层 | 技术 |
-|---|---|
-| 语言 / 框架 | Java 17 · Spring Boot 3.5.16 · Spring Web / AOP |
-| 持久层 | MyBatis-Plus 3.5.7 · MySQL · Flyway（版本化数据库迁移） |
-| 缓存 / 协调 | Redis（Lua 限流 · Token · Pub/Sub · 分布式锁 · ETA 统计缓存） |
-| 引擎通信 | Hutool 5.8.27（ComfyUI HTTP）· Jackson（工作流 JSON 编辑）· Aliyun OSS SDK 3.17.4 |
-| Agent 规划协议 | LangChain4j 1.19.0（仅 Planner 结构化输出；通道与运行状态由平台管理） |
-| 其他 | Lombok · ip2region（IP 属地，离线 xdb）· spring-security-crypto |
-| 前端（配对仓库） | Vue3 · Pinia · Element Plus · axios · SSE (`EventSource`) |
-
----
-
-## 整体架构
+## 2. 架构
 
 ### 系统总览
 
 ```mermaid
 flowchart TB
-    subgraph CLI["客户端"]
-        FE["Vue3 前端<br/>Pinia + Element Plus + axios"]
-        DEV["外部开发者<br/>持 sk- API Key"]
-    end
-
-    subgraph BE["Spring Boot 后端（API / Worker 一体，可多实例）"]
-        IN["拦截器链<br/>Auth(Redis Token) / ApiKey / RateLimit(Redis Lua)"]
-        CTRL["Controller 层<br/>Auth / Video / ApiVideo / Admin / TaskCallback"]
-        SUB["VideoSubmitService<br/>UI 与 API 共用提交编排"]
-        BILL["Pricing / Wallet<br/>提交冻结 · 成功结算"]
-        WORK["AsyncJobWorkerRuntime<br/>提交 / 轮询 / 转存 / 重试"]
-        REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;<br/>+ 能力声明：回调机制 / ETA"]
-        SE["SeedanceEngine<br/>POLL + BASIC"]
-        CE["ComfyUiEngine<br/>CALLBACK + FULL"]
-        WB["WorkflowBuilder 策略集<br/>MiniMaxH3 / ZImageTurbo / ..."]
-        GATE["ModelAccessService<br/>模型开放闸门"]
-        ETA["TaskEtaService<br/>排队位置 + 平均耗时"]
-        POLL["VideoTaskPoller<br/>到期扫描并幂等入队"]
-        RECON["TaskReconcileTask<br/>低频兜底对账"]
-        CON1["TaskFinalizeConsumer<br/>终态收尾（下载 → OSS）"]
-        CON2["PipelineNodeSubmitConsumer<br/>流水线节点提交"]
-        SSE["TaskStreamManager<br/>本地 SSE 连接"]
-        WH["WebhookDispatcher<br/>HMAC 回调 + 重试"]
-    end
-
-    subgraph REDIS["Redis"]
-        RL["限流令牌桶（Lua）"]
-        TK["登录 Token（Hash + TTL）"]
-        PS["Pub/Sub：task-status / job-available"]
-        LK["分布式锁"]
-        ETAC["ETA 统计缓存"]
-    end
-
-    subgraph STORE["存储"]
-        DB[("MySQL<br/>video_task / async_job / cost_record<br/>api_key / model_access")]
-        OSS[("阿里云 OSS<br/>参考图 + 生成产物")]
-    end
-
-    subgraph PROV["提供方"]
-        SD["Seedance 云端 API<br/>火山方舟"]
-        NG["nginx（X-Comfy-Token 校验）"]
-        CF["ComfyUI 多实例<br/>gpu-0/1/3/6 · 共享模型"]
-    end
-
-    FE -->|"HTTP + SSE ?token="| IN
-    DEV -->|"POST /api/v1/** · Bearer sk-"| IN
-    IN --> CTRL
-    CTRL --> SUB
-    SUB --> GATE
-    SUB --> BILL
-    SUB -->|"attempt + job"| DB
-    SUB -->|"afterCommit 门铃"| PS
-    PS --> WORK
-    WORK --> REG
-    REG --> SE
-    REG --> CE
-    CE --> WB
-    SE --> SD
-    CE --> NG
-    NG --> CF
-    CE -->|"下载/上传参考媒体"| OSS
-    POLL --> REG
-    POLL --> DB
-    CON1 --> DB
-    CON2 --> DB
-    CON1 --> OSS
-    ETA --> REG
-    CTRL --> ETA
-    POLL --> REDIS
-    CON1 --> REDIS
-    RECON --> DB
-    RECON --> REDIS
-    SSE -.->|"终态推送"| FE
-    WH -.->|"异步回调"| DEV
+    UI[Vue 前端] --> G[HTTPS 网关 / Nginx]
+    API[外部 API 调用方] --> G
+    G --> WEB[Spring Boot API / 鉴权 / 限流]
+    WEB --> AG[Agent 规划与审批]
+    WEB --> SUB[统一任务受理]
+    AG --> SUB
+    SUB --> DB[(MySQL: 任务 / 钱包 / 预算 / 作业)]
+    DB --> WORK[AsyncJobWorkerRuntime]
+    WORK --> REG[VideoEngineRegistry]
+    REG --> CLOUD[云端生成 API]
+    REG --> COMFY[ComfyUI / WorkflowBuilder]
+    WORK --> OSS[(OSS 素材与产物)]
+    WORK --> DB
+    WEB --> REDIS[(Redis: 登录态 / 限流 / 通知 / 缓存)]
+    WORK --> REDIS
+    REDIS --> SSE[SSE 状态通知]
+    SSE --> UI
+    DB --> WH[Webhook 投递]
+    WH --> API
+    AG --> LLM[数据库配置的 LLM 通道]
 ```
 
-### 核心设计：两层「策略 + 注册表」
+API 与 Worker 当前在同一应用中运行；多实例共享 MySQL、Redis、OSS。不要把它当成已经提供独立 API/Worker 部署角色的系统。
 
-```mermaid
-flowchart TD
-    OPT["GET /api/video/options<br/>遍历注册表下发 ModelSpec<br/>（输出类型 / 时长 / 比例 / 图数 / 分辨率）"] --> REG
-
-    subgraph L1["第一层 · 提供方（VideoEngine）"]
-        REG["VideoEngineRegistry<br/>Map&lt;provider, VideoEngine&gt;"]
-        SE["SeedanceEngine<br/>云端 · 成功结算<br/>POLL轮询 · BASIC估算"]
-        CE["ComfyUiEngine<br/>自建 · 成功结算<br/>CALLBACK回调 · FULL队列"]
-        REG --> SE
-        REG --> CE
-    end
-
-    subgraph L2["第二层 · ComfyUI 模型（WorkflowBuilder）"]
-        CE --> WM["Map&lt;model, WorkflowBuilder&gt;"]
-        WM --> M1["MiniMaxH3WorkflowBuilder<br/>参考生视频"]
-        WM --> M2["MiniMaxH3TextToVideoWorkflowBuilder<br/>文生视频"]
-        WM --> M3["MiniMaxH3AccelWorkflowBuilder<br/>参考生视频 · 官方加速"]
-        WM --> M4["ZImageTurboWorkflowBuilder<br/>文生图（输出 PNG）"]
-        WM --> M5["QwenImageEditWorkflowBuilder<br/>图生图（≤3 张参考图）"]
-    end
-
-    SD[("火山方舟 API")]
-    CF["ComfyUI 实例池<br/>least-queue / round-robin 选节点"]
-    SE --> SD
-    CE --> CF
-
-    style L1 fill:#eef4ff,stroke:#6b8ef0
-    style L2 fill:#eefaf1,stroke:#4fbf6a
-```
-
-> 扩展方式：新增一个提供方 = 加一个 `VideoEngine` 实现；新增一个 ComfyUI 模型 = 加一个 `WorkflowBuilder` + 一份模板 JSON。注册表会自动把它暴露到 `/options`。
-
-> **能力声明（策略驱动框架分流）**：`VideoEngine` 除业务方法外声明三类能力——`completionMechanism()`（CALLBACK 事件驱动 / POLL 轮询）、`etaCapability()`（FULL 可查真实队列 / BASIC 时间估算）、`needsPolling()`（决定高频退避还是 60s 兜底）。框架据此注入回调并决定状态查询节奏，ETA 也按能力组装；新增引擎无需修改任务框架。
-
-### 分布式设计（Redis + 持久化作业）
-
-```mermaid
-flowchart LR
-    subgraph API["API 实例（可多台，无状态）"]
-        A1["实例 A"]
-        A2["实例 B"]
-    end
-
-    subgraph REDIS["Redis"]
-        R1["限流 Lua<br/>全局配额一致"]
-        R2["Token Hash<br/>跨实例登录态"]
-        R3["Pub/Sub<br/>task-status / job-available"]
-        R4["分布式锁<br/>全局任务单实例执行"]
-        R5["ETA 统计<br/>avg / queue 缓存"]
-    end
-
-    subgraph WORKER["Worker 逻辑（多实例并行，行级租约）"]
-        W0["AsyncJobWorkerRuntime<br/>有界槽位 + heartbeat"]
-        W1["GENERATION_SUBMIT / TASK_POLL<br/>提交与轮询"]
-        W2["TASK_FINALIZE / TASK_RETRY<br/>转存与重试"]
-        W3["Canvas / Pipeline / Order<br/>节点与关单"]
-    end
-
-    subgraph DB["MySQL"]
-        D1["video_task<br/>任务状态真相"]
-        D2["async_job<br/>持久化作业 + token/generation 租约"]
-        D3["generation_attempt<br/>每轮供应商提交事实"]
-    end
-
-    A1 --> R1
-    A2 --> R1
-    A1 --> R2
-    A2 --> R2
-    A1 --> R3
-    A2 --> R3
-    R3 --> W0
-    W0 --> W1
-    W0 --> W2
-    W0 --> W3
-    W1 --> D2
-    W2 --> D2
-    W3 --> D2
-    W1 --> D1
-    W1 --> D3
-    W2 --> D1
-    A1 --> D1
-    A2 --> D1
-
-    style REDIS fill:#fff3e0,stroke:#f5a623
-    style WORKER fill:#eefaf1,stroke:#4fbf6a
-```
-
-**关键原则**：
-
-- **MySQL 是业务状态唯一真相**，Redis 只做限流 / 登录态 / 通知 / 锁 / 可重建缓存；
-- **作业化**：提交、轮询、终态收尾、超时重试与节点任务都走 `async_job`；空闲槽位才领取，heartbeat 续租，token+generation 拒绝迟到 Worker 回写；
-- **提交分代**：`generation_attempt` 先记录稳定请求号再调供应商；只有能确认未接单的错误才自动重试，未知结果保守停放并告警；
-- **事件驱动完成**：ComfyUI 优先完成回调并保留 60s 状态查询兜底，Seedance 退避轮询（2s/5s/30s），对账任务再做低频补漏；
-- **能力声明分流**：Worker 按引擎能力决定后续查询间隔，ETA 按引擎能力组装，新增引擎不改框架。
-
-### 一次生成的任务生命周期
+### 一次生成如何完成
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant U as 前端 / 外部开发者
-    participant C as Controller
-    participant S as VideoSubmitService
-    participant G as ModelAccessService
-    participant J as async_job / Worker
-    participant E as VideoEngine
-    participant B as Seedance / ComfyUI
-    participant P as Poller / 回调 / 对账
-    participant DB as MySQL
-    participant R as Redis
-    participant SSE as TaskStreamManager
-
-    U->>C: POST /text2video · /image2video · /api/v1/videos
-    C->>S: submit(request)
-    S->>G: 校验模型是否开放（effectiveModel 闸门）
-    S->>DB: 落 video_task → 冻结 + attempt + GENERATION_SUBMIT
-    S-->>R: MySQL 事务提交后发 job-available 门铃
-    S-->>C: 返回 taskId
-    C-->>U: 200（UI）/ 202（API）
-
-    R-->>J: 唤醒（丢失则 30s MySQL 扫描兜底）
-    J->>DB: 领 GENERATION_SUBMIT（token + generation 租约）
-    J->>E: submit(command)
-    E->>B: 选节点 → 上传参考素材 → /prompt
-    J->>DB: 回写 providerTaskId / nodeId / RUNNING
-    J->>DB: fenced complete job
-
-    par 完成通知（按引擎能力分流）
-        B->>P: ComfyUI 完成 → webhook 回调（秒级）
-    and
-        loop 状态查询（Seedance 2s/5s/30s；ComfyUI 60s 兜底）
-            P->>DB: 查到期任务并幂等入 TASK_POLL
-            J->>B: 持租约做单次 poll
-            J->>DB: 续租 + 身份 CAS + 更新 next_poll_at + complete
-        end
-    and
-        P->>DB: 对账兜底（60s 低频，回调/轮询丢失时）
-    end
-
-    alt 到达 SUCCESS
-        P->>DB: 身份 CAS RUNNING→FINALIZING + TASK_FINALIZE
-        J->>B: 事务外下载产物
-        J->>DB: 同一短事务：续租 + CAS SUCCESS + cost_record + 钱包结算 + complete
-        J->>R: 提交后释放槽位 + Pub/Sub 终态
-        R->>SSE: 跨实例广播
-        SSE-->>U: SSE 推送 {taskId, status} → 前端展示结果
-    else 提交结果无法确认
-        J->>DB: SUBMIT_UNKNOWN / RECOVERY_REQUIRED（指标导出告警）
-    else 到达 FAILED
-        P->>DB: 身份 CAS FAILED + errorMsg 并提交
-        P->>R: afterCommit 释放 admission + Pub/Sub 终态
-        P->>DB: REQUIRES_NEW 解冻（失败则对账补偿）
-        R->>SSE: 跨实例广播
-        SSE-->>U: SSE 推送 {taskId, status}
-    end
+    participant C as 前端 / API
+    participant A as 任务受理
+    participant D as MySQL
+    participant W as Worker
+    participant P as 生成提供方
+    participant O as OSS
+    C->>A: 参数、素材、请求身份
+    A->>A: 鉴权、模型能力、开放状态校验
+    A->>D: 事务内创建任务、冻结资金、预占预算、记录 attempt 和 job
+    A-->>C: 返回稳定 taskId
+    W->>D: 领取持久化作业及租约
+    W->>P: 提交生成
+    W->>D: 保存提供方任务身份
+    P-->>W: 回调提示 / Worker 轮询发现结果
+    W->>O: 事务外转存产物
+    W->>D: 短事务确认成功、记账与结算
+    W-->>C: SSE / Webhook 通知
 ```
 
----
+需要牢记的业务边界：
 
-## 功能特性
+- MySQL 保存任务、账务和作业事实；Redis 通知丢失后仍由持久化扫描补进度。
+- 用户资金采用提交冻结、成功结算、失败释放；Key 月度预算与账号钱包是两层约束。
+- 提交断连不一定代表提供方未受理。`SUBMIT_UNKNOWN` / `RECOVERY_REQUIRED` 要核对提供方事实，不能直接再次生成。
+- SSE 是通知，查询接口与数据库才是状态依据。
+- Agent 修复、重新核价不等于批准费用；新的付费执行仍需准确的审批授权。
 
-**生成能力（当前 6 个模型）**
+### 从哪里读代码
 
-| 提供方 | 模型 | 能力 |
-|---|---|---|
-| Seedance | `seedance` / `seedance-fast` / `seedance-mini` | 文生视频 / 图生视频（云端，按秒计费） |
-| ComfyUI | `minimax-h3` | 参考生视频（自建，按次计费） |
-| ComfyUI | `minimax-h3-t2v` | 文生视频 |
-| ComfyUI | `minimax-h3-accel` | 参考生视频 · 官方加速（可选 megapixels 分辨率档位） |
-| ComfyUI | `z-image-turbo` | **文生图**（输出 PNG） |
-| ComfyUI | `qwen-image-edit` | **图生图**（≤3 张参考图） |
-
-**配套能力**
-
-- 注册 / 登录（token 存 Redis，TTL 续期）+ 邀请码体系 + 按 IP 限流；管理员后台（用户角色、模型开关、API Key）。
-- 计费：Seedance 按秒单价 × 时长、ComfyUI 一口价；记账幂等，按 `task.id` 去重。
-- **模型开放闸门**：`ModelAccessService` 为唯一权威，提交时按「实际生效模型」硬校验（防手拼请求绕过），管理员可运行时开 / 关模型。
-- **提示词优化**：后端代理 LLM，系统提示词按模型选模板（`resources/prompts/{model}.md`，可零代码新增风格），LLM Key 仅后端持有。
-- **SSE 实时状态**：`GET /api/video/stream` 替代前端轮询；`GET /task/{id}` 纯读库兜底；多实例经 Redis Pub/Sub 跨实例推送。
-- **ETA 预计完成时间**：`GET /api/video/task/{id}/eta` 返回排队位置 / 进度 / 预计剩余（ComfyUI 查真实队列，平均耗时按 model 统计 + Redis 共享缓存）；前端详情页展示。
-- **事件驱动完成通知**：ComfyUI webhook 回调（秒级）并保留 60s 查询兜底，Seedance 走 2s/5s/30s 退避；定时器只生产 `TASK_POLL`，供应商 GET 由持租约 Worker 执行，Redis 门铃丢失再由 30s MySQL 作业扫描恢复。
-- 产物（视频 / 图片）统一流式转存到阿里云 OSS，数据库保存 `artifact_key` 和媒体元数据；播放/下载接口鉴权后签发短期 OSS URL。历史 `data/videos/` 文件保留兼容读取，OSS Lifecycle 负责正式产物过期清理。
-- **API 接入文档页**：`GET /api/video/api-docs`（登录用户可读）与对外 API 文档同一份 Markdown；前端「API 文档」页面渲染。
-
----
-
-## 对外 API 服务
-
-把生成能力以 API 方式对外售卖（薄接入层，全部复用现有引擎 / 计费 / 任务生命周期）：
-
-- `POST /api/v1/videos` 提交（`Bearer sk-`，可选 `Idempotency-Key`，202 返回 taskId）
-- `GET /api/v1/videos` / `/{taskId}` / `/{taskId}/content` 列表 / 查询 / 下载
-- `GET /api/v1/models` 模型清单（受模型开关过滤）
-- P1：任务查询/列表使用公开白名单；`AUDIO` 保持原任务/下载路径；v1错误返回真实HTTP状态；新请求指纹防同幂等键改参（1–64字符，V57迁移）；自助Webhook支持一次性secret、轮换及callback更新/清除。限流按账号共享，不因多建Key增加额度。
-- 生成支持 `images` / `videos` / `audios` URL 列表，能力字段由模型清单公开；参数在下载/冻结前严格校验，报价与提交时长同源。素材单件 30MiB、合计 100MiB/16 项，请求体 64KiB；失败仅补偿本次独立上传，已受理或结果不确定不删除。
-- webhook 终态回调（`X-Signature` HMAC 签名、`(task_id,status)` 幂等、退避重试）
-
-设计要点：key 只存 SHA-256 哈希、`api_call_log` 两阶段日志为统计唯一真相（聚合现算不建计数器表）、四个幂等点（提交 / 计费 / webhook / 限流）。详见 [`API_SERVICE_DESIGN.md`](API_SERVICE_DESIGN.md)。
-
----
-
-## 目录结构
-
-```
+```text
 src/main/java/org/example/seedancegenarate/
-├── engine/               # 提供方层（核心抽象）
-│   ├── VideoEngine       #   接口：provider / submit / poll / models / billingTiming
-│   │                     #   + 能力声明：completionMechanism / etaCapability / needsPolling
-│   ├── VideoEngineRegistry
-│   ├── Impl/SeedanceEngine
-│   ├── Impl/ComfyUiEngine
-│   └── comfyui/          # ComfyUI 支撑：Client / NodeScheduler / WorkflowBuilder 策略集
-│       └── Impl/         #   MiniMaxH3 / T2V / Accel / ZImageTurbo / QwenImageEdit
-├── controller/           # Video / Auth / UserAdmin / InviteCode / TaskCallback / GlobalExceptionHandler
-├── service/              # VideoSubmitService（UI/API 共享编排）· Pricing · OSS · PromptOptimize …
-│   └── Impl/             #   TaskEtaServiceImpl · RedisDistributedLock · TokenCacheService …
-├── interceptor/          # Auth + 限流 + ApiKey（对外 API）
-├── config/               # 各 @ConfigurationProperties + WebConfig
-├── event/                # 终态领域事件
-├── stream/               # SSE 管理 + Redis Pub/Sub（TaskStatus / JobAvailable）
-├── task/                 # 推进器 / 终态消费 / 流水线消费 / 对账 / webhook
-├── exception/  dto/  entity/  mapper/  context/  util/
-└── resources/
-    ├── application.yaml  # 全部配置支持 ${ENV:默认值}
-    ├── db/migration/     # Flyway 版本化数据库迁移（V1 基线 → V31 Worker fencing）
-    ├── schema.sql        # 历史参考：不再启动自动执行
-    ├── comfyui/workflows/  # 工作流模板 JSON
-    └── prompts/            # 提示词优化模板（{model}.md）
+├── controller/      HTTP 接口
+├── interceptor/     登录、角色、API Key 与限流
+├── agent/           规划、审批、运行时与持久化
+├── service/         受理、计价、钱包、存储等业务服务
+├── engine/          VideoEngine 注册表与提供方实现
+│   └── comfyui/     节点调度、HTTP 客户端与 WorkflowBuilder
+├── canvas/          画布节点与校验
+├── task/            作业消费、轮询、对账与 Webhook
+├── stream/          SSE 与 Redis 通知
+├── config/          配置绑定与应用装配
+└── entity/ mapper/  数据实体与访问
+
+src/main/resources/
+├── application-template.yaml   配置参考模板
+├── db/migration/               Flyway 迁移，当前至 V58
+├── comfyui/workflows/          生成工作流 JSON
+└── prompts/                    提示词模板
 ```
 
----
+核心入口可搜索 `VideoSubmitService`、`AsyncJobWorkerRuntime`、`VideoEngineRegistry`、`AgentApplication`、`BillingAuthorizationService`。
 
-## 快速开始
+## 3. 配置怎么设置
+
+### 配置加载方式
+
+仓库跟踪的是 `src/main/resources/application-template.yaml`，它**不会按默认文件名自动加载**。个人的 `application.yaml` 和支付密钥被 Git 忽略。
+
+推荐将配置放在仓库外，例如 `/etc/ascent/application.yaml`，运行时显式指定：
 
 ```bash
-# 1. 准备 MySQL（启动时由 Flyway 执行 db/migration/V1__baseline.sql；已有本地库会自动 baseline）
-# 2. 配置：至少数据库连接 + 你实际使用的提供方密钥（见「关键配置」）
-
-# 3. 编译
-./mvnw clean compile
-
-# 4. 测试（contextLoads 已隔离，不连接真实 MySQL/Redis）
-./mvnw clean test
-#    注：3 个 HTTP 超时边界用例需要允许绑定本机 loopback；
-#    真实 MySQL 迁移/方言兼容仍须在独立测试库演练。
-
-# 5. 启动（默认 :8080）
-./mvnw spring-boot:run
+java -jar target/SeedanceGenarate-0.0.1-SNAPSHOT.jar \
+  --spring.config.location=file:/etc/ascent/application.yaml
 ```
 
-启动后：
+`spring.config.location` 替换默认搜索位置，便于避免误读开发机配置。配置内 `${VARIABLE}` 从进程环境读取；`.env` 文件本身不会被 Spring Boot 自动读取。Docker 用 `--env-file`，systemd 用 `EnvironmentFile`，IDE 则在运行配置中填写环境变量。
 
-- UI 接口：`POST /api/auth/register` → `POST /api/auth/login` 拿 token → `POST /api/video/text2video`
-- 能力清单：`GET /api/video/options`
-- SSE 推送：`GET /api/video/stream?token=xxx`
+先复制模板到自己的外部配置位置，再逐项核对。模板中仍有历史支付默认值，**不能直接当作已脱敏的生产配置使用**；未接支付时显式设置 `WECHAT_PAY_ENABLED=false`，启用时全部替换为己方参数。本文不复制这些值。
 
----
+### 必须确认的基础配置
 
-## 关键配置
+| 环境变量 | 用途与设置方式 |
+| --- | --- |
+| `SPRING_DATASOURCE_URL` | 例如 `jdbc:mysql://127.0.0.1:3306/ascent?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai`；生产 TLS 按数据库要求配置 |
+| `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` | 应用数据库账号；执行迁移的账号需要对应 DDL 权限 |
+| `SPRING_REDIS_HOST` / `SPRING_REDIS_PORT` / `SPRING_REDIS_PASSWORD` / `SPRING_REDIS_DATABASE` | Redis 连接；模板使用这些变量映射到 `spring.data.redis` |
+| `ALIYUN_OSS_ENDPOINT` / `ALIYUN_OSS_BUCKET_NAME` / `ALIYUN_OSS_DOMAIN` | OSS 区域、Bucket 与访问域名 |
+| `ALIYUN_OSS_ACCESS_KEY_ID` / `ALIYUN_OSS_ACCESS_KEY_SECRET` | 服务端 OSS 访问凭据，使用部署环境注入 |
+| `SPRING_MAIL_HOST` / `SPRING_MAIL_USERNAME` / `SPRING_MAIL_PASSWORD` | 邮箱验证码 SMTP；模板还有必填占位符，需填实际值或在自有配置中明确调整 |
+| `SERVER_PORT` | 默认 `8080` |
+| `FILE_UPLOAD_PATH` | 默认 `./data/images`，部署时指向可写且持久化的路径 |
 
-所有配置均为 `${ENV:默认值}` 形式，生产环境用环境变量覆盖（`application.yaml` 见 §11 详表）。数据库结构由 Flyway 管理，默认启用 `spring.flyway.enabled=true` 且 `spring.sql.init.mode=never`。
+模板中没有默认值的 `${...}` 不能遗漏。**业务暂时不用某项，不代表该模板中的占位符可以不解析**；未接入的功能要在自己的配置中明确处理并保持模型/通道关闭。
 
-| 配置项 | 说明 |
-|---|---|
-| `SPRING_DATASOURCE_*` | MySQL 连接（Hikari 池大小按实例数预算） |
-| `SPRING_REDIS_*` | Redis（Token / 限流 / Pub/Sub / 锁 / ETA 缓存；池大小按每请求 2 次 Redis 预算） |
-| `SPRING_FLYWAY_*` / `SPRING_SQL_INIT_MODE` | Flyway 迁移开关 / 旧 SQL 初始化开关 |
-| `SEEDANCE_API_KEY` / `SEEDANCE_MODEL*` | Seedance 密钥与模型 |
-| `COMFYUI_NODE{0,1,3,6}_URL` / `_ENABLED` | ComfyUI 实例节点 |
-| `COMFYUI_ACCESS_TOKEN` | ComfyUI 访问令牌（所有请求带 `X-Comfy-Token`，nginx 入口校验） |
-| `VIDEO_CALLBACK_BASE_URL` / `_SECRET` | ComfyUI 完成回调地址与鉴权 token（未配置自动回退轮询） |
-| `AUTH_TOKEN_*` | 登录 Token 有效期（idle / max lifetime / 续期阈值）与 Redis 前缀 |
-| `FEATURE_REDIS_RATE_LIMIT` / `_TASK_EVENTS` | 分布式限流 / 跨实例 SSE 开关（多实例必须开） |
-| `DISTRIBUTED_LOCK_*` | 全局定时任务锁（多实例必须开） |
-| `ASYNC_JOB_*` | 持久化作业（`WORKER_THREADS` / `RECONCILE_INTERVAL_MS` / `RECONCILE_JITTER_PERCENT` / `MAX_ATTEMPTS` / `BACKOFF_BASE_SECONDS` / Redis 通知频道） |
-| `TASK_STATUS_REDIS_CHANNEL` / `ASYNC_JOB_REDIS_CHANNEL` | Pub/Sub 频道（不同环境用不同前缀隔离） |
-| `ALIYUN_OSS_*` | 参考图与生成产物对象存储（须后端可读，ComfyUI 会回源下载）；`ALIYUN_OSS_ARTIFACT_PREFIX` / `ALIYUN_OSS_SIGNED_URL_TTL_SECONDS` 控制产物前缀与签名有效期 |
-| `PROMPT_OPTIMIZE_API_KEY` | 提示词优化 LLM 密钥（仅后端） |
-| `BILLING_*` / `RATE_LIMIT_*` / `VIDEO_POLL_*` | 计费 / 限流 / 推进器参数 |
-| `VIDEO_TASK_TIMEOUT_MINUTES` / `VIDEO_TIMEOUT_RETRY_MAX` / `VIDEO_SUBMIT_STALL_MINUTES` | 任务超时自动处理：超龄强制终态 / ComfyUI 免费自动重试上限（0=不重试）/ 提交断裂判定 |
-| `VIDEO_MODEL_ACCESS_DEFAULT_OPEN` | 新模型默认是否开放 |
+### 生成提供方、LLM 与支付
 
-> ⚠️ **安全**：仓库内 `application.yaml` 的默认值含真实样式的密钥，**仅供本地开发**；务必用环境变量覆盖真实密钥，切勿把真实密钥提交进仓库。
+| 场景 | 配置与管理入口 |
+| --- | --- |
+| Seedance | `SEEDANCE_API_KEY`、`SEEDANCE_URL`、`SEEDANCE_MODEL`；实际支持的模型需在管理端确认开放状态与价格 |
+| ComfyUI | 模板有 `COMFYUI_NODE0/1/3/6_URL` 与对应 `_ENABLED`；填写实际可达地址，未使用节点禁用；网关令牌用 `COMFYUI_ACCESS_TOKEN` |
+| 节点维护 | 节点持久化到数据库后在后台管理；不要指望修改 YAML 覆盖已有节点配置 |
+| ComfyUI 回调 | `VIDEO_CALLBACK_BASE_URL`、`VIDEO_CALLBACK_SECRET`、`VIDEO_COMFYUI_WEBHOOK_SUPPORTED`；只有安装并验证回调扩展才开启，原生 ComfyUI 不能假定支持 |
+| LLM / 提示词优化 | `PROMPT_OPTIMIZE_URL`、`PROMPT_OPTIMIZE_API_KEY`、`PROMPT_OPTIMIZE_MODEL` 是初始通道种子；已有通道在后台「AI 通道」维护 |
+| Agent Planner | 规划通道必须支持严格 `response_format.type=json_schema`；普通聊天测试通过不等于 Planner 可用 |
+| 微信支付 | 默认部署显式禁用；启用前配置 `WECHAT_PAY_APP_ID`、`WECHAT_PAY_MCH_ID`、API v3 密钥、商户私钥/证书路径、序列号与通知地址 |
+| 其他支付渠道 | 按对应配置类与部署环境单独接入，本文不提供可直接用于真实充值的凭据示例 |
 
----
+### 常用调优参数
 
-## 可观测性
+| 配置 | 模板默认值 / 注意事项 |
+| --- | --- |
+| `ASYNC_JOB_WORKER_THREADS` | `8`；每实例 Worker 并行槽位，结合提供方、数据库容量调节 |
+| `ASYNC_JOB_RECONCILE_INTERVAL_MS` | `30000`；通知丢失后的作业扫描间隔 |
+| `SPRING_DATASOURCE_POOL_MAX` / `_MIN_IDLE` | `50` / `10`；所有实例池上限之和要给数据库留运维余量 |
+| `SPRING_REDIS_MAX_ACTIVE` | `128`；结合并发与 Redis 容量配置 |
+| `VIDEO_TASK_TIMEOUT_MINUTES` | `60`；结合模型实际耗时设置，不能用缩短超时解决未知受理 |
+| `VIDEO_ARTIFACT_RETENTION_DAYS` | `30`；与 OSS 产物生命周期一致，按创建时间判断 |
+| `ALIYUN_OSS_SIGNED_URL_TTL_SECONDS` | `300`；产物鉴权后的临时访问地址有效期 |
+| `VIDEO_MODEL_ACCESS_DEFAULT_OPEN` | 模板为 `true`；新环境建议改为 `false`，逐个验证再开放 |
+| `AGENT_MODEL_CALL_TIMEOUT_MS` | `300000`；后台 Agent 模型调用超时 |
+| `AGENT_VIDEO_PROMPT_OUTPUT_TOKENS` / `AGENT_VIDEO_PROMPT_REPAIR_TOKENS` | `12288` / `16384`；须匹配真实上游能力 |
 
-后端暴露 `/actuator/prometheus`（JVM / HTTP / 线程池 + 自定义业务指标），业务指标由 `MetricsExportTask` 每 30s 从 DB 现查导出：
+Agent 的 `agent.model-call.max-input-tokens` 默认 24000，是本地估算预算，不是模型真实窗口。`agent.model-call.context-windows` 按通道名填写核实过的总窗口；默认每图预留 4096 token，文本按 UTF-8 字节估算，不等同于上游 tokenizer。需要的上下文本身超限时会拒绝，不应通过删审批事实来规避。
 
-| 指标 | 含义 |
-|---|---|
-| `task_processing_count{provider}` | 生成中任务数（按引擎） |
-| `task_recovery_required_count` | 供应商是否已接单无法判定，需人工核对的任务数 |
-| `task_stuck_count` | 卡死数：超过超时阈值仍 PROCESSING（正常应接近 0） |
-| `task_success_total` / `task_failed_total` | 近 5 分钟成功 / 失败（成功率窗口） |
-| `async_job_dead_count` | 死信作业数（重试耗尽，需人工介入） |
-| `node_up{node_id}` / `node_queue_load{node_id}` | ComfyUI 节点在线状态与队列深度 |
+`agent.runtime.video-model-priority` 可配置视频模型 ID 列表，只影响兼容模型的优先选择，不会自动替换已绑定或已批准任务。
 
-一键起监控栈（Prometheus + Grafana + Alertmanager）：
+## 4. 本地启动
+
+1. 安装 JDK 17，准备可访问的 MySQL、Redis 和所需外部服务。
+2. 在 MySQL 创建空数据库与应用账号；不要先执行历史 `schema.sql`。
+3. 复制配置模板到仓库外，填写上一节配置，通过 IDE 或终端导出所需环境变量。
+4. 从仓库根目录运行：
+
+```bash
+java -version
+./mvnw -DskipTests package
+java -jar target/SeedanceGenarate-0.0.1-SNAPSHOT.jar \
+  --spring.config.location=file:/etc/ascent/application.yaml
+```
+
+也可以在 IDE 中运行应用入口，并设置参数 `--spring.config.location=file:/你的绝对路径/application.yaml`。
+
+首次启动 Flyway 会执行迁移。当前最新迁移为 `V58__api_key_budget.sql`。空库可直接迁移；已有库需先核对 `flyway_schema_history`，不要用自动 baseline 掩盖结构差异。生产显式配置：
+
+```text
+SPRING_FLYWAY_ENABLED=true
+SPRING_FLYWAY_BASELINE_ON_MIGRATE=false
+SPRING_SQL_INIT_MODE=never
+WECHAT_PAY_ENABLED=false
+VIDEO_MODEL_ACCESS_DEFAULT_OPEN=false
+```
+
+启动后先检查日志和健康接口：
+
+```bash
+curl -i http://127.0.0.1:8080/actuator/health
+```
+
+健康检查通过仅说明其覆盖的依赖正常，还需验证登录、模型列表、素材读写和任务链路。新环境的首个管理员账号需由负责人按账号管理流程配置；不要假设存在默认管理员密码。
+
+前端开发默认把 `/api` 代理至 `http://localhost:8080`；前端不需要拿到生成提供方或 OSS 的服务端密钥。
+
+## 5. 部署
+
+### JAR / systemd
+
+部署 JAR、外部配置和凭据文件，使用独立服务用户运行，确保数据目录可写。systemd 单元可参考：
+
+```ini
+[Unit]
+Description=Ascent backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ascent
+WorkingDirectory=/opt/ascent
+EnvironmentFile=/etc/ascent/backend.env
+ExecStart=/usr/bin/java -jar /opt/ascent/app.jar --spring.config.location=file:/etc/ascent/application.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+服务用户、目录与 Java 路径需要提前准备。`backend.env` 使用 `KEY=value` 格式，限制读取权限；启动日志通过 `journalctl -u ascent-backend -f` 查看（单元名需对应）。
+
+### Docker
+
+仓库的 Dockerfile **只复制已经编译的 JAR**，不会替你执行 Maven：
+
+```bash
+./mvnw -DskipTests package
+docker build -t ascent-backend:local .
+docker run -d --name ascent-backend --restart unless-stopped \
+  -p 127.0.0.1:8080:8080 \
+  --env-file /etc/ascent/backend.env \
+  -v /etc/ascent/application.yaml:/config/application.yaml:ro \
+  -v /var/lib/ascent:/app/data \
+  ascent-backend:local \
+  --spring.config.location=file:/config/application.yaml
+```
+
+容器中的 `localhost` 是容器自身；数据库、Redis、ComfyUI、LLM 的地址必须从容器可达。密钥文件若使用外部路径，也要挂载到容器对应路径。
+
+**打包注意：Git 忽略不等于 Maven 不打包。** 当前 Maven 资源规则可能将本机未跟踪的 `application.yaml` 或支付文件打进 JAR。发布推荐从干净克隆构建，外部注入运行配置；发布前用 `jar tf` 核对 `BOOT-INF/classes/` 下的配置与密钥资源。
+
+### 网关与 SSE
+
+网关终止 HTTPS，转发 `/api/`，SSE 路径关闭缓冲。下面是配置片段，需放进实际 Nginx `server` 中：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    client_max_body_size 210m;
+}
+```
+
+此片段保留 `/api` 路径。应用 multipart 上限为单文件 200MB、请求 210MB；公开 v1 JSON 与 URL 参考素材另有限制，调大网关不能解除业务限制。转发头仅应信任实际受控网关。监控端点应通过运维网络访问。
+
+### 多实例与升级
+
+所有实例使用相同业务 MySQL、Redis 与 OSS，并开启：
+
+```text
+FEATURE_REDIS_RATE_LIMIT=true
+FEATURE_REDIS_TASK_EVENTS=true
+FEATURE_REDIS_CONFIG_INVALIDATION=true
+DISTRIBUTED_LOCK_ENABLED=true
+```
+
+不同环境隔离 Redis DB/前缀和频道：`AUTH_TOKEN_REDIS_KEY_PREFIX`、`CAPTCHA_REDIS_KEY_PREFIX`、`REGISTRATION_EMAIL_REDIS_KEY_PREFIX`、`RATE_LIMIT_REDIS_KEY_PREFIX`、`DISTRIBUTED_LOCK_KEY_PREFIX`、`TASK_STATUS_REDIS_CHANNEL`、`ASYNC_JOB_REDIS_CHANNEL`、`CONFIG_INVALIDATION_REDIS_CHANNEL`。
+
+升级顺序：备份数据库与旧制品 → 在克隆库演练迁移 → 暂停新生成并处理在途任务 → 停止不兼容旧 Worker → 执行迁移 → 启动同版本实例 → 验证登录、任务、审批和账务。V58 预算控制要求实例整体切换，旧实例不能绕过预算受理。不要把回滚旧 JAR 当作数据库回滚；MySQL DDL 失败后要检查实际结构和迁移记录再处理。
+
+## 6. API 与联调
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/video/options` | 网页端模型能力（需要相应登录认证） |
+| `GET /api/video/task/{id}` | 任务详情 |
+| `GET /api/video/stream` | 登录用户 SSE |
+| `GET /api/v1/models` | 对外可用模型能力 |
+| `POST /api/v1/videos` | 对外统一生成受理，成功返回 202 |
+| `GET /api/v1/videos` / `/{taskId}` / `/{taskId}/content` | 对外任务列表、详情、内容 |
+
+v1 使用 `Authorization: Bearer <API Key>`。先查询模型能力，再提交对应参数；支持的图片、视频、音频参考取决于具体模型。网络重试沿用同一幂等键，同键变更参数会冲突。查询验证可以使用：
+
+```bash
+curl -H "Authorization: Bearer ${ASCENT_API_KEY}" \
+  http://127.0.0.1:8080/api/v1/models
+```
+
+`ASCENT_API_KEY` 是调用者在本机设置的变量，勿将真实 Key 写入示例。生成可能产生费用，联调提交前确认价格与预算。完整字段、错误码与 Webhook 协议以 [API 文档](src/main/resources/api-docs.md) 为准。
+
+## 7. 测试与运维
+
+当前存在会调用真实微信预支付的 `WechatPaymentServiceTest`，不要直接把全量测试当成完全隔离测试。常规回归先显式排除该用例：
+
+```bash
+./mvnw '-Dtest=*,!WechatPaymentServiceTest' test
+```
+
+这个排除命令不保证所有其他测试均无外部依赖。数据库迁移、Redis 集成和提供方验收需按测试要求使用隔离环境；真实支付测试只能在单独授权的环境运行。`-DskipTests package` 是构建命令，不是测试通过证明。
+
+监控 Compose 只启动 Prometheus、Grafana、Alertmanager，**不包含后端、MySQL、Redis**：
 
 ```bash
 docker compose -f compose/docker-compose.yml up -d
-# Prometheus: http://localhost:9090   Grafana: http://localhost:3000 (admin/admin)
-# 后端地址在 compose/prometheus.yml targets 里配置
 ```
 
-告警规则（`compose/rules.yml`）：待人工核对的未知提交、卡死任务、作业死信、成功率低于 90%、节点掉线。告警出口接入钉钉 / 企业微信机器人见 `compose/alertmanager.yml`。
+启动前调整 `compose/prometheus.yml` 中后端抓取地址，替换 Grafana 默认密码，配置告警出口与网络访问限制。关注 `/actuator/prometheus` 中任务待恢复、作业死信、任务卡住、节点在线及队列等指标。
 
----
+| 现象 | 首先检查 |
+| --- | --- |
+| 启动提示占位符未解析 | 外部配置路径、进程环境变量、模板必填项是否齐全 |
+| Flyway 失败 | 迁移日志、数据库权限、实际表结构、`flyway_schema_history`；勿盲目 baseline/repair |
+| 登录或验证码异常 | Redis 连通性、SMTP、环境前缀、网关转发头 |
+| 模型看不到 / 提交被拒绝 | 模型开放状态、价格、参数能力、节点健康、账号余额与 Key 预算 |
+| Agent 不继续 | 当前审批/等待状态、LLM 通道 Schema 支持与超时、对应作业/步骤；先确认是否本就等待用户 |
+| 任务长时间不推进 | 联查 `video_task`、`generation_attempt`、`async_job`，核对租约、尝试身份和提供方状态 |
+| `RECOVERY_REQUIRED` | 核对提供方是否接单；不得仅因网页无结果就重投 |
+| 产物打不开 | OSS 权限、签名有效期、生命周期与保留期、浏览器到 OSS 的可达性 |
+| SSE 不实时 | Nginx 缓冲、超时、Redis 事件开关、断线后的详情刷新 |
 
-## Planner 模型接入（LangChain4j）
+## 8. 进一步阅读
 
-`AGENT_PLAN` 使用 LangChain4j 适配器发送严格 JSON Schema；文本 Skill、Recipe 编译、同步提示词优化仍走原客户端。没有引入框架自动 Tool 执行、ChatMemory 事实存储或第二套 YAML 通道。
+- [架构说明](ARCHITECTURE.md)：历史设计与模块细节，具体行为以当前代码为准。
+- [开放 API 设计](API_SERVICE_DESIGN.md) 与 [接口文档](src/main/resources/api-docs.md)。
+- [API Key 月度预算](docs/api-key-budget.md)。
+- [Agent 局部修复](docs/agent-local-repair.md)、[批量重新核价](docs/agent-batch-requote.md)、[视频提示词协议](docs/agent-video-prompt-protocol.md)。
+- [OSS URL 修复](docs/OSS_URL_RECOVERY.md)。
 
-- 通道仍在管理端配置、保存于 `llm_channel`，沿用已有完整 Chat Completions 请求地址、密钥、模型、优先级与启停语义；无需修改数据库结构。密钥不要写进仓库。
-- 自有 vLLM 或第三方兼容接口必须实际支持并接受 `response_format.type=json_schema`、严格对象及嵌套 `anyOf`；只支持普通聊天或 JSON Mode 不代表能运行 Planner。通过真实上游契约验证前，不把通道标为“已验证支持”。
-- wire 格式有一层 `decision` 包装，内部仍是原四种领域动作；可选参数以 Schema 允许的 `null` 表达，进入原业务校验前恢复省略。完整协议见 `.my-loop/CONTRACT-langchain4j-planner.md`。
-- 上游明确拒绝 `response_format` 时报告 `MODEL_SCHEMA_UNSUPPORTED`，普通参数错误仍报告 `MODEL_INVALID_REQUEST`；不会静默退回自由文本，也不会把当前创作自动转发其他第三方。SDK 不自动重试；模型故障仍受既有持久化恢复次数和等待策略约束。目前前端沿用通用模型检查提示，排障时应结合该日志错误码。
-- JSON 格式正确不等于业务允许执行；作品归属、计划步骤、费用确认、幂等和旧 epoch 拦截都继续由平台校验。
-- 普通试跑仍验证原文本链路，不足以证明 Planner Schema 能力。升级前应在隔离测试环境验证一次真实 Agent 文本创作和审批暂停；本地 HTTP fixture 不代表生产 vLLM 已通过。
-
-本次升级不包含新数据库迁移。发布前保留旧制品、备份生产数据库并做兼容演练，避免新旧 Planner 协议在同一批在途作业上交替执行；不因模型接入而重投旧付费任务。
-
-版本维护提醒：Spring Boot 官方将 3.5.16 列为 3.5 系列最后一个 OSS 版本；本项目按当前升级范围保留 3.5.x，后续需要单独评估受支持版本或商业支持，不能把构建成功视为长期安全维护保证。参见 [官方发布说明](https://spring.io/blog/2026/06/25/spring-boot-3-5-16-available-now/)。
-
-## 测试
-
-- 单元测试 + 隔离的 Spring 上下文测试 + 可选本地 Redis 集成测试（`RUN_REDIS_INTEGRATION_TESTS=true`），`./mvnw clean test` 全绿。
-- 覆盖：各类 `WorkflowBuilder`、`GenerationMode`、`ModelAccessService`、`PromptOptimizeService`、`VideoEngine.effectiveModel`（闸门修复回归）、Redis 限流 Lua、Token 缓存、分布式锁、作业入队/领取/重试、终态消费、回调鉴权、Pub/Sub 发布订阅等。
-- 默认测试不连接真实 MySQL/Redis；`ApplicationTests` 使用惰性上下文与立即失败的测试 DataSource，`Boot35SmokeTest` 另起受控本地 Web 服务、显式检查关键框架 Bean、健康响应及匿名 Agent 拦截。这不等于全部生产 Bean 的外部初始化已验证。真实 MySQL 8.4 的迁移与 `SKIP LOCKED` 必须另做部署前演练。
-
----
-
-## 已知事项与演进
-
-- **多实例部署**：核心链路已分布式化。必须开启 `FEATURE_REDIS_RATE_LIMIT`、`FEATURE_REDIS_TASK_EVENTS`、`DISTRIBUTED_LOCK_ENABLED`，为每个环境隔离 Redis key/channel，并按“实例数 × Worker 槽位”预算 MySQL/Redis 连接池。
-- **Worker 升级门禁**：旧/新 Worker 不能混跑。先暂停生成、等待旧在途任务排空并停止全部旧实例，再于维护窗用单一新制品执行 V29–V31，最后只启新版；新版已接单后不能直接回滚旧镜像。
-- **迁移前检查**：先备份并在 MySQL 8.4 快照克隆上演练空库与 V28→V31；确认 `async_job` 为 InnoDB，且 `idx_job_claim`、`idx_job_lease`、`idx_job_claim_v2`、`idx_video_task_poll_due` 均存在。V31 的 VARCHAR→TEXT 可能重建 `async_job`。已由 Flyway 管理的生产库应设置 `SPRING_FLYWAY_BASELINE_ON_MIGRATE=false`。
-- **迁移失败处理**：MySQL DDL 不具备整组事务回滚保证；失败后先核对实际表结构与 `flyway_schema_history`，清理到确定状态并执行 Flyway repair，禁止不检查就盲目重跑。
-- **ComfyUI 访问安全**：建议 nginx 入口校验 `X-Comfy-Token`（header 或 `?token=`），ComfyUI 只监听本机；后端所有调用已统一携带 token。
-- **任务推进**：ComfyUI 事件驱动（webhook 回调）并保留 60 秒查询兜底；Seedance 退避轮询（2s/5s/30s）；所有供应商查询都由持租约的 `TASK_POLL` Worker 执行。
-- **演进路线**：读写分离时将 claim/lease/attempt 全部强制走 Writer，再演进 Redis Sentinel/Cluster、流水线多次运行历史、Outbox 可靠事件、API/Worker 角色拆分和更多模型。
-- 实测发现并修复的典型问题（面试可展开）：模型开放闸门绕过（`effectiveModel` 默认实现）、Spring advice 排序吞掉 `ApiException`（`@Order`）、`Map.of` 的 null key NPE、分布式锁开关关闭导致任务不执行（锁未启用需回退直接执行）、对账查询 NULL next_poll_at 不匹配、scoped CSS 对 v-html 内容失效（`:deep()`）。
-
----
-
-## 相关文档
-
-### Agent 创作规格与视频模型顺序
-
-Agent 计划的 `data.creationSpec` 保存已知的整片 `totalDurationSeconds` 和 `ratio`；用户采用准确计划版本后，下游脚本、分镜和视频准备继承。历史缺值保持未知，不从标题或摘要猜补。模型输出的分镜总秒数必须与已确认目标相同；这是制作规格验证，不是对生成文件实际时长、角色一致性或已合成成片的保证。
-
-可在 Spring Boot 配置中设置 `agent.runtime.video-model-priority`（字符串列表，值为现有视频模型 ID）。列表靠前的兼容模型优先；不支持画幅、参考模式或时长组合的模型不会因优先级高而入选。未列出模型最后按 ID 排序，默认空列表保持原顺序。已绑定分镜模型与已批准任务不会因该配置变化而自动换模型。这与规划 LLM 通道优先级是两个独立配置。
-
-本切片未增加数据库迁移；未补写历史作品规格。无可用时长组合时应调整并确认方案，不会静默缩短镜头或重提收费任务。
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) —— 架构速览：两层策略、任务生命周期、计费、鉴权限流、数据模型、分布式改造。
-- [`API_SERVICE_DESIGN.md`](API_SERVICE_DESIGN.md) —— 对外 API 业务设计与落地偏差。
-- [`DISTRIBUTED_MIGRATION_PLAN.md`](DISTRIBUTED_MIGRATION_PLAN.md) —— 分布式改造阶段实施方案（PR 拆分）。
-- `docs/architecture.mmd` —— 架构图独立文件，可用 [mermaid.live](https://mermaid.live) 渲染 / 导出 PNG 用于演示。
-- `docs/OSS_URL_RECOVERY.md` —— OSS 裸域名 URL 线上修复指南。
-- 配对前端仓库：`/Users/a1234/WebstormProjects/seedance_generate`（Vue3 + Pinia + Element Plus；`USER_GUIDE.md` 为用户使用手册）。
+本文示例按仓库代码与配置模板整理；不代表已完成真实环境部署、支付验收或 GPU 工作流验证。
