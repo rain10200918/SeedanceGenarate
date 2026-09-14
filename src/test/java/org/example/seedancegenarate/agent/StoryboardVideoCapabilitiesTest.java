@@ -106,6 +106,77 @@ class StoryboardVideoCapabilitiesTest {
         return new AgentContext(1L,"session","turn","own","故事",null,List.of(),
                 List.of(new AgentContext.ArtifactContext("board",version,"STORYBOARD",board.title(),board.content(),board.data())),0,List.of(),null,new AgentContext.ArtifactRef("board",version,"s1"));
     }
+    AgentContext fiveSceneContext()throws Exception {
+        var data=(com.fasterxml.jackson.databind.node.ObjectNode)json.createObjectNode();
+        data.set("videoCapabilities",node("{\"model\":\"video\",\"ratio\":\"16:9\",\"durations\":[],\"durationMin\":5,\"durationMax\":15,\"imageInputMode\":\"NONE\"}"));
+        data.set("creationSpec",node("{\"ratio\":\"16:9\",\"totalDurationSeconds\":30}"));
+        var scenes=data.putArray("scenes");int i=0;
+        for(int d:List.of(5,7,7,6,5))scenes.addObject().put("sceneId","s"+(++i)).put("title","幕").put("visual","猫走路").put("narration","回家").put("duration",d);
+        return new AgentContext(1L,"session","turn","own","故事",null,List.of(),List.of(new AgentContext.ArtifactContext("board",1,"STORYBOARD","分镜","原稿正文",data)),0,List.of(),null,new AgentContext.ArtifactRef("board",1,"s4"));
+    }
+    void editedScene(int seconds,String visual) {
+        when(llm.complete(any(),anyString(),anyString(),anyString())).thenReturn("{\"scene\":{\"title\":\"幕\",\"visual\":\""+visual+"\",\"narration\":\"回家\",\"duration\":"+seconds+"}}");
+    }
+    // 【测什么】复现线上五幕30秒，局部6秒不污染其他幕，完整无变化保留原正文。
+    // 【怎么算红】把局部duration存入全局能力会在s1报错，重建原正文会使相等断言失败。
+    @Test void localDurationDoesNotBecomeUniformBoardConstraint()throws Exception {
+        var c=fiveSceneContext();editedScene(6,"猫走路");
+        var result=skill.execute(c,node("{\"instruction\":\"第四幕保持6秒\",\"videoRequirements\":{\"duration\":6}}"));
+        assertEquals(c.artifacts().get(0).data(),result.data());assertEquals("原稿正文",result.content());
+        verifyNoInteractions(submit);
+    }
+    // 【测什么】相同时长仍允许真正的画面修改，其他幕和原数据不变。
+    // 【怎么算红】只看时长就短路或把局部秒数应用全板会失败。
+    @Test void sameDurationDoesNotSwallowOtherRequestedEdits()throws Exception {
+        var c=fiveSceneContext();editedScene(6,"猫进门");
+        var result=skill.execute(c,node("{\"instruction\":\"第四幕保持6秒，改成猫进门\",\"videoRequirements\":{\"duration\":6}}"));
+        assertEquals("猫进门",result.data().path("scenes").get(3).path("visual").asText());
+        assertEquals(c.artifacts().get(0).data().path("scenes").get(0),result.data().path("scenes").get(0));
+        assertEquals("猫走路",c.artifacts().get(0).data().path("scenes").get(3).path("visual").asText());
+        verify(llm).complete(any(),anyString(),anyString(),anyString());
+    }
+    // 【测什么】显式6秒不能被模型返回7秒替代，即便去掉总时长约束。
+    // 【怎么算红】删除局部输出时长相等校验将返回错误分镜。
+    @Test void selectedDurationIsEnforcedWithoutTotalConstraint()throws Exception {
+        var c=fiveSceneContext();((com.fasterxml.jackson.databind.node.ObjectNode)c.artifacts().get(0).data()).remove("creationSpec");editedScene(7,"猫走路");
+        assertThrows(BusinessException.class,()->skill.execute(c,node("{\"instruction\":\"第四幕6秒\",\"videoRequirements\":{\"duration\":6}}")));
+    }
+    // 【测什么】真正的局部变时长仍受完整总时长和真实模型能力约束，不自动补改其他幕。
+    // 【怎么算红】跳过全片总时长或提前真实能力校验后将成功或调用LLM。
+    @Test void localEditPreservesTotalAndRejectsUnsupportedBeforeLlm()throws Exception {
+        editedScene(7,"猫走路");
+        assertThrows(BusinessException.class,()->skill.execute(fiveSceneContext(),node("{\"instruction\":\"第四幕7秒\",\"videoRequirements\":{\"duration\":7}}")));
+        clearInvocations(llm);
+        assertThrows(BusinessException.class,()->skill.execute(fiveSceneContext(),node("{\"instruction\":\"第四幕16秒\",\"videoRequirements\":{\"duration\":16}}")));
+        verifyNoInteractions(llm,submit);
+    }
+    // 【测什么】已有统一时长约束和关闭模型不能被局部修改或无变化分支绕过。
+    // 【怎么算红】删除存储duration或在能力校验前短路将错误放行。
+    @Test void localEditCannotEraseStoredUniformDurationOrClosedModel()throws Exception {
+        var c=fiveSceneContext();((com.fasterxml.jackson.databind.node.ObjectNode)c.artifacts().get(0).data().path("videoCapabilities")).put("duration",5);
+        assertThrows(BusinessException.class,()->skill.execute(c,node("{\"instruction\":\"第四幕6秒\",\"videoRequirements\":{\"duration\":6}}")));
+        when(access.isOpen(anyString())).thenReturn(false);
+        assertThrows(BusinessException.class,()->skill.execute(fiveSceneContext(),node("{\"instruction\":\"第四幕6秒\",\"videoRequirements\":{\"duration\":6}}")));
+        verifyNoInteractions(llm,submit);
+    }
+    // 【测什么】无总时长约束时真正6→8秒局部修改可执行，其他幕和全局能力不变；离散模型仍拦8秒。
+    // 【怎么算红】局部duration被丢弃或升级为全局约束、跳过离散模型校验都会失败。
+    @Test void actualLocalDurationChangeIsBoundedAndDiscreteModelsAreChecked()throws Exception {
+        var c=fiveSceneContext();((com.fasterxml.jackson.databind.node.ObjectNode)c.artifacts().get(0).data()).remove("creationSpec");editedScene(8,"猫走路");
+        var input=node("{\"instruction\":\"第四幕8秒\",\"videoRequirements\":{\"duration\":8}}");
+        var result=skill.execute(c,input);
+        assertEquals(8,result.data().path("scenes").get(3).path("duration").asInt());
+        assertEquals(5,result.data().path("scenes").get(0).path("duration").asInt());assertFalse(result.data().path("videoCapabilities").has("duration"));
+        when(engine.models()).thenReturn(List.of(video("video",10,List.of(5,10))));clearInvocations(llm);
+        assertThrows(VideoPreparationException.class,()->skill.execute(c,input));verifyNoInteractions(llm,submit);
+    }
+    // 【测什么】纯文字Skill无能力检查器时仍校验显式局部时长，不依赖视频校验恰好挡错。
+    // 【怎么算红】把局部输出检查只放入capabilities分支时7秒错误输出被接受。
+    @Test void localDurationIsEnforcedEvenWithoutVideoCapabilityComponent()throws Exception {
+        var c=fiveSceneContext();var data=(com.fasterxml.jackson.databind.node.ObjectNode)c.artifacts().get(0).data();data.remove("creationSpec");data.remove("videoCapabilities");
+        editedScene(7,"猫走路");var plain=new StoryboardGenerationSkill(llm,json);
+        assertThrows(BusinessException.class,()->plain.execute(c,node("{\"instruction\":\"第四幕6秒\",\"videoRequirements\":{\"duration\":6}}")));
+    }
     // 【测什么】视频报价沿精确分镜版本继承模型、画幅和本幕15秒，能力变化时仍现场复验。
     // 【怎么算红】删除metadata继承或报价实时校验会使缺参数失败或变更后的assertThrows失败。
     @Test void quotationInheritsFrozenSpecificationAndRevalidatesCurrentModel()throws Exception {

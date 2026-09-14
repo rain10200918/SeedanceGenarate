@@ -39,7 +39,9 @@ class AgentApprovalIntegrationTest {
         db=new JdbcTemplate(ds); tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
         db.execute("CREATE TABLE app_user(id BIGINT PRIMARY KEY)"); db.update("INSERT INTO app_user VALUES(1),(2)");
         db.execute("CREATE TABLE prompt_token_usage(id BIGINT)");
-        for(String file:List.of("V33__conversation.sql","V34__agent_runtime.sql","V35__agent_approval.sql","V36__agent_workspace.sql","V37__agent_persistent_plan.sql","V38__creative_recipe.sql","V39__agent_recipe_run.sql","V40__agent_model_recovery.sql","V43__agent_turn_lifecycle.sql","V44__agent_output_repair.sql","V45__agent_scene_progress.sql","V47__agent_model_binding.sql","V49__agent_generation_batch.sql","V52__agent_video_prompt_checkpoint.sql","V54__agent_skill_output_repair.sql")) {
+        db.execute("CREATE TABLE video_task(id BIGINT AUTO_INCREMENT PRIMARY KEY,user_id BIGINT,request_id VARCHAR(128))");
+        // Snapshot preparation now reads the existing V53 diagnostic columns, including in approval-family fixtures.
+        for(String file:List.of("V33__conversation.sql","V34__agent_runtime.sql","V35__agent_approval.sql","V36__agent_workspace.sql","V37__agent_persistent_plan.sql","V38__creative_recipe.sql","V39__agent_recipe_run.sql","V40__agent_model_recovery.sql","V43__agent_turn_lifecycle.sql","V44__agent_output_repair.sql","V45__agent_scene_progress.sql","V47__agent_model_binding.sql","V49__agent_generation_batch.sql","V52__agent_video_prompt_checkpoint.sql","V53__agent_video_prompt_repair.sql","V54__agent_skill_output_repair.sql")) {
             String sql=new String(Objects.requireNonNull(getClass().getResourceAsStream("/db/migration/"+file)).readAllBytes(),StandardCharsets.UTF_8)
                     .replaceAll("(?i)\\bJSON\\b","TEXT").replaceAll("(?i)\\) ENGINE\\s*=.*?;", ");").replace("ALTER TABLE agent_skill_call DROP INDEX uk_agent_call_step","ALTER TABLE agent_skill_call DROP CONSTRAINT uk_agent_call_step");
             new ResourceDatabasePopulator(new ByteArrayResource(sql.getBytes(StandardCharsets.UTF_8))).execute(ds);

@@ -28,7 +28,7 @@ public class StoryboardGenerationSkill implements CreativeSkill {
         var schema=(ObjectNode)StructuredSkillSupport.schema(json,"创建分镜引用SCRIPT精确版本；修改必须引用STORYBOARD精确版本及sceneId；可沿用selection。");
         var requirements=((ObjectNode)schema.get("properties")).putObject("videoRequirements")
                 .put("type","object").put("additionalProperties",false)
-                .put("description","仅明确后续生成视频时填写；准确传递用户已选model、每幕duration、ratio、referenceMode；没有指定则省略对应字段，不能猜测或修改用户要求。纯文字创作省略整个对象。");
+                .put("description","仅明确后续生成视频时填写；新建分镜duration表示每幕统一时长，修改STORYBOARD且指定sceneId时duration仅约束选中幕，不能把它当作全片每幕时长。准确传递用户已选model、ratio、referenceMode；未指定则省略，不能猜测。纯文字创作省略整个对象。");
         var p=requirements.putObject("properties");
         p.putObject("model").put("type","string").put("minLength",1).put("maxLength",128);
         p.putObject("duration").put("type","integer").put("minimum",1).put("maximum",120);
@@ -70,6 +70,8 @@ public class StoryboardGenerationSkill implements CreativeSkill {
         if(target!=null)request.set("creationSpec",target);
         JsonNode capabilities=videoCapabilities==null?null:videoCapabilities.prepare(context,input,previous.data());
         if(capabilities!=null)request.set("videoCapabilities",capabilities);
+        JsonNode sceneDuration=edit?input.path("videoRequirements").get("duration"):null;
+        if(sceneDuration!=null)request.set("selectedSceneDuration",sceneDuration);
         String shape = edit ? "只返回JSON {scene:{title,visual,narration,duration?}}，只修改选中sceneId的场景，其他幕不要返回。"
                 : "只返回JSON {title,scenes:[{title,visual,narration,duration?}]}，title 1..128字，scenes 1..12幕；不要返回sceneId，系统分配。";
         String raw = gateway.complete(context, "AGENT_STORYBOARD", "依据所引用的精确脚本/分镜版本创作。" + shape
@@ -79,6 +81,7 @@ public class StoryboardGenerationSkill implements CreativeSkill {
                 + "narration只写旁白，人物台词放sound.dialogue；sound.narration若填写必须与顶层narration逐字相同。没有旁白时顶层narration为空串。保持对白归属、角色外观服装及镜头起止连续，不把制作说明写成台词。"
                 + "存在videoCapabilities时，每幕必须有duration并符合其离散durations或闭区间durationMin..durationMax；指定duration则每幕严格等于它。遵守referenceImage与imageInputMode的参考角色，不将角色参考换为首帧；不得改变模型、画幅、参考或用户时长。"
                 + "存在creationSpec.totalDurationSeconds时，全部场景duration总和必须准确等于目标秒数，不是每幕时长。局部修改后完整分镜总和也必须保持；creationSpec.ratio适用于全片。"
+                + "selectedSceneDuration只约束选中幕，不修改其他幕。先核对准确源版本；如果要求已经满足且无其他修改，完整保留原场景所有字段，不为制造变化重写文字。"
                 + "不附加其他字段、不输出任务状态、不生成媒体，不编造机构事实。", request.toString());
         ObjectNode data;
         String title;
@@ -87,6 +90,8 @@ public class StoryboardGenerationSkill implements CreativeSkill {
             if (edit) {
                 object(result, Set.of("scene"));
                 var changed = scene(result.get("scene"), false);
+                if(sceneDuration!=null&&!sceneDuration.equals(changed.get("duration")))
+                    throw BusinessException.badRequest("选中分镜时长与本次明确要求不一致");
                 changed.put("sceneId", ref.sceneId());
                 data = previous.data().deepCopy();
                 ((ArrayNode) data.get("scenes")).set(selectedIndex, changed);
@@ -109,6 +114,8 @@ public class StoryboardGenerationSkill implements CreativeSkill {
                 data.set("videoCapabilities",capabilities);
             }
             if(target!=null)data.set("creationSpec",target);
+            if(edit&&data.equals(previous.data()))
+                return new SkillResult("STORYBOARD",previous.title(),previous.content(),ref.artifactId(),data,ref);
             StringBuilder content = new StringBuilder();
             for (var s : data.path("scenes")) content.append(s.path("title").asText()).append("\n")
                     .append(s.path("visual").asText()).append("\n").append(s.path("narration").asText()).append("\n");

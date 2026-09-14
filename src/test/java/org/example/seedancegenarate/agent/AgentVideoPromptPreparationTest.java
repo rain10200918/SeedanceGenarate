@@ -55,6 +55,29 @@ class AgentVideoPromptPreparationTest {
         var root=json.createObjectNode();var items=root.putArray("items");
         items.addObject().put("key","c1").put("prompt",first);items.addObject().put("key","c2").put("prompt",second);return root.toString();
     }
+    // 【测什么】真实Preparation裁剪上下文后仍把outputRepair传到真实Gateway，实际ChatClient收到首次/修复各自预算和超时。
+    // 【怎么算红】preparationContext强制outputRepair=false，第二次实际调用会变成12288而非16384；不靠mock Preparation掩盖丢失标记。
+    @Test void realPreparationCarriesRepairBudgetToActualGatewayClientBoundary() throws Exception {
+        var registry=mock(org.example.seedancegenarate.service.llm.LlmChannelRegistry.class);
+        var client=mock(org.example.seedancegenarate.service.llm.LlmChatClient.class);
+        var channel=new org.example.seedancegenarate.service.llm.LlmChannelSpec("llm","http://unused.invalid","test-only","fixture-model",null,2000,
+                org.example.seedancegenarate.service.llm.LlmChannelSpec.TokenParam.MAX_TOKENS,3000,1,true,false,null);
+        when(registry.findRoutableStrict("llm")).thenReturn(channel);
+        var actualModels=new AgentModelGateway(registry,client,json,new org.example.seedancegenarate.config.AgentModelCallConfig(),null);
+        var actualPreparation=new AgentVideoPromptPreparation(gateway,actualModels,new PromptTemplateService(),json);
+        var base=context(5);var first=first(base);var plan=actualPreparation.preparePlan(base,first,AgentBatchRuntime.prepare(gateway,base,first));
+        var response=json.createObjectNode();response.putArray("items").addObject().put("key","c1").put("prompt",prompt("first"));
+        when(client.chat(any(),anyList(),any())).thenReturn(new org.example.seedancegenarate.service.llm.LlmChatResponse(response.toString(),2207,100));
+        for(boolean repair:List.of(false,true,false))
+            assertEquals(prompt("first"),actualPreparation.prepareScene(base.withOutputRepair(repair),plan,plan.scenes().get(0)));
+        var specs=org.mockito.ArgumentCaptor.forClass(org.example.seedancegenarate.service.llm.LlmChannelSpec.class);
+        verify(client,times(3)).chat(specs.capture(),anyList(),any());
+        assertEquals(List.of(12288,16384,12288),specs.getAllValues().stream().map(s->s.maxTokens()).toList());
+        assertTrue(specs.getAllValues().stream().allMatch(s->s.timeoutMs()==420000));
+        assertEquals(2000,channel.maxTokens());assertEquals(3000,channel.timeoutMs());
+        assertEquals(plan.bindingHash(),actualPreparation.preparePlan(base.withOutputRepair(true),first,AgentBatchRuntime.prepare(gateway,base,first)).bindingHash());
+        verify(submit,never()).submitApproved(any(),any());
+    }
     // 【测什么】逐条保留结构化台词归属，允许模板分段旁白；缺句或对调说话人仍拒绝。
     // 【怎么算红】恢复整段contains或只全局找台词，合法分段失败或对调角色被放行。
     @Test void structuredSpeechPassesThroughAndValidatesIndividualAttribution() throws Exception {

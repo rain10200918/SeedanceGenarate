@@ -15,6 +15,14 @@ class AgentImageMessageTest {
     @BeforeEach void setup() throws Exception {
         fixture.setup();images=mock(AgentImageInputs.class);
         when(images.resolve(eq(1L),anyList())).thenAnswer(a->((List<String>)a.getArgument(1)).stream().map(id->new AgentImageInputs.ImageRef(id,"https://media.example.test/"+id+".png")).toList());
+        when(images.project(eq(1L),anyCollection())).thenAnswer(a->{
+            var result=new java.util.HashMap<String,AgentImageInputs.ImageRef>();
+            for(String id:(java.util.Collection<String>)a.getArgument(1)) {
+                try {result.put(id,images.resolve(1,List.of(id)).get(0));}
+                catch(BusinessException ignored) { }
+            }
+            return result;
+        });
         when(fixture.models.defaultImageChannel()).thenReturn("vision");
         fixture.app=new AgentApplication(fixture.store,fixture.tx,fixture.jobs,fixture.models,fixture.json,
                 mock(AgentApprovalApplication.class),new AgentApprovalStore(fixture.db,fixture.store),images);

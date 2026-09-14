@@ -58,23 +58,33 @@ public class AgentApprovalApplication {
     }
     public void project(Session s,List<AgentViews.Message> messages) {
         store.batches().project(store,s,messages);
+        var ids=new LinkedHashSet<String>();
+        for(var message:messages)for(var part:message.parts())
+            if(part.isObject() && Set.of("approval","task").contains(part.path("type").asText()))ids.add(part.path("approvalId").asText());
+        var projected=approvals.projectApprovals(s,ids);
+        var contexts=approvals.projectContexts(s,projected.values().stream().map(Approval::callId).distinct().toList());
+        var views=new HashMap<String,java.util.Optional<AgentGenerationGateway.TaskView>>();
+        java.util.function.Function<String,AgentGenerationGateway.TaskView> mediaView=id->views.computeIfAbsent(id,key->{
+            try {return java.util.Optional.of(gateway.read(s.userId(),key));}
+            catch(BusinessException e){return java.util.Optional.empty();}
+        }).orElseThrow(()->BusinessException.notFound("作品暂不可用"));
         for(var message:messages) for(var part:message.parts()) {
             if(!(part instanceof ObjectNode object)) continue;
             String type=part.path("type").asText();
             if("batch_approval".equals(type)) {
                 for(var item:part.path("items"))if(item instanceof ObjectNode media&&media.hasNonNull("taskId")) {
                     media.remove("mediaPath");
-                    try {var view=gateway.read(s.userId(),media.path("taskId").asText());
+                    try {var view=mediaView.apply(media.path("taskId").asText());
                         if(!view.blocked()&&!view.expired()&&view.mediaPath()!=null)media.put("mediaPath",view.mediaPath());
                     }catch(BusinessException e){media.remove("artifactRef");}
                 }
                 continue;
             }
             if(!Set.of("approval","task").contains(type)) continue;
-            Approval a=approvals.get(part.path("approvalId").asText());
+            Approval a=projected.get(part.path("approvalId").asText());
             if(a==null || !a.sessionId().equals(s.id())) { object.removeAll(); object.put("type","text").put("text","作品不可用"); continue; }
             TaskQuote q=quote(a);
-            var context=store.callContext(a.callId());
+            var context=contexts.getOrDefault(a.callId(),json.createObjectNode().put("version",0));
             object.set("sourceRef",context.get("sourceRef")); object.set("planRef",context.get("planRef")); object.putNull("stepId");
             for(var step:context.path("steps")) if(q.mediaType().equals(step.path("kind").asText()) && step.path("id").asText().equals(context.path("currentStepId").asText()))
                 object.put("stepId",step.path("id").asText());
@@ -90,7 +100,7 @@ public class AgentApprovalApplication {
                 object.put("taskId",a.taskId()).put("outputType",q.mediaType()).putNull("mediaPath").put("blocked",false).put("expired",false).put("message",a.error());
                 if(a.taskId()!=null) {
                     try {
-                        var view=gateway.read(s.userId(),a.taskId());
+                        var view=mediaView.apply(a.taskId());
                         object.put("status",view.status()).put("outputType",view.mediaType()).put("mediaPath",view.mediaPath())
                                 .put("blocked",view.blocked()).put("expired",view.expired()).put("message",view.message());
                     } catch(BusinessException e) { object.put("status","UNAVAILABLE").put("message","作品暂不可用"); }

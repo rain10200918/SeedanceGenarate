@@ -49,6 +49,33 @@ class AgentWorkspaceIntegrationTest {
                 json.valueToTree(Map.of("goal","宣传片","constraints",List.of("科技风"),"steps",List.of(Map.of("id","s1","title","脚本","kind","SCRIPT"),Map.of("id","s2","title","分镜","kind","STORYBOARD"),Map.of("id","s3","title","画面","kind","IMAGE")))),null)));
     }
     void apply(String key,long version,String action,ArtifactRef ref) { app.apply(1,id,new AgentWorkspaceApplication.Command(key,version,action,ref)); }
+    // 【测什么】普通分镜完整相同结果不增版本、不改旧来源；真实改稿生成新版本，旧版本仍拒绝。
+    // 【怎么算红】无条件写版本或在最新版本检查前去重会使版本/行数/冲突断言失败。
+    @Test void unchangedOrdinaryStoryboardReusesOnlyExactLatestVersion() {
+        var data=json.createObjectNode();data.putArray("scenes").addObject().put("sceneId","s1").put("title","幕").put("visual","猫走路").put("narration","").put("duration",6);
+        var original=tx.execute(t->store.recordResult(session(),call("storyboard-generation"),new SkillResult("STORYBOARD","分镜","正文",null,data,null)));
+        var ref=new ArtifactRef(original.id(),1,"s1");
+        var same=new SkillResult("STORYBOARD","分镜","正文",original.id(),data,ref);
+        var result=tx.execute(t->store.recordResult(session(),call("storyboard-generation"),same));
+        assertEquals(1,result.version());assertEquals(original.sourceRef(),result.sourceRef());
+        assertEquals(1,db.queryForObject("SELECT COUNT(*) FROM agent_artifact_version WHERE artifact_id=?",Integer.class,original.id()));
+        var changed=data.deepCopy();((com.fasterxml.jackson.databind.node.ObjectNode)changed.path("scenes").get(0)).put("visual","猫进门");
+        var edited=tx.execute(t->store.recordResult(session(),call("storyboard-generation"),new SkillResult("STORYBOARD","分镜","新正文",original.id(),changed,ref)));
+        assertEquals(2,edited.version());
+        assertThrows(BusinessException.class,()->tx.execute(t->store.recordResult(session(),call("storyboard-generation"),same)));
+    }
+    // 【测什么】有执行计划/正式scene-edit上下文时不进入普通编辑去重分支，保留其版本状态机。
+    // 【怎么算红】去重忽略context边界会复用v1，破坏必须v+1的修复协议。
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"sceneEditId","executionPlanId"})
+    void executionEditRetainsVersionTransitionForIdenticalResult(String contextField) {
+        var data=json.createObjectNode();data.putArray("scenes").addObject().put("sceneId","s1").put("title","幕").put("visual","猫").put("narration","").put("duration",6);
+        var original=tx.execute(t->store.recordResult(session(),call("storyboard-generation"),new SkillResult("STORYBOARD","分镜","正文",null,data,null)));
+        var edit=call("storyboard-generation");
+        db.update("UPDATE agent_skill_call SET context_json=? WHERE id=?",json.createObjectNode().put(contextField,"test-edit").toString(),edit.id());
+        var result=tx.execute(t->store.recordResult(session(),edit,new SkillResult("STORYBOARD","分镜","正文",original.id(),data,new ArtifactRef(original.id(),1,"s1"))));
+        assertEquals(2,result.version());
+    }
     // 【测什么】采用计划是持久化确认并入队；响应丢失重放同命令只记一次。
     // 【怎么算红】移除requestHash重放检查，重复采用将409或多增version，断言失败。
     @Test void adoptIsDurableIdempotentAndVersioned() {

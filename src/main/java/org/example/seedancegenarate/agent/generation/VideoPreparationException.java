@@ -10,6 +10,8 @@ public final class VideoPreparationException extends BusinessException {
         JSON_INVALID("返回一个完整 JSON 对象，不要附加说明、重复键或额外对象。"),
         ROOT_SHAPE("根对象必须且只能包含 items 数组，数组覆盖本次输入的全部场景。"),
         ITEM_SHAPE("每个 items 元素必须且只能包含字符串 key 与 prompt。"),
+        STRUCTURED_ITEM_SHAPE("每项只能包含字符串key与sections对象，不返回prompt。"),
+        STRUCTURED_SECTIONS("sections必须且只能包含本轮列出的字段，每个值为非空正文字符串，标题由系统组装。"),
         SCENE_KEY_MISMATCH("逐项使用本次输入的原始 key，不新增、重复、遗漏或合并场景。"),
         PROMPT_EMPTY("每个 prompt 必须包含完整非空正文。"),
         PROMPT_TOO_LONG("按本轮明确的单幕、总正文与 JSON 长度上限精简描述，保留全部台词。"),
@@ -47,6 +49,7 @@ public final class VideoPreparationException extends BusinessException {
     private ValidationRule validationRule;
     private String validationPath;
     private String diagnosticId;
+    private com.fasterxml.jackson.databind.JsonNode repairInput;
     public VideoPreparationException(Reason reason){this(reason,null,reason.message);}
     private VideoPreparationException(Reason reason,Integer ordinal,String safeDetail) {
         super(400,(ordinal==null?"":"第 "+ordinal+" 幕：")+safeDetail);
@@ -56,7 +59,7 @@ public final class VideoPreparationException extends BusinessException {
     public Integer sceneOrdinal(){return ordinal;}
     public VideoPreparationException atScene(int ordinal){
         var copy=new VideoPreparationException(reason,ordinal,safeDetail).withSource(sourceRef);
-        copy.validationRule=validationRule;copy.validationPath=validationPath;copy.diagnosticId=diagnosticId;return copy;
+        copy.validationRule=validationRule;copy.validationPath=validationPath;copy.diagnosticId=diagnosticId;copy.repairInput=repairInput;return copy;
     }
     public static VideoPreparationException invalid(ValidationRule rule,String path) {
         var failure=new VideoPreparationException(rule==ValidationRule.SOURCE_SPEECH_INVALID?Reason.SCENE:Reason.PROMPT_OUTPUT);
@@ -66,7 +69,17 @@ public final class VideoPreparationException extends BusinessException {
     public String validationDetail(){return validationRule==null?null:validationPath+": "+validationRule.repairHint();}
     public String repairHint(){return validationRule==null?null:validationRule.repairHint();}
     public String diagnosticId(){return diagnosticId;}
+    public com.fasterxml.jackson.databind.JsonNode repairInput(){return repairInput==null?null:repairInput.deepCopy();}
+    /** Invoked only at capability/reference preparation boundaries, never pricing or submission. */
+    public VideoPreparationException withRepairInput(com.fasterxml.jackson.databind.JsonNode input) {
+        if(java.util.Set.of(Reason.MODEL,Reason.DURATION,Reason.REFERENCE).contains(reason))repairInput=input.deepCopy();
+        return this;
+    }
     public VideoPreparationException withDiagnosticId(String id){diagnosticId=id;return this;}
+    public static VideoPreparationException unavailableReference(com.fasterxml.jackson.databind.JsonNode input) {
+        return new VideoPreparationException(Reason.REFERENCE,null,"参考图片缺失、已过期或当前不可用，请选择本人有效图片；系统未移除参考要求。")
+                .withRepairInput(input);
+    }
     public VideoPreparationException withSource(com.fasterxml.jackson.databind.JsonNode source){this.sourceRef=source==null?null:source.deepCopy();return this;}
     public com.fasterxml.jackson.databind.JsonNode sourceRef(){return sourceRef;}
     public static VideoPreparationException unsupportedDuration(int requested,List<Integer> allowed,int min,int max) {

@@ -32,6 +32,7 @@ class AgentVideoPreparationRuntimeTest extends AgentRuntimeIntegrationTest {
         when(video.quote(any(),any())).thenReturn(quote);
         plan=new AgentVideoPromptPreparation.Plan("a".repeat(64),null,List.of(new AgentVideoPromptPreparation.Scene("single",1,json.nullNode(),quote,json.createObjectNode(),"guide")),4000);
         when(preparation.preparePlan(any(),any(),isNull())).thenAnswer(a->plan);
+        when(preparation.structuredPlan(any())).thenAnswer(a->a.getArgument(0));
         when(preparation.prepareScene(any(),any(),any())).thenReturn("prepared");
         when(preparation.assemble(any(),any())).thenReturn(new AgentVideoPromptPreparation.PreparedQuotes(quote,null));
         doAnswer(a->{

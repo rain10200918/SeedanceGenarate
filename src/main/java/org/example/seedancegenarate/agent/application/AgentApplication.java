@@ -10,6 +10,8 @@ import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.*;
@@ -52,11 +54,31 @@ public class AgentApplication {
         });
     }
     public AgentViews.Snapshot snapshot(long user,long id) {
-        return tx.execute(t -> snapshotLocked(store.owned(id,user,true)));
+        // Existing internal callers with an outer write transaction must not suspend their
+        // own session lock and then attempt to acquire it on a second connection.
+        if(TransactionSynchronizationManager.isActualTransactionActive())
+            return snapshotLocked(store.owned(id,user,true));
+        var read=new TransactionTemplate(Objects.requireNonNull(tx.getTransactionManager()));
+        read.setReadOnly(true);
+        read.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        for(int attempt=0;attempt<2;attempt++) {
+            Session initial=store.owned(id,user,false);
+            Turn active=store.turn(initial.activeTurnId());
+            if(active!=null && "WAITING_USER".equals(active.status()))
+                tx.executeWithoutResult(t->expireQuestion(store.owned(id,user,true)));
+            // All projections are SELECTs in one MVCC view; command paths still take locks.
+            var snapshot=read.execute(t->projectSnapshot(store.owned(id,user,false)));
+            Session current=store.owned(id,user,false); // fresh ownership/archive/revision, outside MVCC
+            if(current.revision()==snapshot.revision()) return snapshot;
+        }
+        throw BusinessException.conflict("对话正在更新，请稍后重试");
     }
     public long revision(long user,long id) { return store.owned(id,user,false).revision(); }
     private AgentViews.Snapshot snapshotLocked(Session s) {
         if(expireQuestion(s)) s=store.owned(s.conversationId(),s.userId(),true);
+        return projectSnapshot(s);
+    }
+    private AgentViews.Snapshot projectSnapshot(Session s) {
         Turn t=store.turn(s.activeTurnId());
         boolean direct=t!=null && store.isDirectTurn(t);
         var messages=store.messages(s);
@@ -65,8 +87,8 @@ public class AgentApplication {
         approvalApp.project(s,messages);
         return new AgentViews.Snapshot(Long.toString(s.conversationId()),store.title(s),s.revision(),
                 new AgentViews.State(s.goal()==null?"":s.goal(),s.summary()==null?"":s.summary(),workspace,store.recipes().view(store,s),
-                        store.actionableError(s,t),t==null?null:json.valueToTree(store.videoCheckpoints().progress(t))),
-                t==null?null:new AgentViews.Turn(t.id(),t.status(),direct?null:t.channel(),t.error(),direct?"DIRECT":"AGENT"),messages,store.artifacts(s));
+                        store.actionableError(s,t,workspace),t==null?null:json.valueToTree(store.videoCheckpoints().progress(t))),
+                t==null?null:new AgentViews.Turn(t.id(),t.status(),direct?null:t.channel(),t.error(),direct?"DIRECT":"AGENT"),messages,store.artifacts(s,workspace));
     }
     @org.springframework.scheduling.annotation.Scheduled(fixedDelay=60000)
     public void expireQuestions() {
@@ -142,11 +164,15 @@ public class AgentApplication {
         var ids=new ArrayList<String>();for(var id:workspace.path("imageAssetIds"))ids.add(id.asText());return ids;
     }
     private void projectImages(long user,List<AgentViews.Message> messages,com.fasterxml.jackson.databind.node.ObjectNode workspace) {
+        var ids=new LinkedHashSet<String>(imageIds(workspace));
+        for(var message:messages)for(var part:message.parts())
+            if("image".equals(part.path("type").asText()) && part.isObject())ids.add(part.path("assetId").asText());
+        var references=images.project(user,ids);
         var cache=new HashMap<String,com.fasterxml.jackson.databind.node.ObjectNode>();
         java.util.function.Function<String,com.fasterxml.jackson.databind.node.ObjectNode> project=id->cache.computeIfAbsent(id,key->{
             var image=json.createObjectNode().put("type","image").put("assetId",key).put("unavailable",true);
-            try {var ref=images.resolve(user,List.of(key)).get(0);image.put("url",ref.url()).put("unavailable",false);}
-            catch(BusinessException e) {/* Unavailable input is still visible, without its former URL. */}
+            var ref=references.get(key);
+            if(ref!=null)image.put("url",ref.url()).put("unavailable",false);
             return image;
         });
         for(var message:messages)for(var part:message.parts()) {

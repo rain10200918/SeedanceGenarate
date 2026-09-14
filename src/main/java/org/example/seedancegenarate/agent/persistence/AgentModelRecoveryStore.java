@@ -58,6 +58,13 @@ public final class AgentModelRecoveryStore {
     public String deferPreparedScene(Turn t,Call call,int ordinal,String code,long delaySeconds) {
         return defer(t,call,code,delaySeconds,call.id()+":prepare:"+ordinal+":repair:1");
     }
+    /** Separate from format repair and from other scenes whose attempt counter starts again at one. */
+    public String deferTruncatedScene(Turn t,Call call,int ordinal,long delaySeconds) {
+        var r=get(t,call);
+        if(r==null || r.attempts()>=MAX_ATTEMPTS || r.truncationRepairs()!=0 || !"RUNNING".equals(r.status()))
+            throw new IllegalStateException("Video prompt truncation repair is not available");
+        return defer(t,call,"MODEL_OUTPUT_TRUNCATED",delaySeconds,call.id()+":prepare:"+ordinal+":model-retry:"+r.attempts());
+    }
     private String defer(Turn t,Call call,String code,long delaySeconds,String key) {
         jdbc.update("UPDATE agent_model_recovery SET expected_job_key=?,status='WAITING_RETRY',next_retry_at=TIMESTAMPADD(SECOND,?,NOW()),error_code=?,truncation_repairs=truncation_repairs+?,updated_at=NOW() WHERE turn_id=? AND execution_epoch=? AND step_no=? AND phase=?",
                 key,delaySeconds,code,"MODEL_OUTPUT_TRUNCATED".equals(code)?1:0,t.id(),t.epoch(),t.step(),phase(call));

@@ -40,13 +40,21 @@ public final class AgentBatchRuntime {
                         :BusinessException.badRequest("分镜画面说明缺失或过长，请修改后再准备整组生成");
                 ObjectNode input="VIDEO".equals(first.mediaType())?gateway.videoParameters(first.inputSnapshot()):first.inputSnapshot().deepCopy();input.put("prompt",visual);
                 if("VIDEO".equals(first.mediaType())) {
+                    JsonNode baseline=context.videoRepairBaseline(),repair=context.confirmedRepair("VIDEO",source);
+                    if(baseline!=null) {
+                        for(String field:List.of("model","ratio","referenceImage","referenceMode","visualStyle","megapixels")) {
+                            input.remove(field);if(baseline.has(field))input.set(field,baseline.get(field));
+                        }
+                    }
+                    if(repair!=null)for(String field:List.of("model","ratio","referenceImage","referenceMode","visualStyle","megapixels"))
+                        if(repair.has(field))input.set(field,repair.get(field));
                     if(duration!=null&&!duration.isNull()) {
                         if(!duration.isIntegralNumber()||!duration.canConvertToInt()||duration.asInt()<1)
                             throw new VideoPreparationException(VideoPreparationException.Reason.SCENE).atScene(scene.path("ordinal").asInt());
                         input.set("duration",duration);
                     }
                     try {quote=gateway.quoteVideo(context,input);}
-                    catch(VideoPreparationException e){throw e.atScene(scene.path("ordinal").asInt());}
+                    catch(VideoPreparationException e){throw e.atScene(scene.path("ordinal").asInt()).withSource(source);}
                     catch(BusinessException e){
                         if(e.getCode()!=400)throw e;
                         throw new VideoPreparationException(VideoPreparationException.Reason.QUOTE).atScene(scene.path("ordinal").asInt());

@@ -22,8 +22,20 @@ public class AgentVideoPromptPreparation {
             this(key,ordinal,source,quote,request,guide,"provided:guide");
         }
     }
-    public record Plan(String bindingHash,String batchStepId,List<Scene> scenes,int perPrompt) {
-        public Plan { scenes=List.copyOf(scenes); }
+    public record Plan(String bindingHash,String batchStepId,List<Scene> scenes,int perPrompt,
+                       boolean structured,Map<String,Integer> sceneLimits) {
+        public Plan(String bindingHash,String batchStepId,List<Scene> scenes,int perPrompt) {
+            this(bindingHash,batchStepId,scenes,perPrompt,false,Map.of());
+        }
+        public Plan {
+            scenes=List.copyOf(scenes);sceneLimits=Map.copyOf(sceneLimits);
+            if(structured && (!sceneLimits.keySet().equals(new HashSet<>(scenes.stream().map(Scene::key).toList()))
+                    ||sceneLimits.values().stream().anyMatch(limit->limit<1||limit>4000)
+                    ||sceneLimits.values().stream().mapToInt(Integer::intValue).sum()>16000))
+                throw new VideoPreparationException(VideoPreparationException.Reason.PROMPT_LENGTH);
+        }
+        public int limit(Scene scene) {return structured?sceneLimits.get(scene.key()):perPrompt;}
+        public String protocol() {return structured?"video-prompt-fields-v4":"video-prompt-scenes-v3";}
     }
     private final AgentGenerationGateway gateway;
     private final AgentModelGateway models;
@@ -50,7 +62,8 @@ public class AgentVideoPromptPreparation {
         var keys=new HashSet<String>();
         for(var item:items) {
             var quote=item.quote();var spec=quote.inputSnapshot();
-            if(!keys.add(item.sceneId())||!first.modelId().equals(quote.modelId())||!first.provider().equals(quote.provider()))
+            if(!keys.add(item.sceneId())||(context.videoRepairBaseline()!=null?!confirmedMixedItem(context,item)
+                    :!first.modelId().equals(quote.modelId())||!first.provider().equals(quote.provider())))
                 throw new VideoPreparationException(VideoPreparationException.Reason.BATCH);
             // Keep actual per-scene duration; never silently copy the first scene's duration.
             var entry=json.createObjectNode().put("key",item.sceneId()).put("ordinal",item.ordinal()).put("model",quote.modelId());
@@ -83,18 +96,42 @@ public class AgentVideoPromptPreparation {
         var policies=binding.putArray("policies");scenes.forEach(scene->policies.add(policy(scene.guide(),perPrompt)));
         return new Plan(hash(binding),batch==null?null:batch.stepId(),scenes,perPrompt);
     }
+    private boolean confirmedMixedItem(AgentContext context,AgentBatchRuntime.Item item) {
+        JsonNode expected=context.confirmedRepair("VIDEO",item.source());
+        if(expected==null)expected=context.videoRepairBaseline();
+        if(expected==null||!expected.path("model").asText().equals(item.quote().modelId()))return false;
+        if(!Objects.equals(expected.get("referenceImage"),item.quote().inputSnapshot().get("referenceImage")))return false;
+        for(String field:List.of("referenceImage","referenceMode","ratio","visualStyle","megapixels"))
+            if(expected.has(field)&&!expected.get(field).equals(item.quote().inputSnapshot().get(field)))return false;
+        return true;
+    }
+    /** New bindings only. Original v3 construction above must stay byte-compatible with durable checkpoints. */
+    public Plan structuredPlan(Plan legacy) {
+        if(legacy.structured()||legacy.scenes().stream().anyMatch(scene->!StructuredVideoPromptProtocol.supports(scene)))return legacy;
+        var limits=StructuredVideoPromptProtocol.limits(legacy.scenes());
+        var binding=json.createObjectNode().put("protocol","video-prompt-fields-v4").put("legacyBinding",legacy.bindingHash());
+        binding.set("sceneLimits",json.valueToTree(limits));
+        var policies=binding.putArray("policies");
+        legacy.scenes().forEach(scene->policies.add(StructuredVideoPromptProtocol.policy(scene,limits.get(scene.key()))));
+        return new Plan(hash(binding),legacy.batchStepId(),legacy.scenes(),4000,true,limits);
+    }
     public String prepareScene(AgentContext context,Plan plan,Scene scene) {
         return prepareScene(context,plan,scene,null);
     }
     public String prepareScene(AgentContext context,Plan plan,Scene scene,String repairHint) {
         if(!plan.scenes().contains(scene))throw new VideoPreparationException(VideoPreparationException.Reason.BATCH);
         var request=json.createObjectNode();request.putArray("items").add(scene.request());
-        log.info("Agent video prompt template: scene={}, templateJson={}",scene.ordinal(),json.valueToTree(scene.templateId()));
+        log.info("Agent video prompt template: scene={}, templateJson={}, protocol={}, promptCharLimit={}",
+                scene.ordinal(),json.valueToTree(scene.templateId()),plan.protocol(),plan.limit(scene));
         String trusted=VideoPreparationException.ValidationRule.trustedHint(repairHint);
-        String instructions=policy(scene.guide(),plan.perPrompt())+(trusted==null?"":"\n本次仅修正当前幕的文本格式与完整性："+trusted);
+        String instructions=(plan.structured()?StructuredVideoPromptProtocol.policy(scene,plan.limit(scene)):policy(scene.guide(),plan.limit(scene)))
+                +(trusted==null?"":"\n本次仅修正当前幕的文本格式与完整性："+trusted);
         String raw=models.complete(preparationContext(context),"AGENT_VIDEO_PROMPT",instructions,request.toString());
         try {
-            String prompt=parse(raw,Set.of(scene.key()),plan.perPrompt(),scene.guide()).get(scene.key());
+            String prompt=plan.structured()?StructuredVideoPromptProtocol.parse(json,raw,scene,plan.limit(scene))
+                    :parse(raw,Set.of(scene.key()),plan.limit(scene),scene.guide()).get(scene.key());
+            if(plan.structured())validateHeadings(prompt,scene.guide().lines().map(String::trim)
+                    .filter(line->line.matches("[a-z_]+:")).distinct().toList(),"$.items[0].sections");
             validateNarration(scene,prompt);return prompt;
         } catch(VideoPreparationException failure) {
             throw failure.withDiagnosticId(diagnostics.record(context,scene,failure,raw)).atScene(scene.ordinal()).withSource(scene.source());
@@ -116,7 +153,7 @@ public class AgentVideoPromptPreparation {
         for(var scene:plan.scenes()) {
             String prompt=prompts.get(scene.key());
             var response=json.createObjectNode();response.putArray("items").addObject().put("key",scene.key()).put("prompt",prompt);
-            parse(response.toString(),Set.of(scene.key()),plan.perPrompt(),scene.guide());validateNarration(scene,prompt);
+            parse(response.toString(),Set.of(scene.key()),plan.limit(scene),scene.guide());validateNarration(scene,prompt);
             total+=prompt.length();
             prepared.add(new AgentBatchRuntime.Item(scene.key(),scene.ordinal(),scene.source(),gateway.withPreparedVideoPrompt(scene.quote(),prompt)));
         }

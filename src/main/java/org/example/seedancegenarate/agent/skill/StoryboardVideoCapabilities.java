@@ -29,14 +29,19 @@ public class StoryboardVideoCapabilities {
     public JsonNode prepare(AgentContext context,JsonNode input,JsonNode previous) {
         JsonNode stored=previous==null?null:previous.get("videoCapabilities");
         JsonNode requested=input.get("videoRequirements");
+        var source=StructuredSkillSupport.source(context,input);
+        boolean sceneEdit=previous!=null&&previous.path("scenes").isArray()&&source!=null&&source.sceneId()!=null;
+        JsonNode sceneDuration=sceneEdit&&requested!=null?requested.get("duration"):null;
         if(stored==null && requested==null && !hasFutureVideo(context.plan()))return null;
         var requirements=json.createObjectNode();
+        JsonNode repair=context.confirmedRepair("STORYBOARD",context.selection()==null?null:json.valueToTree(context.selection()));
         JsonNode target=CreationSpecSupport.resolve(context,previous);
         if(stored!=null)for(String field:List.of("model","ratio","duration","referenceMode","referenceImage"))
             if(stored.hasNonNull(field))requirements.set(field,stored.get(field));
         if(requested!=null)requested.fields().forEachRemaining(e->{
-            if(requirements.has(e.getKey())&&!requirements.get(e.getKey()).equals(e.getValue()))
+            if(repair==null&&requirements.has(e.getKey())&&!requirements.get(e.getKey()).equals(e.getValue()))
                 throw BusinessException.conflict("分镜已绑定视频规格，请创建新方案后再调整模型、时长或参考角色");
+            if(sceneEdit&&"duration".equals(e.getKey()))return; // A local request is not a new uniform board constraint.
             requirements.set(e.getKey(),e.getValue());
         });
         if(target!=null&&target.hasNonNull("ratio")) {
@@ -46,15 +51,17 @@ public class StoryboardVideoCapabilities {
         }
         JsonNode plan=context.plan();
         if(plan!=null&&plan.path("confirmed").asBoolean()&&plan.path("data").hasNonNull("referenceImage")) {
-            if(requirements.has("referenceImage")&&!requirements.get("referenceImage").equals(plan.path("data").get("referenceImage")))
+            if(repair==null&&requirements.has("referenceImage")&&!requirements.get("referenceImage").equals(plan.path("data").get("referenceImage")))
                 throw BusinessException.conflict("分镜角色参考与已采用计划不一致，请先重新确认创作方案");
             requirements.set("referenceImage",plan.path("data").get("referenceImage"));
             if(requirements.has("referenceMode")&&!"REFERENCE_IMAGE".equals(requirements.path("referenceMode").asText()))
                 throw new VideoPreparationException(VideoPreparationException.Reason.REFERENCE);
             requirements.put("referenceMode","REFERENCE_IMAGE");
         }
+        if(repair!=null)for(String field:List.of("model","ratio","duration","referenceImage","referenceMode","visualStyle"))
+            if(repair.has(field))requirements.set(field,repair.get(field));
         if(requirements.has("referenceMode")&&!requirements.has("referenceImage"))
-            throw new VideoPreparationException(VideoPreparationException.Reason.REFERENCE);
+            throw new VideoPreparationException(VideoPreparationException.Reason.REFERENCE).withRepairInput(requirements);
         var candidates=engines.all().stream().flatMap(e->e.models().stream())
                 .filter(m->m.outputType()==OutputType.VIDEO&&access.isOpen(m.model()))
                 .filter(m->!requirements.has("model")||m.model().equals(requirements.path("model").asText()))
@@ -65,7 +72,10 @@ public class StoryboardVideoCapabilities {
         for(var model:candidates) {
             if(!requirements.has("referenceImage")&&(model.needImages()||model.imageMin()>0||model.needImageOrVideo()))continue;
             var params=requirements.deepCopy().put("model",model.model()).put("prompt","分镜能力检查");
-            try { gateway.validate("VIDEO",params); }
+            try {
+                gateway.validate("VIDEO",params);
+                if(sceneDuration!=null)gateway.validate("VIDEO",params.deepCopy().set("duration",sceneDuration));
+            }
             catch(BusinessException e) { if(!Integer.valueOf(400).equals(e.getCode()))throw e; failure=e;continue; }
             if(target!=null&&target.hasNonNull("totalDurationSeconds")&&!reachable(model,requirements,target.path("totalDurationSeconds").asInt())) {
                 failure=new VideoPreparationException(VideoPreparationException.Reason.TOTAL_DURATION);continue;
@@ -77,6 +87,7 @@ public class StoryboardVideoCapabilities {
             result.set("durations",json.valueToTree(model.durations()==null?List.of():model.durations()));
             return result;
         }
+        if(failure instanceof VideoPreparationException preparation)throw preparation.withRepairInput(requirements);
         throw failure;
     }
     public void validateScenes(JsonNode capabilities,JsonNode scenes) {
@@ -108,7 +119,8 @@ public class StoryboardVideoCapabilities {
         }
         if(sum!=target.path("totalDurationSeconds").asInt())throw new VideoPreparationException(VideoPreparationException.Reason.TOTAL_DURATION);
     }
-    private boolean reachable(ModelSpec model,JsonNode requirements,int total) {
+    public static boolean reachable(ModelSpec model,JsonNode requirements,int total) {
+        if(total<1||total>1440)return false;
         boolean[] previous=new boolean[total+1];previous[0]=true;
         for(int count=1;count<=12;count++) {
             boolean[] next=new boolean[total+1];

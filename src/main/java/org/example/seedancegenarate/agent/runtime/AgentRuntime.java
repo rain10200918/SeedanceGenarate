@@ -40,6 +40,11 @@ public class AgentRuntime {
     private AgentVideoPromptPreparation videoPrompts;
     public record Payload(String turnId,long epoch,int step,String callId) {}
     private record Work(Session session,Turn turn,Call call,AgentContext context) {}
+    /** Provenance is created only around the actual per-scene model invocation, never around quote/precheck. */
+    private static final class VideoPromptModelFailure extends RuntimeException {
+        final int ordinal;final LlmChannelException failure;
+        VideoPromptModelFailure(int ordinal,LlmChannelException failure) {super(null,failure);this.ordinal=ordinal;this.failure=failure;}
+    }
     public static String jobKey(Turn t) { return t.id()+":"+t.epoch()+":"+t.step(); }
 
     public void execute(AsyncJob lease,boolean skillJob) {
@@ -173,6 +178,8 @@ public class AgentRuntime {
         } else if(!Set.of("QUEUED","RUNNING","WAITING_RETRY").contains(t.status())) return null;
         return new Work(s,t,call,null);
     }
+    /** Read-only DB context projection also used by expiry-only quote revalidation; never invokes a model. */
+    public AgentContext quoteContext(Session s,Turn t,Call call) { return context(s,t,call); }
     private AgentContext context(Session s,Turn t,Call call) {
         var history=new ArrayList<AgentContext.HistoryMessage>();
         for(var m:store.history(s)) history.add(new AgentContext.HistoryMessage(m.get("role"),m.get("text")));
@@ -194,6 +201,7 @@ public class AgentRuntime {
             var a=resolve(s,planRef);
             plan.put("artifactId",a.id()).put("version",a.version()).put("confirmed",workspace.path("planConfirmed").asBoolean());
             plan.set("data",a.data()); plan.set("steps",workspace.path("steps")); plan.set("currentStepId",workspace.path("currentStepId"));
+            plan.set("_confirmedRepairs",store.repairs().bindings(store,s,workspace));
         }
         pinReferenceArtifact(s,artifacts,plan.path("data").get("referenceImage"));
         if(source!=null&&"PLAN".equals(source.type())&&source.data()!=null)pinReferenceArtifact(s,artifacts,source.data().get("referenceImage"));
@@ -217,7 +225,9 @@ public class AgentRuntime {
     private void pinReferenceArtifact(Session s,java.util.List<AgentContext.ArtifactContext> artifacts,com.fasterxml.jackson.databind.JsonNode node) {
         var ref=reference(node);
         if(ref==null||artifacts.stream().anyMatch(a->a.id().equals(ref.artifactId())&&a.version()==ref.version()))return;
-        var a=resolve(s,ref);
+        org.example.seedancegenarate.agent.api.AgentViews.Artifact a;
+        try {a=resolve(s,ref);}
+        catch(BusinessException failure) {if(failure.getCode()==404)return;throw failure;}
         artifacts.add(0,new AgentContext.ArtifactContext(a.id(),a.version(),a.type(),a.title(),a.content(),a.data()));
     }
     private AgentContext.ArtifactRef reference(com.fasterxml.jackson.databind.JsonNode node) {
@@ -328,12 +338,14 @@ public class AgentRuntime {
         if("WEB_RESEARCH".equals(result.type()))WebSearchSkill.validateResult(result);
         validateResultSource(w,result);
         var a=store.recordResult(w.session(),w.call(),result);
+        boolean unchanged="STORYBOARD".equals(result.type())&&result.source()!=null
+                &&a.id().equals(result.artifactId())&&a.version()==result.source().version();
         store.recipes().result(store,w.session(),w.turn(),w.call(),a);
         store.callStatus(w.call().id(),"SUCCEEDED",null);
         if(searchOperation(w))store.search().finish(w.call(),"SUCCEEDED",null);
         store.modelRecovery().finish(w.turn(),w.call(),"SUCCEEDED",null);
         boolean insufficient="WEB_RESEARCH".equals(result.type())&&"INSUFFICIENT_EVIDENCE".equals(result.data().path("status").asText());
-        store.plans().observe(w.turn(),w.call(),"SKILL_RESULT",insufficient?"INSUFFICIENT_EVIDENCE":"SUCCEEDED","artifactId="+a.id()+", version="+a.version()+", type="+a.type());
+        store.plans().observe(w.turn(),w.call(),"SKILL_RESULT",insufficient?"INSUFFICIENT_EVIDENCE":unchanged?"UNCHANGED":"SUCCEEDED","artifactId="+a.id()+", version="+a.version()+", type="+a.type()+(unchanged?"；返回内容与原版本完全相同，未创建新版本。请核对用户要求，不要宣称已完成未发生的修改或再次重复调用。":""));
         var part=json.createObjectNode().put("type","artifact").put("artifactId",a.id()).put("version",a.version())
                 .put("title",a.title()).put("content",a.content()).put("artifactType",a.type()).put("stepId",a.stepId());
         part.set("data",a.data());part.set("sourceRef",json.valueToTree(a.sourceRef()));part.set("planRef",json.valueToTree(a.planRef()));
@@ -389,14 +401,18 @@ public class AgentRuntime {
         }
     }
     private void prepareVideoScene(AsyncJob lease,Payload p,Work work,TaskQuote quote,AgentBatchRuntime.Prepared batch) {
-        var plan=videoPrompts.preparePlan(work.context(),quote,batch);
-        var saved=tx.execute(t -> {
+        var legacy=videoPrompts.preparePlan(work.context(),quote,batch);
+        record VideoPlanState(AgentVideoPromptPreparation.Plan plan,java.util.Map<String,String> saved) {}
+        var state=tx.execute(t -> {
             fence(lease);Work current=current(p,true);
             if(current==null||!modelResultCurrent(current)){complete(lease);return null;}
+            var plan=store.videoCheckpoints().usesLegacyBinding(current.session(),current.turn(),current.call(),legacy)
+                    ?legacy:videoPrompts.structuredPlan(legacy);
             var result=store.videoCheckpoints().loadOrCreate(current.session(),current.turn(),current.call(),plan);
-            store.touch(current.session());return result;
+            store.touch(current.session());return new VideoPlanState(plan,result);
         });
-        if(saved==null)return;
+        if(state==null)return;
+        var plan=state.plan();var saved=state.saved();
         var scene=plan.scenes().stream().filter(item->!saved.containsKey(item.key())).findFirst().orElse(null);
         if(scene==null) {
             var prepared=videoPrompts.assemble(plan,saved);
@@ -404,8 +420,13 @@ public class AgentRuntime {
         }
         String prompt;
         String repairHint=store.videoCheckpoints().repairHint(work.call(),scene);
+        var recovery=store.modelRecovery().get(work.turn(),work.call());
+        log.info("Agent video prompt scene started: turn={}, step={}, call={}, scene={}, completed={}, total={}, attempt={}, truncationRepairs={}",
+                work.turn().id(),work.turn().step(),work.call().id(),scene.ordinal(),saved.size(),plan.scenes().size(),
+                recovery==null?0:recovery.attempts(),recovery==null?0:recovery.truncationRepairs());
         try {prompt=repairHint==null?videoPrompts.prepareScene(work.context(),plan,scene)
                 :videoPrompts.prepareScene(work.context(),plan,scene,repairHint);}
+        catch(LlmChannelException error){throw new VideoPromptModelFailure(scene.ordinal(),error);}
         catch(VideoPreparationException error){throw error.atScene(scene.ordinal()).withSource(scene.source());}
         String result=prompt;
         tx.executeWithoutResult(t->{
@@ -415,6 +436,8 @@ public class AgentRuntime {
             if(expired(current.turn())){terminalFailure(current,"本次提示词准备已超时，已保存的结果保留。");complete(lease);return;}
             store.videoCheckpoints().save(current.session(),current.turn(),current.call(),plan,scene,result);
             saved.put(scene.key(),result);
+            log.info("Agent video prompt scene validated: turn={}, step={}, call={}, scene={}, completed={}, total={}, promptChars={}",
+                    current.turn().id(),current.turn().step(),current.call().id(),scene.ordinal(),saved.size(),plan.scenes().size(),result.length());
             if(saved.size()==plan.scenes().size()) {
                 var prepared=videoPrompts.assemble(plan,saved);
                 finishQuote(lease,p,prepared.first(),prepared.batch());
@@ -441,6 +464,10 @@ public class AgentRuntime {
         if(!modelResultCurrent(w)) {complete(lease);return;}
         if(error instanceof SearchProvider.Failure searchError) {
             recoverSearch(lease,p,w,searchError);return;
+        }
+        if(error instanceof VideoPromptModelFailure sceneError) {
+            store.plans().observeModelError(w.turn(),w.call(),sceneError.failure.code());
+            recoverVideoPrompt(lease,p,w,sceneError.failure,store.modelRecovery().get(w.turn(),w.call()),sceneError.ordinal);return;
         }
         if(error instanceof LlmChannelException modelError) {
             recoverModel(lease,p,w,modelError);return;
@@ -551,9 +578,10 @@ public class AgentRuntime {
         var recovery=store.modelRecovery().get(w.turn(),w.call());
         String code=error.code();
         store.plans().observeModelError(w.turn(),w.call(),code);
+        if(videoPreparation(w)) {recoverVideoPrompt(lease,p,w,error,recovery,null);return;}
         boolean truncated="MODEL_OUTPUT_TRUNCATED".equals(code);
         boolean repair=truncated&&recovery!=null&&recovery.truncationRepairs()==0;
-        if(modelOperation(w)&&!videoPreparation(w)&&recovery!=null&&(repair||!truncated&&error.retryable())&&recovery.attempts()<AgentModelRecoveryStore.MAX_ATTEMPTS) {
+        if(modelOperation(w)&&recovery!=null&&(repair||!truncated&&error.retryable())&&recovery.attempts()<AgentModelRecoveryStore.MAX_ATTEMPTS) {
             long delay=recovery.attempts()==1?15:30;
             String key=store.modelRecovery().defer(w.turn(),w.call(),code,delay);
             var pending=store.modelRecovery().get(w.turn(),w.call());
@@ -566,7 +594,7 @@ public class AgentRuntime {
             log.info("Agent model retry scheduled: turn={}, epoch={}, step={}, phase={}, call={}, attempt={}, maxAttempts=3, code={}, retryAt={}",
                     w.turn().id(),w.turn().epoch(),w.turn().step(),w.call()==null?"DECISION":"TEXT_SKILL",w.call()==null?null:w.call().id(),recovery.attempts(),code,pending.nextRetryAt());
         } else {
-            String reason=videoPreparation(w)?"视频提示词准备暂未完成，尚未创建费用确认或生成任务":!modelOperation(w)?"当前技能不允许自动重试":error.retryable()?"模型调用连续失败，自动尝试已停止":switch(code) {
+            String reason=!modelOperation(w)?"当前技能不允许自动重试":error.retryable()?"模型调用连续失败，自动尝试已停止":switch(code) {
                 case "CONTEXT_BUILD_FAILED","MODEL_CONTEXT_OVERFLOW" -> "当前上下文准备失败或超过模型窗口，未原样重复请求";
                 case "MODEL_AUTHENTICATION_FAILED","MODEL_NOT_FOUND","MODEL_INVALID_REQUEST" -> "模型配置或请求参数异常，未自动重复请求";
                 case "MODEL_QUOTA_EXHAUSTED" -> "模型通道额度不足，未自动重复请求";
@@ -581,6 +609,33 @@ public class AgentRuntime {
         }
         store.touch(w.session());complete(lease);
     }
+    /** Only the unfinished scene's text may be retried here; quote/submission/approval failures are not replayable. */
+    private void recoverVideoPrompt(AsyncJob lease,Payload p,Work w,LlmChannelException error,AgentModelRecoveryStore.Recovery recovery,Integer ordinal) {
+        var progress=store.videoCheckpoints().progress(w.turn());
+        Integer currentOrdinal=progress==null?null:(Integer)progress.get("currentSceneOrdinal");
+        boolean truncated="MODEL_OUTPUT_TRUNCATED".equals(error.code());
+        log.warn("Agent video prompt model failure: turn={}, step={}, call={}, scene={}, attempt={}, truncationRepairs={}, code={}, httpStatus={}, promptTokens={}, completionTokens={}",
+                w.turn().id(),w.turn().step(),w.call().id(),ordinal,recovery==null?0:recovery.attempts(),recovery==null?0:recovery.truncationRepairs(),
+                error.code(),error.httpStatus(),error.promptTokens(),error.completionTokens());
+        if(ordinal!=null && ordinal.equals(currentOrdinal) && truncated && recovery!=null && recovery.truncationRepairs()==0
+                && recovery.attempts()<AgentModelRecoveryStore.MAX_ATTEMPTS && !expired(w.turn())) {
+            long delay=recovery.attempts()==1?15:30;
+            String key=store.modelRecovery().deferTruncatedScene(w.turn(),w.call(),ordinal,delay);
+            store.callStatus(w.call().id(),"WAITING_RETRY",error.code());
+            store.executionStatus(w.turn().id(),"WAITING_RETRY","第 "+ordinal+" 幕视频提示词输出达到上限，正在自动修复一次；已完成 "
+                    +progress.get("completed")+" / "+progress.get("total")+" 幕，已有进度保留，尚未创建费用确认或生成任务。");
+            store.renewModelDeadline(w.turn());
+            jobs.enqueueDelayed(SKILL_JOB,key,store.write(p),delay);
+        } else {
+            String stage=ordinal==null?"视频生成规格检查":("第 "+ordinal+" 幕视频提示词准备");
+            String reason=truncated?"输出达到上限，本次未能继续自动修复":"模型调用未完成";
+            // A quote error must not appear as a failed scene-model invocation in the public progress projection.
+            String code=ordinal==null&&truncated?"VIDEO_PREPARATION_PRECHECK_FAILED":error.code();
+            modelSuspended(w,code,stage+"暂未完成："+reason+"（"+code+"）。任务已暂停，计划和已完成提示词已保存，"
+                    +"尚未创建费用确认或生成任务；请检查模型服务后明确恢复。");
+        }
+        store.touch(w.session());complete(lease);
+    }
     private void modelSuspended(Work w,String code,String reason) {
         store.modelRecovery().finish(w.turn(),w.call(),"SUSPENDED",code);
         if(w.call()!=null)store.callStatus(w.call().id(),"SUSPENDED",code);
@@ -590,6 +645,7 @@ public class AgentRuntime {
         store.message(s,t.id(),"ASSISTANT",text,json.valueToTree(List.of(Map.of("type","text","text",text))),null,null);
     }
     private String errorCode(Exception e) {
+        if(e instanceof VideoPromptModelFailure scene)return scene.failure.code();
         if(e instanceof org.example.seedancegenarate.agent.skill.SkillOutputContractException) return org.example.seedancegenarate.agent.skill.SkillOutputContractException.CODE;
         if(e instanceof InvalidAgentDecisionException) return "INVALID_DECISION";
         if(e instanceof VideoPreparationException preparation) return preparation.code();

@@ -31,8 +31,9 @@ class AgentVideoPromptCheckpointStoreTest {
         db=new JdbcTemplate(ds);tx=new TransactionTemplate(new DataSourceTransactionManager(ds));store=new AgentVideoPromptCheckpointStore(db);
         db.execute("CREATE TABLE agent_session(id VARCHAR(64) PRIMARY KEY,user_id BIGINT,active_turn_id VARCHAR(64))");
         db.execute("CREATE TABLE agent_turn(id VARCHAR(64) PRIMARY KEY,session_id VARCHAR(64),epoch BIGINT,step_no INT,status VARCHAR(32))");
-        db.execute("CREATE TABLE agent_skill_call(id VARCHAR(64) PRIMARY KEY,turn_id VARCHAR(64),epoch BIGINT,step_no INT,skill_id VARCHAR(64),status VARCHAR(32))");
+        db.execute("CREATE TABLE agent_skill_call(id VARCHAR(64) PRIMARY KEY,turn_id VARCHAR(64),epoch BIGINT,step_no INT,skill_id VARCHAR(64),status VARCHAR(32),error_message VARCHAR(256))");
         db.execute("CREATE TABLE agent_approval(id VARCHAR(64) PRIMARY KEY,call_id VARCHAR(64))");
+        db.execute("CREATE TABLE agent_model_recovery(turn_id VARCHAR(64),execution_epoch BIGINT,step_no INT,phase VARCHAR(32),call_id VARCHAR(64),attempt_count INT,truncation_repairs INT,next_retry_at TIMESTAMP,error_code VARCHAR(64))");
         String sql=new String(Objects.requireNonNull(getClass().getResourceAsStream("/db/migration/V52__agent_video_prompt_checkpoint.sql")).readAllBytes(),StandardCharsets.UTF_8)
                 .replaceAll("(?i)\\) ENGINE\\s*=.*?;", ");");
         new ResourceDatabasePopulator(new ByteArrayResource(sql.getBytes(StandardCharsets.UTF_8))).execute(ds);
@@ -42,16 +43,40 @@ class AgentVideoPromptCheckpointStoreTest {
         call=new Call("call","turn","video-generation","1","{}","RUNNING",1,0);
         db.update("INSERT INTO agent_session VALUES('session',1,'turn')");
         db.update("INSERT INTO agent_turn VALUES('turn','session',1,0,'RUNNING')");
-        db.update("INSERT INTO agent_skill_call VALUES('call','turn',1,0,'video-generation','RUNNING')");
+        db.update("INSERT INTO agent_skill_call(id,turn_id,epoch,step_no,skill_id,status) VALUES('call','turn',1,0,'video-generation','RUNNING')");
     }
     Map<String,String> load(Plan plan) {return tx.execute(t->store.loadOrCreate(session,turn,call,plan));}
+    // 【测什么】recovery表显式unicode_ci而其他表可能继承默认排序规则，进度只按参数独立读取准确恢复身份。
+    // 【怎么算红】恢复跨表字符JOIN即触发SQL形状守卫；漏call/epoch条件会读到其他恢复记录而使计数失败。
+    @Test void progressReadsRecoveryWithoutCrossCollationJoinAndKeepsExactIdentity() {
+        load(plan());save(plan(),0,"passed-first");
+        db.update("UPDATE agent_skill_call SET error_message='CALL_FALLBACK' WHERE id='call'");
+        db.update("INSERT INTO agent_model_recovery VALUES('turn',1,0,'TEXT_SKILL','call',2,1,NOW(),'MODEL_OUTPUT_TRUNCATED')");
+        db.update("INSERT INTO agent_model_recovery VALUES('turn',2,0,'TEXT_SKILL','call',3,0,NOW(),'WRONG_EPOCH')");
+        db.update("INSERT INTO agent_model_recovery VALUES('turn',1,0,'TEXT_SKILL','other-call',3,0,NOW(),'WRONG_CALL')");
+        var queries=new ArrayList<String>();
+        var observed=new JdbcTemplate(db.getDataSource()) {
+            @Override public <T> List<T> query(String sql,org.springframework.jdbc.core.RowMapper<T> mapper,Object... args) {
+                assertFalse(sql.toLowerCase(Locale.ROOT).contains("join agent_model_recovery"),"recovery reads must not compare columns of different table collations");
+                queries.add(sql);return super.query(sql,mapper,args);
+            }
+        };
+        store=new AgentVideoPromptCheckpointStore(observed);
+        var progress=tx.execute(t->store.progress(turn));
+        assertEquals(2,queries.size());assertEquals(1,progress.get("completed"));assertEquals(2,progress.get("total"));
+        assertEquals(2,progress.get("currentSceneOrdinal"));assertEquals(2,progress.get("attemptCount"));
+        assertEquals(1,progress.get("truncationRepairs"));assertEquals("MODEL_OUTPUT_TRUNCATED",progress.get("errorCode"));
+        assertNotNull(progress.get("retryAt"));assertFalse(progress.containsKey("callId"));
+        db.update("UPDATE agent_model_recovery SET error_code=NULL WHERE execution_epoch=1 AND call_id='call'");
+        assertEquals("CALL_FALLBACK",tx.execute(t->store.progress(turn)).get("errorCode"));
+    }
     void save(Plan plan,int index,String prompt) {tx.executeWithoutResult(t->store.save(session,turn,call,plan,plan.scenes().get(index),prompt));}
     void nextCall() {
         db.update("UPDATE agent_skill_call SET status='SUSPENDED' WHERE id=?",call.id());
         int next=turn.step()+1;db.update("UPDATE agent_turn SET step_no=? WHERE id=?",next,turn.id());
         turn=new Turn(turn.id(),"session","llm","RUNNING",next,turn.epoch(),null,turn.deadline());
         call=new Call(turn.id()+"-call-"+next,turn.id(),"video-generation","1","{}","RUNNING",turn.epoch(),next);
-        db.update("INSERT INTO agent_skill_call VALUES(?,?,?,?,?,'RUNNING')",call.id(),turn.id(),turn.epoch(),next,"video-generation");
+        db.update("INSERT INTO agent_skill_call(id,turn_id,epoch,step_no,skill_id,status) VALUES(?,?,?,?,?,'RUNNING')",call.id(),turn.id(),turn.epoch(),next,"video-generation");
     }
     // 【测什么】修正资格与入队事务共同回滚，重建Store不重置资格，已审批之后不可再申请。
     // 【怎么算红】删除repair_count=0或current审批守卫，重复预约/已审批预约将错误返回true。
@@ -80,7 +105,9 @@ class AgentVideoPromptCheckpointStoreTest {
         assertTrue(load(plan()).isEmpty());assertEquals("call",store.nextJobKey(call));save(plan(),0,"passed-first");
         store=new AgentVideoPromptCheckpointStore(db);
         assertEquals(Map.of("scene-1","passed-first"),load(plan()));assertEquals("call:prepare:1",store.nextJobKey(call));
-        assertEquals(Map.of("completed",1,"total",2),store.progress(turn));
+        var progress=store.progress(turn);
+        assertEquals(1,progress.get("completed"));assertEquals(2,progress.get("total"));assertEquals(2,progress.get("currentSceneOrdinal"));
+        assertEquals(0,progress.get("attemptCount"));assertNull(progress.get("errorCode"));
         save(plan(),0,"passed-first");assertThrows(BusinessException.class,()->save(plan(),0,"overwrite"));
         assertEquals("call:prepare:1",store.nextJobKey(call));
     }
@@ -124,7 +151,7 @@ class AgentVideoPromptCheckpointStoreTest {
         db.update("UPDATE agent_turn SET status='YIELDED' WHERE id=?",turn.id());
         db.update("INSERT INTO agent_turn VALUES('continued-turn','session',1,0,'RUNNING')");
         db.update("UPDATE agent_session SET active_turn_id='continued-turn' WHERE id='session'");
-        db.update("INSERT INTO agent_skill_call VALUES('continued-call','continued-turn',1,0,'video-generation','RUNNING')");
+        db.update("INSERT INTO agent_skill_call(id,turn_id,epoch,step_no,skill_id,status) VALUES('continued-call','continued-turn',1,0,'video-generation','RUNNING')");
         session=new Session("session",1,1,0,null,null,"continued-turn");
         turn=new Turn("continued-turn","session","llm","RUNNING",0,1,null,turn.deadline());
         call=new Call("continued-call","continued-turn","video-generation","1","{}","RUNNING",1,0);
@@ -145,6 +172,7 @@ class AgentVideoPromptCheckpointStoreTest {
     // 【怎么算红】移除任一NOT EXISTS approval守卫，写入或新call复用断言失败。
     @Test void anyApprovalPermanentlyClosesPreparationAndReuse() {
         load(plan());save(plan(),0,"passed-first");db.update("INSERT INTO agent_approval VALUES('approval','call')");
+        assertNull(store.progress(turn));
         assertThrows(BusinessException.class,()->save(plan(),1,"late-second"));
         assertThrows(BusinessException.class,()->load(plan()));
         nextCall();assertTrue(load(plan()).isEmpty());
@@ -157,7 +185,7 @@ class AgentVideoPromptCheckpointStoreTest {
         assertThrows(BusinessException.class,()->save(plan(),1,"late-second"));
         db.update("UPDATE agent_turn SET status='RUNNING',epoch=1 WHERE id='turn'");
         db.update("UPDATE agent_skill_call SET status='FAILED' WHERE id='call'");
-        assertEquals(Map.of("completed",1,"total",2),store.progress(turn));
+        assertEquals(1,store.progress(turn).get("completed"));assertEquals(2,store.progress(turn).get("total"));
         assertThrows(BusinessException.class,()->save(plan(),1,"late-second"));
         db.update("UPDATE agent_skill_call SET status='RUNNING' WHERE id='call'");
         Call old=call;nextCall();
@@ -173,6 +201,7 @@ class AgentVideoPromptCheckpointStoreTest {
         store=new AgentVideoPromptCheckpointStore(db);
         assertEquals(Map.of("scene-1","passed-first"),load(plan()));
         save(plan(),1,"passed-second");assertEquals(2,load(plan()).size());
+        assertNull(store.progress(turn).get("currentSceneOrdinal"));
     }
     // 【测什么】新epoch与其他session即使输入哈希相同，也不能复制旧的成功提示词。
     // 【怎么算红】删除复用SQL的epoch或session约束，新的准备会错误包含passed-first。
@@ -183,7 +212,7 @@ class AgentVideoPromptCheckpointStoreTest {
         assertTrue(load(plan()).isEmpty());
         db.update("INSERT INTO agent_session VALUES('other',2,'other-turn')");
         db.update("INSERT INTO agent_turn VALUES('other-turn','other',1,0,'RUNNING')");
-        db.update("INSERT INTO agent_skill_call VALUES('other-call','other-turn',1,0,'video-generation','RUNNING')");
+        db.update("INSERT INTO agent_skill_call(id,turn_id,epoch,step_no,skill_id,status) VALUES('other-call','other-turn',1,0,'video-generation','RUNNING')");
         session=new Session("other",2,2,0,null,null,"other-turn");
         turn=new Turn("other-turn","other","llm","RUNNING",0,1,null,turn.deadline());
         call=new Call("other-call","other-turn","video-generation","1","{}","RUNNING",1,0);

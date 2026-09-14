@@ -17,6 +17,31 @@ public class AgentApprovalStore {
         return get(id,false);
     }
     public Approval locked(String id) { return get(id,true); }
+    /** Request-local display reads; mutations still use locked(id). */
+    public Map<String,Approval> projectApprovals(Session s,Collection<String> ids) {
+        var result=new HashMap<String,Approval>();
+        if(ids.isEmpty())return result;
+        var args=new ArrayList<Object>();args.add(s.id());args.addAll(new LinkedHashSet<>(ids));
+        String marks=String.join(",",Collections.nCopies(args.size()-1,"?"));
+        jdbc.query("SELECT * FROM agent_approval WHERE session_id=? AND id IN ("+marks+")",r->{
+            var a=new Approval(r.getString("id"),r.getString("session_id"),r.getString("turn_id"),r.getString("call_id"),
+                    r.getLong("epoch"),r.getInt("step_no"),r.getInt("version"),r.getString("status"),r.getString("quote_json"),
+                    r.getString("request_id"),r.getString("task_id"),r.getString("error_message"),r.getTimestamp("expires_at").toLocalDateTime());
+            result.put(a.id(),a);
+        },args.toArray());
+        return result;
+    }
+    public Map<String,com.fasterxml.jackson.databind.JsonNode> projectContexts(Session s,Collection<String> ids) {
+        var result=new HashMap<String,com.fasterxml.jackson.databind.JsonNode>();
+        if(ids.isEmpty())return result;
+        var args=new ArrayList<Object>();args.add(s.id());args.addAll(new LinkedHashSet<>(ids));
+        String marks=String.join(",",Collections.nCopies(args.size()-1,"?"));
+        jdbc.query("SELECT c.id,c.context_json FROM agent_skill_call c JOIN agent_turn t ON t.id=c.turn_id "
+                +"WHERE t.session_id=? AND c.id IN ("+marks+")",r->{
+            String saved=r.getString(2);result.put(r.getString(1),store.read(saved==null?"{\"version\":0}":saved));
+        },args.toArray());
+        return result;
+    }
     private Approval get(String id,boolean lock) {
         var rows=jdbc.query("SELECT * FROM agent_approval WHERE id=?"+(lock?" FOR UPDATE":""),(r,n)->new Approval(r.getString("id"),r.getString("session_id"),
                 r.getString("turn_id"),r.getString("call_id"),r.getLong("epoch"),r.getInt("step_no"),r.getInt("version"),r.getString("status"),

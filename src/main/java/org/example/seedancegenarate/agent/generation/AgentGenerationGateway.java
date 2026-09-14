@@ -71,10 +71,22 @@ public class AgentGenerationGateway {
         return root;
     }
     public void validate(String type,JsonNode input) { normalized(type,input,true); }
+    /** Database/config-only final fence; reference availability and pricing belong outside the transaction. */
+    public void validateQuoteSpec(TaskQuote quote) {
+        JsonNode input="VIDEO".equals(quote.mediaType())?videoParameters(quote.inputSnapshot()):quote.inputSnapshot();
+        normalized(quote.mediaType(),input);
+        var available=input.has("referenceImage")?videoModels():models(quote.mediaType());
+        if(available.stream().noneMatch(model->model.model().equals(quote.modelId())&&model.provider().equals(quote.provider())))
+            throw BusinessException.conflict("模型能力已变化，请重新准备报价");
+    }
     private ObjectNode normalized(String type,JsonNode input) {
         return normalized(type,input,false);
     }
     private ObjectNode normalized(String type,JsonNode input,boolean allowInheritedReference) {
+        try { return normalizeRules(type,input,allowInheritedReference); }
+        catch(VideoPreparationException failure) {throw failure.withRepairInput(input);}
+    }
+    private ObjectNode normalizeRules(String type,JsonNode input,boolean allowInheritedReference) {
         if(!Set.of("IMAGE","VIDEO").contains(type) || input==null || !input.isObject()) throw BusinessException.badRequest("生成参数无效");
         var fields="VIDEO".equals(type)?Set.of("model","prompt","ratio","duration","megapixels","referenceImage","referenceMode","visualStyle"):Set.of("model","prompt","ratio","duration","megapixels");
         input.fieldNames().forEachRemaining(k->{if(!fields.contains(k))throw BusinessException.badRequest("生成参数包含不支持的字段");});
@@ -128,7 +140,11 @@ public class AgentGenerationGateway {
         ObjectNode snapshot=normalized("VIDEO",input);
         if(snapshot.has("referenceImage")) {
             if(videoReference==null || context==null || context.userId()==null || context.sessionId()==null) throw BusinessException.badRequest("参考图片身份不可用");
-            snapshot.set("_reference",videoReference.resolve(context.userId(),context.sessionId(),snapshot.get("referenceImage")));
+            try { snapshot.set("_reference",videoReference.resolve(context.userId(),context.sessionId(),snapshot.get("referenceImage"))); }
+            catch(BusinessException failure) {
+                if(!Set.of(400,404).contains(failure.getCode()))throw failure;
+                throw VideoPreparationException.unavailableReference(input);
+            }
         }
         if(snapshot.has("referenceImage") || snapshot.has("visualStyle")) {
             String prompt=snapshot.path("prompt").asText();snapshot.put("_originalPrompt",prompt);

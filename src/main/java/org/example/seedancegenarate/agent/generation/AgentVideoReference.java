@@ -17,12 +17,22 @@ public class AgentVideoReference {
     private final StoredImageReferences references;
     private final ObjectMapper json;
     public ObjectNode resolve(Long owner,String session,JsonNode ref) {
+        var stored=lookup(owner,session,ref);
+        references.validateAvailable(owner,new StoredImageReferences.Reference(stored.path("taskId").asText(),stored.path("objectKey").asText()));
+        return stored;
+    }
+    /** Database-only confirmation fence. Storage availability is checked outside the transaction and again at use. */
+    public void revalidateStored(Long owner,String session,JsonNode ref,JsonNode expected) {
+        var stored=lookup(owner,session,ref);
+        references.validate(owner,new StoredImageReferences.Reference(stored.path("taskId").asText(),stored.path("objectKey").asText()));
+        if(!stored.equals(expected))throw BusinessException.conflict("参考图片已变化");
+    }
+    private ObjectNode lookup(Long owner,String session,JsonNode ref) {
         validateShape(ref);
         var rows=jdbc.query("SELECT a.task_id,a.title,t.artifact_key FROM agent_artifact_version a JOIN agent_session s ON s.id=a.session_id JOIN video_task t ON t.biz_task_id=a.task_id WHERE a.user_id=? AND s.user_id=? AND a.session_id=? AND a.artifact_id=? AND a.version_no=? AND a.type='IMAGE'",
                 (r,n)->new String[]{r.getString(1),r.getString(2),r.getString(3)},owner,owner,session,ref.path("artifactId").asText(),ref.path("version").intValue());
         if(rows.size()!=1) throw BusinessException.notFound("参考图片版本不存在");
         var row=rows.get(0);
-        references.validateAvailable(owner,new StoredImageReferences.Reference(row[0],row[2]));
         return json.createObjectNode().put("userId",owner).put("sessionId",session).put("taskId",row[0]).put("objectKey",row[2])
                 .put("title",row[1]).put("mediaPath","/api/agent/media/"+row[0]);
     }

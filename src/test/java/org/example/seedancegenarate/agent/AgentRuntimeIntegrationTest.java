@@ -339,6 +339,24 @@ class AgentRuntimeIntegrationTest {
         assertEquals("FAILED",app.snapshot(1,id).turn().status()); assertEquals(1,count("agent_artifact_version"));
     }
 
+    // 【测什么】完整无变化结果经过真实Runtime来源守卫后复用版本，留下UNCHANGED而不是伪称改稿成功。
+    // 【怎么算红】新增版本/无观察/无后续规划入口会使持久行数、观察和作业断言失败。
+    @Test void unchangedStoryboardResultIsObservedAndCanFinishWithoutAnotherEdit()throws Exception {
+        var s=store.owned(id,1,false);var board=store.artifact(s,"board",null,"STORYBOARD","分镜","原文");
+        var data=json.readTree("{\"scenes\":[{\"sceneId\":\"s1\",\"title\":\"幕\",\"visual\":\"城市\",\"narration\":\"\",\"duration\":6}]}");
+        db.update("UPDATE agent_artifact_version SET data_json=? WHERE artifact_id=?",data.toString(),board.id());
+        var ref=new AgentContext.ArtifactRef(board.id(),1,"s1");
+        var input=json.createObjectNode().put("instruction","第一幕6秒");input.set("source",json.valueToTree(ref));
+        when(skill.descriptor()).thenReturn(new SkillDescriptor("script-generation","1","board",json.createObjectNode(),"STORYBOARD"));
+        when(planner.decide(any())).thenReturn(new AgentDecision("CALL_SKILL",null,null,List.of(),"script-generation",input));
+        when(skill.execute(any(),any())).thenReturn(new SkillResult("STORYBOARD","分镜","原文",board.id(),data,ref));
+        app.send(1,id,send("same","第一幕6秒"));run();run();
+        assertEquals(1,count("agent_artifact_version"));
+        assertEquals(1,db.queryForObject("SELECT COUNT(*) FROM agent_observation WHERE code='UNCHANGED'",Integer.class));
+        when(planner.decide(any())).thenReturn(new AgentDecision("COMPLETE","当前第一幕已为6秒，原稿保留。",null,List.of(),null,null));run();
+        assertEquals("COMPLETED",app.snapshot(1,id).turn().status());verify(skill,times(1)).execute(any(),any());
+    }
+
     // 【测什么】消息提交仅创建持久化作业，重复请求只重放一次；修改同键内容拒绝。
     // 【怎么算红】移除requestHash检查后第二次消息冲突或多出作业，本测试失败。
     @Test void acceptanceIsAsyncAndIdempotent() {

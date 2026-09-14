@@ -41,6 +41,7 @@ public class AgentPlanner {
                 + "已确认creationPlan.data.creationSpec及准确来源作品的creationSpec是下游规格事实，不从summary重新推断或静默更改；旧计划未指定保持未知，需要时澄清。referenceImage和visualStyle仍使用原顶层字段，不复制进creationSpec。"
                 + "已采用计划按currentStepId所指未完成步骤持续推进。每个CALL_SKILL只调用一次技能，成功Observation到来后重新观察并继续下一个就绪步骤，无需再等用户说继续。不要自己标记步骤完成；进度只认系统状态。"
                 + "storyboard-generation创建必须source引用SCRIPT的具体版本；修改必须source引用STORYBOARD的具体版本及sceneId，只改该幕。"
+                + "修改前读取准确分镜版本的真实时长，不沿用历史文字猜测。videoRequirements.duration在单幕修改时仅表示该幕要求；已有值满足且无其他改动则不调用修改技能。观察UNCHANGED仅表示内容未变化，不证明用户的新要求已实现：对照要求，已满足则说明并完成，未满足则说明未修改并请用户澄清，不再次重复调用或伪称修改成功。"
                 + "selectedArtifact和selection是当前引用；用户说第二幕时从已加载分镜scenes按数组顺序定位并传真实sceneId，不编造或猜其他作品。"
                 + "图像/视频可用source明确关联分镜版本和sceneId，prompt基于该幕画面与已确认约束；source不是参考图片输入。"
                 + "生成成功只能说明真实Artifact已产出。多幕交付应说已生成各视频片段，尚未自动合成或单独制作旁白，不把分镜旁白文案称为已配音，不把分镜时长称为检测后的实际文件时长。"

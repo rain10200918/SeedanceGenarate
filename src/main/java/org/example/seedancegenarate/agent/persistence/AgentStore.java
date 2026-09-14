@@ -38,8 +38,10 @@ public class AgentStore {
         this.recipes=new org.example.seedancegenarate.agent.recipe.AgentRecipeRunStore(jdbc,json);
     }
     public AgentPlanStore plans() { return plans; }
+    public AgentRepairStore repairs() { return new AgentRepairStore(jdbc,json); }
     public AgentSearchStore search() { return new AgentSearchStore(jdbc); }
     public AgentBatchStore batches() { return batches; }
+    public AgentBatchRequoteStore batchRequotes() { return new AgentBatchRequoteStore(jdbc,json); }
     public AgentModelRecoveryStore modelRecovery() { return modelRecovery; }
     public AgentVideoPromptCheckpointStore videoCheckpoints() { return new AgentVideoPromptCheckpointStore(jdbc); }
     /** Safe diagnostic only; never modifies the frozen execution identity. */
@@ -63,14 +65,19 @@ public class AgentStore {
         } else error.putArray("operations");
         context.set("actionableError",error);
         jdbc.update("UPDATE agent_skill_call SET context_json=? WHERE id=?",write(context),call.id());
+        repairs().capture(this,s,t,call,failure);
     }
     public JsonNode actionableError(Session s,Turn t) {
+        return actionableError(s,t,null);
+    }
+    /** Reuse only the caller's current locked snapshot; default callers still read fresh. */
+    public JsonNode actionableError(Session s,Turn t,ObjectNode projectedWorkspace) {
         if(t==null||!Set.of("SUSPENDED","FAILED").contains(t.status()))return null;
         String saved=first(jdbc.query("SELECT context_json FROM agent_skill_call WHERE turn_id=? AND epoch=? AND step_no=? ORDER BY created_at DESC LIMIT 1",
                 (r,n)->r.getString(1),t.id(),t.epoch(),t.step()));
         if(saved==null)return null;
         JsonNode error=read(saved).get("actionableError");
-        return error!=null&&error.path("workspaceVersion").asLong()==workspace(s).path("version").asLong()?error:null;
+        return error!=null&&error.path("workspaceVersion").asLong()==(projectedWorkspace==null?workspace(s):projectedWorkspace).path("version").asLong()?error:null;
     }
     public void renewModelDeadline(Turn t) {
         jdbc.update("UPDATE agent_turn SET deadline_at=TIMESTAMPADD(MINUTE,15,NOW()),updated_at=NOW() WHERE id=? AND epoch=?",t.id(),t.epoch());
@@ -296,6 +303,15 @@ public class AgentStore {
         if(scene!=null) {context.put("sceneItemId",scene.path("id").asText());context.set("selection",scene.get("sourceRef"));}
         context.set("recipeRun",recipes.freeze(t));
         context.set("sourceRef",input.hasNonNull("source")?input.get("source"):context.get("selection"));
+        context.remove("confirmedStoryboardRepairId");
+        if("storyboard-generation".equals(skill)&&context.path("hasLocalRepairs").asBoolean()) {
+            for(var binding:repairs().bindings(this,session(t.sessionId()),context)) {
+                var target=binding.path("target");
+                if(!"STORYBOARD".equals(target.path("kind").asText())||!target.path("sourceRef").equals(context.path("sourceRef")))continue;
+                for(var step:context.path("steps"))if(step.path("id").equals(context.path("currentStepId"))&&step.path("executionStepId").equals(target.path("executionStepId")))
+                    context.set("confirmedStoryboardRepairId",binding.path("bindingId"));
+            }
+        }
         if("web-search".equals(skill)) {context.putNull("sourceRef");context.putNull("selection");}
         return insertCall(t,skill,version,input,context);
     }
@@ -348,8 +364,11 @@ public class AgentStore {
                 text,i.id(),i.version())!=1) throw BusinessException.conflict("这个问题已处理或过期，请刷新对话");
     }
     public List<AgentViews.Artifact> artifacts(Session s) {
+        return artifacts(s,workspace(s));
+    }
+    /** Reuse only a projection read for this session in the current request; artifact ownership is rechecked below. */
+    public List<AgentViews.Artifact> artifacts(Session s,ObjectNode w) {
         var result=new LinkedHashMap<String,AgentViews.Artifact>();
-        var w=workspace(s);
         for(String key:List.of("planRef","selection")) {
             var ref=w.path(key);
             if(ref.isObject()) { var a=artifactVersion(s,ref.path("artifactId").asText(),ref.path("version").asInt()); result.put(a.id()+":"+a.version(),a); }
@@ -422,6 +441,12 @@ public class AgentStore {
             var original=artifactVersion(s,source.path("artifactId").asText(),source.path("version").asInt());
             if(result.artifactId()!=null && (!result.artifactId().equals(original.id()) || !result.type().equals(original.type()) || !latestArtifact(s,original.id(),original.version())))
                 throw BusinessException.conflict("作品已有更新，请选择最新版本后修改");
+            // Ordinary edits may be satisfied already. Explicit execution/repair workflows retain their version transition.
+            JsonNode context=callContext(call.id());
+            if(result.artifactId()!=null&&"STORYBOARD".equals(result.type())&&result.source().sceneId()!=null
+                    && !context.hasNonNull("executionPlanId")&&!context.hasNonNull("sceneEditId")
+                    && Objects.equals(result.title(),original.title())&&Objects.equals(result.content(),original.content())
+                    && result.data()!=null&&result.data().equals(original.data()))return original;
         } else if(result.artifactId()!=null) throw BusinessException.badRequest("修改作品必须引用准确版本");
         var a=artifact(s,call.id(),result.artifactId(),result.type(),result.title(),result.content());
         JsonNode context=callContext(call.id());
@@ -486,26 +511,43 @@ public class AgentStore {
     }
     public List<AgentViews.Message> messages(Session s) {
         var result=jdbc.query("SELECT id,seq,role,parts,create_time,client_msg_id FROM conversation_message WHERE conversation_id=? AND user_id=? ORDER BY seq DESC LIMIT 100",
-                (r,n)->new AgentViews.Message(r.getString(1),r.getLong(2),r.getString(3),projectParts(read(r.getString(4))),r.getTimestamp(5).toLocalDateTime().toString(),r.getString(6)),s.conversationId(),s.userId());
+                (r,n)->new AgentViews.Message(r.getString(1),r.getLong(2),r.getString(3),read(r.getString(4)),r.getTimestamp(5).toLocalDateTime().toString(),r.getString(6)),s.conversationId(),s.userId());
+        Set<String> choices=new LinkedHashSet<>(),calls=new LinkedHashSet<>();
+        for(var message:result) if(message.parts().isArray()) for(var part:message.parts()) {
+            if("choice".equals(part.path("type").asText())) choices.add(part.path("interactionId").asText());
+            if("skill_call".equals(part.path("type").asText())) calls.add(part.path("skillCallId").asText());
+        }
+        var choiceStates=messagePartStates(choices,false);
+        var callStates=messagePartStates(calls,true);
+        result.replaceAll(m->new AgentViews.Message(m.id(),m.seq(),m.role(),projectParts(m.parts(),choiceStates,callStates),m.createdAt(),m.clientMsgId()));
         Collections.reverse(result); return result;
     }
-    private JsonNode projectParts(JsonNode parts) {
+    private Map<String,JsonNode> messagePartStates(Set<String> ids,boolean calls) {
+        Map<String,JsonNode> states=new HashMap<>();
+        if(ids.isEmpty()) return states;
+        String sql=calls
+                ? "SELECT c.id,c.status,(c.skill_id='video-generation' AND EXISTS(SELECT 1 FROM agent_video_prompt_checkpoint p WHERE p.call_id=c.id) "
+                    +"AND NOT EXISTS(SELECT 1 FROM agent_approval a WHERE a.call_id=c.id)) AS preparing FROM agent_skill_call c WHERE c.id IN ("
+                : "SELECT id,status,version FROM agent_interaction WHERE id IN (";
+        jdbc.query(sql+String.join(",",Collections.nCopies(ids.size(),"?"))+")",(r,n)->{
+            var state=json.createObjectNode().put("status",r.getString("status"));
+            if(calls) { if(r.getBoolean("preparing")) state.put("phase","VIDEO_PROMPT_PREPARATION"); }
+            else state.put("version",r.getInt("version"));
+            states.put(r.getString("id"),state); return state;
+        },ids.toArray());
+        return states;
+    }
+    private JsonNode projectParts(JsonNode parts,Map<String,JsonNode> choices,Map<String,JsonNode> calls) {
         if(!parts.isArray()) return json.createArrayNode();
         for(JsonNode part:parts) {
             if(!(part instanceof ObjectNode object)) continue;
             if("choice".equals(part.path("type").asText())) {
-                var i=interaction(part.path("interactionId").asText());
-                if(i!=null) { object.put("status",i.status()); object.put("version",i.version()); }
+                var state=choices.get(part.path("interactionId").asText());
+                if(state!=null) object.setAll((ObjectNode)state);
             }
             if("skill_call".equals(part.path("type").asText())) {
-                var c=call(part.path("skillCallId").asText());
-                if(c!=null) {
-                    object.put("status",c.status());
-                    if("video-generation".equals(c.skillId()) && jdbc.queryForObject(
-                            "SELECT COUNT(*) FROM agent_video_prompt_checkpoint p WHERE p.call_id=? "
-                                    +"AND NOT EXISTS(SELECT 1 FROM agent_approval a WHERE a.call_id=p.call_id)",Integer.class,c.id())>0)
-                        object.put("phase","VIDEO_PROMPT_PREPARATION");
-                }
+                var state=calls.get(part.path("skillCallId").asText());
+                if(state!=null) object.setAll((ObjectNode)state);
             }
         }
         return parts;

@@ -39,6 +39,9 @@ public class AgentModelCallConfig {
     private int scriptTokens = 8192;
     private int storyboardTokens = 12288;
     private int promptTokens = 4096;
+    private int videoPromptTokens = 12288;
+    private int videoPromptRepairTokens = 16384;
+    private int videoPromptTimeoutMs = 420000;
 
     public int getPlannerTokens() {return plannerTokens;}
     public void setPlannerTokens(int value) {plannerTokens=bounded(value);}
@@ -50,6 +53,15 @@ public class AgentModelCallConfig {
     public void setStoryboardTokens(int value) {storyboardTokens=bounded(value);}
     public int getPromptTokens() {return promptTokens;}
     public void setPromptTokens(int value) {promptTokens=bounded(value);}
+    public int getVideoPromptTokens() {return videoPromptTokens;}
+    public void setVideoPromptTokens(int value) {videoPromptTokens=bounded(value);}
+    public int getVideoPromptRepairTokens() {return videoPromptRepairTokens;}
+    public void setVideoPromptRepairTokens(int value) {videoPromptRepairTokens=bounded(value);}
+    public int getVideoPromptTimeoutMs() {return videoPromptTimeoutMs;}
+    public void setVideoPromptTimeoutMs(int value) {
+        if(value<1000 || value>600000)throw new IllegalArgumentException("agent.model-call.video-prompt-timeout-ms must be within 1000..600000");
+        videoPromptTimeoutMs=value;
+    }
 
     private static int bounded(int value) {
         if(value<1024 || value>24576)throw new IllegalArgumentException("Agent output tokens must be within 1024..24576");
@@ -58,13 +70,14 @@ public class AgentModelCallConfig {
 
     /** Automatic growth is bounded; a user's higher channel limit is never reduced. */
     public int outputTokens(String scene,boolean repair,int channelTokens) {
+        if("AGENT_VIDEO_PROMPT".equals(scene))
+            return Math.max(channelTokens,repair?Math.max(videoPromptTokens,videoPromptRepairTokens):videoPromptTokens);
         int sceneTokens=switch(scene) {
             case "AGENT_PLAN" -> plannerTokens;
             case "AGENT_CREATIVE_PLAN" -> planTokens;
             case "AGENT_SCRIPT" -> scriptTokens;
             case "AGENT_STORYBOARD" -> storyboardTokens;
             case "AGENT_PROMPT" -> promptTokens;
-            case "AGENT_VIDEO_PROMPT" -> Math.max(promptTokens,storyboardTokens);
             default -> channelTokens;
         };
         long initial=Math.max(channelTokens,sceneTokens);

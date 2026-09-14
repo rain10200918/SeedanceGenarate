@@ -4,7 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.service.llm.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 import java.util.List;
 import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
@@ -15,7 +20,8 @@ class AgentModelGatewayTest {
     private final LlmChannelRegistry registry = mock(LlmChannelRegistry.class);
     private final LlmChatClient client = mock(LlmChatClient.class);
     private final LangChain4jPlannerClient plannerClient=mock(LangChain4jPlannerClient.class);
-    private final AgentModelGateway gateway = new AgentModelGateway(registry, client, new ObjectMapper(),new org.example.seedancegenarate.config.AgentModelCallConfig(),plannerClient);
+    private final org.example.seedancegenarate.config.AgentModelCallConfig calls=new org.example.seedancegenarate.config.AgentModelCallConfig();
+    private final AgentModelGateway gateway = new AgentModelGateway(registry, client, new ObjectMapper(),calls,plannerClient);
     private String plan(AgentContext context,String policy,String request){return gateway.completeDecision(context,policy,request,new ObjectMapper().createObjectNode());}
 
     // 【测什么】文字格式修复实际请求携带当前step安全校验原因，不串到下一步。
@@ -188,6 +194,88 @@ class AgentModelGatewayTest {
         assertEquals(24576,config.outputTokens("AGENT_CREATIVE_PLAN",true,1500));
         assertEquals(24576,config.outputTokens("AGENT_SCRIPT",true,20000));
         assertEquals(Integer.MAX_VALUE,config.outputTokens("AGENT_PLAN",true,Integer.MAX_VALUE));
+    }
+
+    // 【测什么】视频首次12288/修复16384与420秒真正到达客户端，不受通用提示词/分镜配置影响。
+    // 【怎么算红】沿用旧场景额度、翻倍修复或通用超时，捕获的两次调用参数断言失败。
+    @Test void videoDefaultsAreIndependentAndOnlyTrustedRepairRaisesBudget() {
+        var selected=channel("own",true);
+        calls.setPromptTokens(24576);calls.setStoryboardTokens(24576);
+        when(registry.findRoutableStrict("own")).thenReturn(selected);
+        when(client.chat(any(),anyList(),any())).thenReturn(new LlmChatResponse("ok",1,1));
+        for(boolean repair:List.of(false,true)) {
+            gateway.complete(context("own").withOutputRepair(repair),"AGENT_VIDEO_PROMPT","policy","{\"outputRepair\":true}");
+            verify(client).chat(eq(selected.withTimeoutMs(420000).withMaxTokens(repair?16384:12288)),anyList(),
+                    eq(new LlmCallMeta("AGENT_VIDEO_PROMPT",null,7L,"turn",0)));
+        }
+        verifyNoInteractions(plannerClient);
+        assertEquals(2000,selected.maxTokens());assertEquals(3000,selected.timeoutMs());
+    }
+
+    // 【测什么】独立配置绑定且修复不低于首次，较高通道/NONE及两种token字段保持；其他场景原样。
+    // 【怎么算红】忽略独立配置、修复仍翻倍、降低通道或覆盖NONE/Planner/Recipe参数会红。
+    @ParameterizedTest @CsvSource({"11000,19000,2000,123456,MAX_TOKENS", "20000,13000,2000,1000,MAX_TOKENS",
+            "1024,24576,2000,600000,MAX_COMPLETION_TOKENS", "12288,16384,22000,420000,MAX_TOKENS",
+            "12288,16384,2147483647,420000,MAX_TOKENS", "11000,19000,1500,123456,NONE"})
+    void videoOverridesPreserveOtherCalls(int initial,int repair,int channelTokens,int timeout,LlmChannelSpec.TokenParam tokenParam) {
+        assertTrue(bindVideo(Map.of("video-prompt-tokens",initial,"video-prompt-repair-tokens",repair,"video-prompt-timeout-ms",timeout)));
+        var selected=new LlmChannelSpec("own","http://private","secret","model",null,channelTokens,tokenParam,3000,1,true,false,null);
+        when(registry.findRoutableStrict("own")).thenReturn(selected);
+        when(client.chat(any(),anyList(),any())).thenReturn(new LlmChatResponse("ok",1,1));
+        when(plannerClient.chat(any(),anyList(),any(),any())).thenReturn(new LlmChatResponse("ok",1,1));
+        for(boolean repairing:List.of(false,true)) {
+            clearInvocations(client,plannerClient);
+            gateway.complete(context("own").withOutputRepair(repairing),"AGENT_VIDEO_PROMPT","policy","{}");
+            int effective=tokenParam==LlmChannelSpec.TokenParam.NONE?channelTokens:Math.max(channelTokens,Math.max(initial,repairing?repair:initial));
+            verify(client).chat(eq(selected.withTimeoutMs(timeout).withMaxTokens(effective)),anyList(),any());
+            gateway.complete(context("own").withOutputRepair(repairing),"RECIPE_COMPILE","policy","{}");
+            verify(client).chat(eq(selected),anyList(),any());
+            for(var entry:Map.of("AGENT_PLAN",4096,"AGENT_CREATIVE_PLAN",8192,"AGENT_SCRIPT",8192,"AGENT_STORYBOARD",12288,"AGENT_PROMPT",4096).entrySet()) {
+                int prior=Math.max(channelTokens,entry.getValue());
+                int expected=tokenParam==LlmChannelSpec.TokenParam.NONE?channelTokens:(int)(repairing?Math.max(prior,Math.min(24576L,prior*2L)):prior);
+                if(entry.getKey().equals("AGENT_PLAN")) {
+                    plan(context("own").withOutputRepair(repairing),"policy","{}");
+                    verify(plannerClient).chat(eq(selected.withTimeoutMs(300000).withMaxTokens(expected)),anyList(),any(),any());
+                } else {
+                    clearInvocations(client);
+                    gateway.complete(context("own").withOutputRepair(repairing),entry.getKey(),"policy","{}");
+                    verify(client).chat(eq(selected.withTimeoutMs(300000).withMaxTokens(expected)),anyList(),any());
+                }
+            }
+        }
+    }
+
+    // 【测什么】三个配置项拒绝负数/零/越界并接受精确上下界，使用实际Spring属性绑定。
+    // 【怎么算红】删除任一setter校验或修改边界，非法值不再抛BindException或边界无法绑定。
+    @ParameterizedTest @CsvSource({"video-prompt-tokens,1024,24576", "video-prompt-repair-tokens,1024,24576", "video-prompt-timeout-ms,1000,600000"})
+    void videoConfigurationBounds(String property,int minimum,int maximum) {
+        for(int invalid:new int[]{-1,0,minimum-1,maximum+1,Integer.MAX_VALUE})
+            assertThrows(org.springframework.boot.context.properties.bind.BindException.class,()->bindVideo(Map.of(property,invalid)));
+        assertTrue(bindVideo(Map.of(property,minimum)));
+        assertTrue(bindVideo(Map.of(property,maximum)));
+    }
+
+    // 【测什么】视频自定义超时真正进入HTTP请求；假HTTP超时只发送一次、仍抛原MODEL_TIMEOUT。
+    // 【怎么算红】Gateway忽略视频超时、客户端忽略spec超时或自动重发时，请求时限/发送次数断言红。
+    @Test void videoTimeoutReachesHttpRequestAndDoesNotRetryFailure() throws Exception {
+        bindVideo(Map.of("video-prompt-timeout-ms",543210));
+        var http=mock(java.net.http.HttpClient.class);
+        when(http.send(any(),any(java.net.http.HttpResponse.BodyHandler.class))).thenThrow(new java.net.http.HttpTimeoutException("fake timeout"));
+        var constructor=LlmChatClient.class.getDeclaredConstructor(ObjectMapper.class,java.net.http.HttpClient.class);
+        constructor.setAccessible(true);
+        var realGateway=new AgentModelGateway(registry,constructor.newInstance(new ObjectMapper(),http),new ObjectMapper(),calls,plannerClient);
+        when(registry.findRoutableStrict("own")).thenReturn(channel("own",true));
+        var failure=assertThrows(LlmChannelException.class,()->realGateway.complete(context("own").withOutputRepair(true),"AGENT_VIDEO_PROMPT","policy","{}"));
+        assertEquals("MODEL_TIMEOUT",failure.code());
+        var request=ArgumentCaptor.forClass(java.net.http.HttpRequest.class);
+        verify(http).send(request.capture(),any(java.net.http.HttpResponse.BodyHandler.class));
+        assertEquals(java.time.Duration.ofMillis(543210),request.getValue().timeout().orElseThrow());
+    }
+
+    private boolean bindVideo(Map<String,Integer> values) {
+        var source=new MapConfigurationPropertySource();
+        values.forEach((key,value)->source.put("agent.model-call."+key,value));
+        return new Binder(source).bind("agent.model-call",Bindable.ofInstance(calls)).isBound();
     }
 
     private static AgentContext context(String channel) {

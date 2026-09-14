@@ -137,8 +137,9 @@ public final class AgentBatchStore {
         if(t==null||!t.id().equals(s.activeTurnId()))return true;
         var w=store.workspace(s);
         if(!w.hasNonNull("executionPlanId")||!w.hasNonNull("currentStepId"))return true;
-        var grants=db.query("SELECT b.id FROM agent_generation_batch b JOIN agent_plan_step p ON p.id=b.plan_step_id WHERE b.session_id=? AND b.plan_id=? AND p.step_key=? AND b.status IN ('CANCELLED','REJECTED','EXPIRED','STALE','PARTIAL_FAILED') ORDER BY b.created_at DESC,b.id DESC LIMIT 1",(r,n)->r.getString(1),s.id(),w.path("executionPlanId").asText(),w.path("currentStepId").asText());
+        var grants=db.query("SELECT b.id FROM agent_generation_batch b JOIN agent_plan_step p ON p.id=b.plan_step_id JOIN agent_turn t ON t.id=b.turn_id WHERE b.session_id=? AND b.plan_id=? AND p.step_key=? ORDER BY t.turn_seq DESC,b.epoch DESC,b.step_no DESC,b.id DESC LIMIT 1",(r,n)->r.getString(1),s.id(),w.path("executionPlanId").asText(),w.path("currentStepId").asText());
         if(grants.isEmpty())return true;
+        if(!Set.of("CANCELLED","REJECTED","EXPIRED","STALE","PARTIAL_FAILED").contains(get(grants.get(0)).status()))return true;
         String grant=grants.get(0);settleUnsubmitted(grant);
         boolean waiting=db.queryForObject("SELECT COUNT(*) FROM agent_approval WHERE grant_id=? AND status IN ('SUBMITTING','ACCEPTED')",Integer.class,grant)>0;
         String reason=waiting?"这组生成已停止追加任务，已提交的任务仍在核实或生成。请等待它们完成，再到分镜作品卡选择逐幕生成视频或参考图，重新准备未完成幕并确认新费用。":"这组生成已取消、过期或未全部完成，已有作品已保留。请到分镜作品卡选择逐幕生成视频或参考图，重新准备未完成幕，审阅新报价并确认费用；普通继续不会重新购买。";
@@ -176,6 +177,8 @@ public final class AgentBatchStore {
             Batch b=get(p.path("grantId").asText());
             if(b==null||!s.id().equals(b.session())){p.removeAll();p.put("type","text").put("text","批次不可用");continue;}
             p.put("batchId",b.id()).put("grantId",b.id()).put("version",b.version()).put("status",b.status()).put("bindingHash",b.binding()).put("quoteSetHash",b.quotes()).put("expiresAt",b.expires().toString());
+            boolean requote=store.batchRequotes().eligible(store,s,b);
+            p.put("canRequote",requote).put("requoteReason",requote?"可申请重新核价；规格与提示词绑定复验通过后，仍需确认新费用。":"如需继续，请到分镜作品卡重新准备并确认新费用。");
             db.query("SELECT total_amount,currency,output_type,parallel_limit FROM agent_generation_batch WHERE id=?",r->{p.put("maxTotalAmount",r.getBigDecimal(1).toPlainString()).put("currency",r.getString(2)).put("outputType",r.getString(3)).put("parallelLimit",r.getInt(4));},b.id());
             var items=p.putArray("items");int[] counts=new int[4];
             db.query("SELECT i.id,i.source_ref,a.quote_json,a.status,a.task_id FROM agent_batch_item i JOIN agent_approval a ON a.id=i.approval_id WHERE i.batch_id=? ORDER BY i.ordinal_no",r->{

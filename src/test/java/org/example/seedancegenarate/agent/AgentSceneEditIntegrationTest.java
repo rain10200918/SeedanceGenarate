@@ -33,6 +33,19 @@ class AgentSceneEditIntegrationTest extends AgentSceneIntegrationTest {
     AgentSceneEditApplication edits(){return new AgentSceneEditApplication(store,approvals,tx,jobs);}
     void revise(String artifact,int version,String scene,String key){edits().apply(1,conversation,new AgentSceneEditApplication.Command(key,workspace().path("version").asLong(),new AgentContext.ArtifactRef(artifact,version,scene),"改成实验室"));}
     void editRuns(){for(int i=0;i<6&&!"COMPLETED".equals(workspace().path("sceneEdit").path("status").asText());i++)run();assertEquals("COMPLETED",workspace().path("sceneEdit").path("status").asText());}
+    // 【测什么】正式局部修复即使完整内容相同也保留v+1推进，不能因普通编辑去重卡在EDITING循环。
+    // 【怎么算红】Store去重去掉sceneEdit/plan边界后会无V2或无法结束编辑。
+    @Test void identicalExplicitSceneEditStillCompletesVersionedWorkflow() throws Exception {
+        var b=board(4);start(b);
+        doAnswer(a->{
+            AgentContext c=a.getArgument(0);var ref=c.selection();
+            var old=store.artifactVersion(store.owned(conversation,1,false),ref.artifactId(),ref.version());
+            return new SkillResult("STORYBOARD",old.title(),old.content(),old.id(),old.data(),ref);
+        }).when(editor).execute(any(),any());
+        revise(b.id(),1,"s3","same-edit");editRuns();
+        assertEquals(2,store.artifactVersion(store.owned(conversation,1,false),b.id(),2).version());
+        verify(editor,times(1)).execute(any(),any());verify(gateway,never()).submit(anyLong(),any(),anyString());
+    }
     // 【测什么】已完成四幕后只改第三幕，其他V1成功作品保持引用，第三幕V2成功即可确定性交付新计划。
     // 【怎么算红】completion强制所有scene source版本等于最新分镜，保留的三幕V1会错误暂停最终计划。
     @org.junit.jupiter.params.ParameterizedTest @org.junit.jupiter.params.provider.ValueSource(booleans={false,true})

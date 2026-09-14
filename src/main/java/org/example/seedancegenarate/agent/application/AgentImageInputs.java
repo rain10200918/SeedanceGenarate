@@ -38,6 +38,25 @@ public class AgentImageInputs {
         }
         return List.copyOf(result);
     }
+    /** History display only: unavailable IDs are omitted, submission's four-image validation is unchanged. */
+    public Map<String,ImageRef> project(long user,Collection<String> ids) {
+        var values=new LinkedHashSet<Long>();
+        for(String id:ids) {
+            try {if(id!=null && id.matches("[1-9][0-9]{0,18}"))values.add(Long.parseLong(id));}
+            catch(NumberFormatException ignored) { /* malformed historical reference remains unavailable */ }
+        }
+        var ordered=new ArrayList<>(values);var result=new HashMap<String,ImageRef>();
+        for(int offset=0;offset<ordered.size();offset+=100) {
+            var batch=ordered.subList(offset,Math.min(offset+100,ordered.size()));
+            for(var asset:mapper.selectList(com.baomidou.mybatisplus.core.toolkit.Wrappers.<UserAsset>lambdaQuery()
+                    .eq(UserAsset::getUserId,user).in(UserAsset::getId,batch))) {
+                if(asset==null || !values.contains(asset.getId()))continue;
+                try {var ref=checked(user,asset);result.put(ref.assetId(),ref);}
+                catch(BusinessException ignored) { /* retain the unavailable placeholder, never the old URL */ }
+            }
+        }
+        return result;
+    }
     private ImageRef checked(long user,UserAsset a) {
         if(a==null || a.getId()==null || a.getId()<1 || !Objects.equals(a.getUserId(),user)
                 || !"ACTIVE".equals(a.getStatus()) || !"IMAGE".equals(a.getType()))throw BusinessException.forbidden("图片不存在或无权使用");

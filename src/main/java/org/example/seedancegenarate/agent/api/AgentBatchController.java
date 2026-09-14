@@ -15,6 +15,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 @RestController @RequiredArgsConstructor @RequestMapping("/api/agent/conversations")
 public class AgentBatchController {
     private final AgentBatchApplication batches;private final AgentApplication app;private final TokenBucketRateLimitService rate;
+    private final AgentBatchRequoteApplication requotes;
     private static final RateLimitConfig.Bucket COMMANDS=new RateLimitConfig.Bucket(true,20,10,60L);
     @PostMapping("/{id}/approval-grants/{grantId}")
     public Result<AgentViews.Snapshot> answer(@PathVariable long id,@PathVariable String grantId,@RequestBody AgentBatchApplication.Answer answer) {
@@ -22,6 +23,13 @@ public class AgentBatchController {
         if(id<1)throw BusinessException.badRequest("会话编号无效");
         if(!rate.tryAcquireDistributed("agent:command:"+user,COMMANDS).allowed())throw new BusinessException(429,"操作太频繁，请稍后再试");
         batches.answer(user,id,grantId,answer);return Result.success(app.snapshot(user,id));
+    }
+    @PostMapping("/{id}/approval-grants/{grantId}/requote")
+    public Result<AgentViews.Snapshot> requote(@PathVariable long id,@PathVariable String grantId,@RequestBody AgentBatchRequoteApplication.Command command) {
+        Long user=UserContext.getUserId();if(user==null)throw BusinessException.unauthorized("请先登录");
+        if(id<1)throw BusinessException.badRequest("会话编号无效");
+        if(!rate.tryAcquireDistributed("agent:command:"+user,COMMANDS).allowed())throw new BusinessException(429,"操作太频繁，请稍后再试");
+        requotes.requote(user,id,grantId,command);return Result.success(app.snapshot(user,id));
     }
     @ExceptionHandler(BusinessException.class) public ResponseEntity<Result<?>> rejected(BusinessException e) {
         int code=java.util.Set.of(400,401,403,404,409,429).contains(e.getCode())?e.getCode():500;
