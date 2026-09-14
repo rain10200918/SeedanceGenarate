@@ -20,6 +20,11 @@ agent:
     script-tokens: ${AGENT_SCRIPT_OUTPUT_TOKENS:8192}
     storyboard-tokens: ${AGENT_STORYBOARD_OUTPUT_TOKENS:12288}
     prompt-tokens: ${AGENT_PROMPT_OUTPUT_TOKENS:4096}
+    # 审批前逐幕视频提示词独立token预算；新v4按内容分配字符额度，单幕4000/全批16000硬上限不变。
+    # 部署前确认实际模型服务支持修复额度；不支持16384时可调回12288，仍只修复一次。
+    video-prompt-tokens: ${AGENT_VIDEO_PROMPT_OUTPUT_TOKENS:12288}
+    video-prompt-repair-tokens: ${AGENT_VIDEO_PROMPT_REPAIR_TOKENS:16384}
+    video-prompt-timeout-ms: ${AGENT_VIDEO_PROMPT_TIMEOUT_MS:420000}
 
 spring:
   datasource:
@@ -70,8 +75,8 @@ spring:
     test-connection: false
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 200MB
+      max-file-size: 200MB
+      max-request-size: 210MB
   application:
     name: SeedanceGenarate
   # 定时任务线程池只承载低频扫描、对账、清理和 webhook 等后台维护任务；
