@@ -65,6 +65,7 @@ public class ApiKeyRateLimitInterceptor implements HandlerInterceptor {
         if (result.allowed()) {
             return true;
         }
+        if (response.isCommitted()) return false;
         response.setStatus(429);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");

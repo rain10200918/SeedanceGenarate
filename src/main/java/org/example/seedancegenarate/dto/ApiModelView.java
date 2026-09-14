@@ -17,6 +17,18 @@ public record ApiModelView(
         List<String> ratios,
         List<Integer> durations,
         List<Double> megapixels,
-        boolean open
+        boolean open,
+        int videoMax,
+        int audioMax,
+        boolean needImageOrVideo,
+        String imageInputMode
 ) {
+    /** 保留原 Java 调用方；未声明的图片角色与 ModelSpec 兼容构造器一致。 */
+    public ApiModelView(String model, String label, String provider, String outputType,
+                        boolean needImages, int imageMin, int imageMax, List<String> ratios,
+                        List<Integer> durations, List<Double> megapixels, boolean open) {
+        this(model, label, provider, outputType, needImages, imageMin, imageMax,
+                ratios, durations, megapixels, open, 0, 0, false,
+                imageMax == 0 ? "NONE" : "UNSPECIFIED");
+    }
 }

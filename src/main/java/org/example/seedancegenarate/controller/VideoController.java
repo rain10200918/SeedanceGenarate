@@ -470,6 +470,11 @@ public class VideoController {
         }
         // 只读库：远端轮询已由后台推进器（VideoTaskPoller）统一负责并落库，实时变化经 SSE
         // （GET /api/video/stream）推送给前端。此处不再触发远端轮询，避免每次客户端查询都打远端。
+        var caller = videoTaskService.getCaller(task.getId());
+        if (caller != null) {
+            task.setCallerName(caller.callerName());
+            task.setApiKeyName(caller.apiKeyName());
+        }
         artifactExpiryPolicy.stamp(task);
         if (!UserContext.isAdmin()) contentModerationPolicy.redact(task);
         return Result.success(task);

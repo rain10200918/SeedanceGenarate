@@ -16,11 +16,17 @@ import java.math.BigDecimal;
 public class FailureWalletReleaseService {
     private final WalletService walletService;
     private final PricingService pricingService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.BillingAuthorizationService billingAuthorization;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void release(VideoTask task) {
         BigDecimal releaseAmount = task.getFreezeAmount() != null ? task.getFreezeAmount()
                 : pricingService.price(task).amount();
-        walletService.release(task.getUserId(), releaseAmount, task.getId());
+        if (task.getApiKeyId() == null) {
+            walletService.release(task.getUserId(), releaseAmount, task.getId());
+        } else {
+            billingAuthorization.release(task, releaseAmount);
+        }
     }
 }

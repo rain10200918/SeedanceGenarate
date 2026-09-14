@@ -42,6 +42,12 @@ public interface ApiKeyService {
     /** 撤销；不存在或不属于该账号返回 false */
     boolean revokeOwned(Long id, Long userId);
 
+    /** null/blank clears callback; false means no enabled key owned by this user. */
+    boolean updateCallbackOwned(Long id, Long userId, String callbackUrl);
+
+    /** Returns the new secret once; missing, disabled or foreign key throws 404. */
+    String rotateWebhookSecretOwned(Long id, Long userId);
+
     /** 分配份额：归属写进 WHERE，不属于该账号时更新 0 行。null = 清空（共用账号总量） */
     boolean setShareOwned(Long id, Long userId, Integer maxConcurrency);
 

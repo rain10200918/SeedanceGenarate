@@ -1,5 +1,9 @@
 # 对外 API 服务 — 业务设计与架构
 
+2026-09-12 P1：保留/videos任务路由，查询和列表改公开白名单DTO并覆盖AUDIO；v1专用HTTP错误解析不改变UI Result；新请求V57 request_fingerprint指纹挡同键改参，外部幂等键统一64字符，旧无指纹记录只保留恢复、不造回填。自助Webhook新增一次性secret返回、轮换和callback更新清除，HTTPS公网校验、固定已验DNS地址、不跟重定向。限流实际按账号共享（个人默认容量10/每60秒补5），不是按钥匙独立桶。部署先应用V57，真实外部联调另验；字段契约见API文档。
+
+2026-09-12 P0 调整：模型清单公开视频/音频上限与图片输入模式；新请求按 ModelSpec 在下载、落库与冻结前校验参数，报价/提交共用时长解析。API 素材最多 16 项，URL 最长 4096 字符，单件 30MiB、累计 100MiB，请求体 64KiB。转存使用独立 `api-references/` 对象，失败只补偿确切本次上传；已受理或无法排除受理时保留，进程中断/删除失败可能留下孤儿对象。字段契约见 `src/main/resources/api-docs.md`。
+
 > 面向「把生成能力对外售卖/提供服务」的设计文档。**v1 已于 2026-08-05 实现**(后端 31 单测 + 前端 type-check 全绿),实现偏差见 §16。
 > 关联:架构总览见 `ARCHITECTURE.md`;本文沿用其所有不变量(单一 `video_task` 生命周期、注册表为模型唯一真相、单一事实源、密钥仅后端持有)。
 
@@ -24,7 +28,7 @@
    │  Bearer sk-xxx
    ▼
 ┌─ 接入层(新增) ───────────────────────────────────┐
-│  /api/v1/**  ApiKeyInterceptor(鉴权 + 按 key 限流) │
+│  /api/v1/**  ApiKeyInterceptor(鉴权 + 按账号限流) │
 │  ApiVideoController(提交/查询/列表/下载)            │
 └──────────────────────────────────────────────────┘
    │ 注入 UserContext(属主用户)→ 下游零感知
@@ -49,12 +53,12 @@
 **提交平面(同步,<1s 返回)**:
 
 ```
-POST /api/v1/videos  {prompt, model, images?[url], duration?, ratio?, megapixels?}
+POST /api/v1/videos  {prompt, model, images?[url], videos?[url], audios?[url], duration?, ratio?, megapixels?}
   → 鉴权(key 哈希比对)→ 限流(按 key 令牌桶,429 带 Retry-After)
   → 校验:参数 / 模型存在 / 模型开放(复用 ModelAccessService)
   → 幂等检查:Idempotency-Key 已存在?→ 返回原 task_id(不重复扣费)
   → 落 video_task(PROCESSING, 带 api_key_id 判别列)
-  → engine.submit(图片 URL → 下载 → OSS → 复用现有链路)
+  → engine.submit(图片/视频/音频 URL → 下载 → OSS → 复用现有链路)
   → 202 {taskId, status:"PROCESSING", requestId}   ← 响应体是驼峰;request_id 是库表列名,别混
 ```
 
@@ -113,8 +117,8 @@ VideoTaskPoller(现有)→ updateStatus 幂等落库
 |---|---|
 | 单价 | 复用 `PricingService`(Seedance 秒价×时长、ComfyUI 一口价),API 与 UI 同价 |
 | 记账 | 复用 `CostRecordService`,记到属主账上;`api_call_log.cost_amount` 冗余一份对账 |
-| 限流 | 按 key 令牌桶(单实例内存,多实例换 Redis);429 带 `Retry-After` |
-| 配额(v2) | 按 key 月度额度,`SUM(cost_amount)` 超限拒绝 |
+| 限流 | 按属主账号桶（`api-key-owner:{userId}`），开启Redis限流实现多实例共享；429带`Retry-After`，与Key消费预算分离 |
+| 消费预算 | 按Key上海自然月预占/结算/释放，和账号钱包同MySQL事务；不使用事后SUM作为并发授权，见 [预算实现与上线说明](docs/api-key-budget.md) |
 | 模型开关 | 复用 `model_access`——关掉的模型 API 也调不了(403 MODEL_NOT_OPEN) |
 
 ## 8. 数据模型(3 新表 + 1 扩展)
@@ -201,7 +205,7 @@ CREATE TABLE IF NOT EXISTS webhook_delivery (
 | `ApiKeyService` | 门面 | `ModelAccessService` | 存储可换(MyBatis → Redis 缓存) |
 | `WebhookDispatcher` | 发布-订阅 | `TaskStreamManager` | `TaskStatusChangedEvent` 的第二个监听器;内部 `WebhookNotifier` 策略 |
 | API 错误 | 异常→映射 | `GlobalExceptionHandler` | `ApiException(code, httpStatus)` + handler |
-| 按 key 限流 | 拦截器链 + 复用令牌桶 | `RateLimitInterceptor` | 同桶实现,维度换成 key |
+| 按账号限流 | 拦截器链 + 复用令牌桶 | `ApiKeyRateLimitInterceptor` | API Key归属账号共享桶 |
 | DTO | record | `VideoOptionsResponse` | 风格一致 |
 
 **刻意不用的模式**:命令模式(门面已够)、抽象工厂(SecureRandom 工具即可)、装饰器(两阶段日志显式调用更可读)、独立任务子系统(沿用单 `video_task` + 判别列)。
@@ -235,7 +239,7 @@ CREATE TABLE IF NOT EXISTS webhook_delivery (
 4. `ApiKeyInterceptor` + `ApiException` + 错误映射;
 5. `ApiVideoController` + `ApiVideoService`(幂等 → 日志 → 提交);
 6. `WebhookDispatcher`(签名 + 重试 + 幂等);
-7. 按 key 限流;文档(OpenAPI 风格请求/响应示例)。
+7. 按账号共享限流;文档(OpenAPI 风格请求/响应示例)。
 
 ## 14. 演进路线
 
@@ -253,7 +257,7 @@ CREATE TABLE IF NOT EXISTS webhook_delivery (
 
 ## 16. 实现状态与偏差(2026-08-05, v1 落地)
 
-**已实现**:`VideoSubmitService`(UI/API 共享提交编排,含计费)、三表 + `video_task.api_key_id`、`ApiKeyService`(SecureRandom 生成、SHA-256 哈希、明文只返回一次)、`ApiKeyInterceptor`(Bearer 解析 → 属主用户注入 UserContext)、`ApiException` + advice(统一 error 结构 + Retry-After)、`ApiVideoController`(POST 202 / GET 状态 / GET 列表 / GET content)、`ApiModelController`(**GET /api/v1/models** 模型清单,开关过滤同 /options)、`ApiVideoService`(幂等 + 两阶段日志 + 图片 URL 转存 OSS)、`ApiCallLogUpdater`(终态收尾)、`WebhookDispatcher`(HMAC 签名 + (task_id,status) 幂等 + 30s/2m/10m 退避 3 次)、`ApiKeyRateLimitInterceptor`(`rate-limit.api-key`)、管理端 `/admin/api-keys` 页(创建/撤销/列表,敏感字段裁剪,属主显示用户名)。
+**已实现**:`VideoSubmitService`(UI/API 共享提交编排,含计费)、三表 + `video_task.api_key_id`、`ApiKeyService`(SecureRandom 生成、SHA-256 哈希、明文只返回一次)、`ApiKeyInterceptor`(Bearer 解析 → 属主用户注入 UserContext)、`ApiException` + advice(统一 error 结构 + Retry-After)、`ApiVideoController`(POST 202 / GET 状态 / GET 列表 / GET content)、`ApiModelController`(**GET /api/v1/models** 模型清单,开关过滤同 /options)、`ApiVideoService`(幂等 + 两阶段日志 + 图片 URL 转存 OSS)、`ApiCallLogUpdater`(终态收尾)、`WebhookDispatcher`(HMAC 签名 + (task_id,status) 幂等；含首发最多3次，重试间隔30s/2m)、`ApiKeyRateLimitInterceptor`(`rate-limit.api-key`)、管理端 `/admin/api-keys` 页(创建/撤销/列表,敏感字段裁剪,属主显示用户名)。
 
 **与设计的偏差**:
 1. **计费触发点**:原设计保留 `GenerateCostAspect`(AOP);实现时删除切面,把 `recordOnSubmit` 收进 `VideoSubmitService.submit` —— 共享提交路径天然覆盖 UI 与 API 两条入口,不再依赖 pointcut 枚举。

@@ -43,6 +43,6 @@ public class StoredImageReferences {
         try {
             if(!storage.exists(reference.objectKey()))throw BusinessException.badRequest("参考图片已失效");
         } catch(BusinessException e) {throw e;}
-        catch(Exception e) {throw BusinessException.badRequest("暂时无法验证参考图片，请稍后重新准备");}
+        catch(Exception e) {throw new BusinessException(503,"暂时无法验证参考图片，请稍后重试原请求");}
     }
 }

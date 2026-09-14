@@ -9,6 +9,8 @@ import org.example.seedancegenarate.dto.ApiKeyQuotaView;
 import org.example.seedancegenarate.dto.ApiKeyShareRequest;
 import org.example.seedancegenarate.dto.CreateApiKeyResponse;
 import org.example.seedancegenarate.dto.SelfApiKeyRequest;
+import org.example.seedancegenarate.dto.UpdateApiKeyCallbackRequest;
+import org.example.seedancegenarate.dto.RotateWebhookSecretResponse;
 import org.example.seedancegenarate.entity.Result;
 import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.service.ApiKeyService;
@@ -85,7 +87,22 @@ public class ApiKeyController {
         log.info("用户自助创建 API Key: userId={}, keyId={}, prefix={}",
                 userId, created.record().getId(), created.record().getKeyPrefix());
         return Result.success(new CreateApiKeyResponse(
-                ApiKeyView.of(created.record(), null), created.plainKey()));
+                ApiKeyView.of(created.record(), null), created.plainKey(), created.record().getWebhookSecret()));
+    }
+
+    @PatchMapping("/{id}/callback")
+    public Result<Void> updateCallback(@PathVariable Long id,
+                                      @RequestBody UpdateApiKeyCallbackRequest request) {
+        Long owner = UserContext.requireUserId();
+        if (request == null) throw BusinessException.badRequest("请提供回调配置");
+        if (!apiKeyService.updateCallbackOwned(id, owner, request.callbackUrl())) throw notFound();
+        return Result.success(null);
+    }
+
+    @PostMapping("/{id}/webhook-secret/rotate")
+    public Result<RotateWebhookSecretResponse> rotateWebhookSecret(@PathVariable Long id) {
+        return Result.success(new RotateWebhookSecretResponse(
+                apiKeyService.rotateWebhookSecretOwned(id, UserContext.requireUserId())));
     }
 
     /** 改备注 */

@@ -4,10 +4,19 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.example.seedancegenarate.entity.ApiKey;
+import org.example.seedancegenarate.entity.WebhookDelivery;
+import org.example.seedancegenarate.exception.BusinessException;
 import org.example.seedancegenarate.exception.ApiException;
 import org.example.seedancegenarate.mapper.ApiKeyMapper;
+import org.example.seedancegenarate.mapper.WebhookDeliveryMapper;
+import org.example.seedancegenarate.service.WebhookCallbackClient;
 import org.example.seedancegenarate.service.ApiKeyService;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -23,14 +32,21 @@ public class ApiKeyServiceImpl extends ServiceImpl<ApiKeyMapper, ApiKey> impleme
 
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    @Autowired private WebhookCallbackClient webhookCallbackClient;
+    @Autowired private WebhookDeliveryMapper webhookDeliveryMapper;
+    @Autowired private PlatformTransactionManager transactionManager;
+
     @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CreatedApiKey create(Long userId, String name, String callbackUrl) {
         return createOwned(userId, name, callbackUrl, null, null);
     }
 
     @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CreatedApiKey createOwned(Long userId, String name, String callbackUrl,
                                      Long createdBy, String createdIp) {
+        var target = webhookCallbackClient.validate(callbackUrl);
         String plainKey = "sk-" + randomHex(32);
         ApiKey key = new ApiKey();
         key.setUserId(userId);
@@ -38,7 +54,7 @@ public class ApiKeyServiceImpl extends ServiceImpl<ApiKeyMapper, ApiKey> impleme
         key.setKeyPrefix(plainKey.substring(0, 10)); // sk- + 前 8 位
         key.setKeyHash(sha256Hex(plainKey));
         key.setStatus("ENABLED");
-        key.setCallbackUrl(StringUtils.hasText(callbackUrl) ? callbackUrl.trim() : null);
+        key.setCallbackUrl(target == null ? null : target.url());
         key.setWebhookSecret(randomHex(16));
         key.setCreatedBy(createdBy);
         key.setCreatedIp(createdIp);
@@ -79,13 +95,51 @@ public class ApiKeyServiceImpl extends ServiceImpl<ApiKeyMapper, ApiKey> impleme
     }
 
     @Override
+    @Transactional
     public boolean revokeOwned(Long id, Long userId) {
         // 同上。刻意不加 eq(status,'ENABLED')：DELETE 语义上应当幂等，
         // 重复删除（并发双击、客户端重试）不该报错。
-        return update(Wrappers.<ApiKey>lambdaUpdate()
+        boolean changed = update(Wrappers.<ApiKey>lambdaUpdate()
                 .eq(ApiKey::getId, id)
                 .eq(ApiKey::getUserId, userId)
                 .set(ApiKey::getStatus, "DISABLED"));
+        if (changed) stopCallbacks(id);
+        return changed;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public boolean updateCallbackOwned(Long id, Long userId, String callbackUrl) {
+        // Check ownership before DNS, then enforce it again in the write itself.
+        if (getOne(Wrappers.<ApiKey>lambdaQuery().eq(ApiKey::getId, id)
+                .eq(ApiKey::getUserId, userId).eq(ApiKey::getStatus, "ENABLED"), false) == null)
+            return false;
+        var target = webhookCallbackClient.validate(callbackUrl);
+        return Boolean.TRUE.equals(new TransactionTemplate(transactionManager).execute(tx -> {
+            boolean changed = update(Wrappers.<ApiKey>lambdaUpdate()
+                    .eq(ApiKey::getId, id).eq(ApiKey::getUserId, userId)
+                    .eq(ApiKey::getStatus, "ENABLED")
+                    .set(ApiKey::getCallbackUrl, target == null ? null : target.url()));
+            if (changed && target == null) stopCallbacks(id);
+            return changed;
+        }));
+    }
+
+    @Override
+    public String rotateWebhookSecretOwned(Long id, Long userId) {
+        String secret = randomHex(16);
+        if (!update(Wrappers.<ApiKey>lambdaUpdate().eq(ApiKey::getId, id)
+                .eq(ApiKey::getUserId, userId).eq(ApiKey::getStatus, "ENABLED")
+                .set(ApiKey::getWebhookSecret, secret)))
+            throw BusinessException.notFound("API Key 不存在");
+        return secret;
+    }
+
+    private void stopCallbacks(Long id) {
+        webhookDeliveryMapper.update(null, Wrappers.<WebhookDelivery>lambdaUpdate()
+                .eq(WebhookDelivery::getApiKeyId, id).eq(WebhookDelivery::getDelivered, false)
+                .lt(WebhookDelivery::getAttempts, 3)
+                .set(WebhookDelivery::getAttempts, 3).set(WebhookDelivery::getNextRetryAt, null));
     }
 
     @Override
@@ -127,14 +181,16 @@ public class ApiKeyServiceImpl extends ServiceImpl<ApiKeyMapper, ApiKey> impleme
     }
 
     @Override
+    @Transactional
     public void revoke(Long id) {
         ApiKey key = getById(id);
         if (key == null) {
             // 管理端入口：沿用 Result 错误契约（不走 /api/v1 的 ApiException）
             throw new RuntimeException("API Key 不存在");
         }
-        key.setStatus("DISABLED");
-        updateById(key);
+        update(Wrappers.<ApiKey>lambdaUpdate().eq(ApiKey::getId, id)
+                .set(ApiKey::getStatus, "DISABLED"));
+        stopCallbacks(id);
     }
 
     @Override

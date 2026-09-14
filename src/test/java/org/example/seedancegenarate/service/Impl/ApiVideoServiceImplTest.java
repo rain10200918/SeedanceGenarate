@@ -10,7 +10,7 @@ import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.exception.ApiException;
 import org.example.seedancegenarate.mapper.ApiCallLogMapper;
 import org.example.seedancegenarate.service.ApiVideoService;
-import org.example.seedancegenarate.service.OssService;
+import org.example.seedancegenarate.service.ApiReferenceStorage;
 import org.example.seedancegenarate.service.VideoSubmitService;
 import org.example.seedancegenarate.service.VideoTaskService;
 import org.example.seedancegenarate.util.IpUtils;
@@ -41,7 +41,7 @@ class ApiVideoServiceImplTest {
     @Mock
     private VideoEngineRegistry videoEngineRegistry;
     @Mock
-    private OssService ossService;
+    private ApiReferenceStorage referenceStorage;
     @Mock
     private VideoTaskService videoTaskService;
     @Mock
@@ -52,7 +52,7 @@ class ApiVideoServiceImplTest {
     @BeforeEach
     void setUp() {
         apiVideoService = new ApiVideoServiceImpl(
-                apiCallLogMapper, videoSubmitService, videoEngineRegistry, ossService, videoTaskService);
+                apiCallLogMapper, videoSubmitService, videoEngineRegistry, referenceStorage, videoTaskService);
     }
 
     @Test
@@ -87,6 +87,39 @@ class ApiVideoServiceImplTest {
         assertEquals("VALIDATION_ERROR", ex.getCode());
         assertEquals(HttpStatus.BAD_REQUEST, ex.getHttpStatus());
         assertTrue(ex.getMessage().contains("禁止使用内网或本地参考图地址") || ex.getMessage().contains("参考图"));
+    }
+
+    @Test
+    @DisplayName("API 创建生成任务: 参考视频和音频地址同样拦截 SSRF")
+    void testSsrfProtectionRejectsLocalVideoAndAudioUrls() {
+        when(videoEngineRegistry.all()).thenReturn(List.of(videoEngine));
+        ModelSpec spec = new ModelSpec("test-provider", "test-model", "测试模型", false, 0, 1,
+                List.of("16:9"), 5, 10, List.of(5), OutputType.VIDEO, List.of(), 1, 1, false);
+        when(videoEngine.models()).thenReturn(List.of(spec));
+        when(videoEngine.provider()).thenReturn("test-provider");
+
+        ApiKey key = new ApiKey();
+        key.setId(1L);
+        key.setUserId(100L);
+
+        for (List<String> videos : List.of(
+                List.of("http://127.0.0.1:8080/secret.mp4"),
+                List.<String>of())) {
+            ApiVideoService.CreateContext context = new ApiVideoService.CreateContext(
+                    key, "req_media_" + videos.size(), "127.0.0.1", "TestAgent",
+                    "test prompt", "test-model", List.of(), videos,
+                    videos.isEmpty() ? List.of("http://127.0.0.1:8080/secret.mp3") : List.<String>of(),
+                    5, "16:9", null);
+            if (videos.isEmpty()) {
+                ApiException ex = assertThrows(ApiException.class, () -> apiVideoService.create(context));
+                assertEquals("VALIDATION_ERROR", ex.getCode());
+                assertTrue(ex.getMessage().contains("参考音频"));
+            } else {
+                ApiException ex = assertThrows(ApiException.class, () -> apiVideoService.create(context));
+                assertEquals("VALIDATION_ERROR", ex.getCode());
+                assertTrue(ex.getMessage().contains("参考视频"));
+            }
+        }
     }
 
     @Test

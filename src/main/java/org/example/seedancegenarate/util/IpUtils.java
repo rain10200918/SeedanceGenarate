@@ -119,6 +119,8 @@ public class IpUtils {
             return true;
         }
         return address.isAnyLocalAddress()
+                // IPv6 ULA fc00::/7 不属于 Java isSiteLocalAddress() 的 fec0::/10。
+                || (address.getAddress().length == 16 && (address.getAddress()[0] & 0xfe) == 0xfc)
                 || address.isLoopbackAddress()
                 || address.isSiteLocalAddress()
                 || address.isLinkLocalAddress()

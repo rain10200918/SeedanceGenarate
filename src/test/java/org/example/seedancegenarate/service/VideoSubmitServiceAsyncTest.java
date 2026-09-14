@@ -64,6 +64,13 @@ class VideoSubmitServiceAsyncTest {
         when(engineRegistry.get("seedance")).thenReturn(engine);
         when(engine.effectiveModel(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
         when(engine.outputType(anyString())).thenReturn(OutputType.VIDEO);
+        var config = new org.example.seedancegenarate.config.SeedanceConfig();
+        var model = new org.example.seedancegenarate.config.SeedanceConfig.SeedanceModel();
+        model.setId("seedance-1-0-pro-250528");
+        model.setName("fixture-provider-model");
+        config.setModels(java.util.List.of(model));
+        when(engine.models()).thenReturn(new org.example.seedancegenarate.engine.Impl.SeedanceEngine(
+                mock(SeedanceService.class), config, objectMapper).models());
         when(modelAccessService.isOpen(anyString())).thenReturn(true);
         when(pricingService.price(any(VideoTask.class)))
                 .thenReturn(new PricingService.Price(BigDecimal.ONE, BigDecimal.valueOf(100), "CNY"));
@@ -293,9 +300,86 @@ class VideoSubmitServiceAsyncTest {
         verify(videoTaskService, never()).removeById(anyLong());
     }
 
+    // 【测什么】已受理重放先于模型/节点/失效参考校验，返回原任务且不重新冻结。
+    // 【怎么算红】把模型或引用校验挪回幂等查询之前，会抛异常而不返回原任务。
+    @Test void acceptedReplayIgnoresChangedCapabilitiesAndExpiredReferences() throws Exception {
+        var winner = new VideoTask(); winner.setId(99L); winner.setStatus("SUCCESS");
+        when(videoTaskService.getOne(any(), eq(false))).thenReturn(winner);
+        when(modelAccessService.isOpen(anyString())).thenReturn(false);
+        when(engine.models()).thenReturn(java.util.List.of());
+        var resolver = mock(StoredImageReferences.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "storedReferences", resolver);
+        var input = new VideoSubmitService.SubmitRequest(8L, "seedance", "removed", "old prompt",
+                java.util.List.of(), java.util.List.of(), java.util.List.of(), -1, "unsupported", Double.NaN,
+                null, "same-request", "old-pinned-node",
+                java.util.List.of(new StoredImageReferences.Reference("old-task", "expired.png")));
+        for (String status : java.util.List.of("SUCCESS", "FAILED", "PROCESSING")) {
+            winner.setStatus(status);
+            winner.setCurrentAttemptId(701L);
+            assertThat(service.submit(input)).isSameAs(winner);
+        }
+        org.mockito.Mockito.verifyNoInteractions(engineRegistry, modelAccessService, resolver,
+                pricingService, walletService, admissionControl, attemptService, asyncJobService);
+        verify(videoTaskService, never()).save(any(VideoTask.class));
+    }
+
+    // 【测什么】全量参数在落库/定价/冻结/Job之前校验，内部参考也占图片额度。
+    // 【怎么算红】去掉提交的validate调用或不计stored引用，非法请求会越过400边界。
+    @Test void invalidParametersHaveNoSubmissionSideEffects() {
+        var base = request("invalid");
+        var images = java.util.Collections.nCopies(10, "https://example.test/image.png");
+        var invalid = java.util.List.of(
+                new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                        java.util.List.of(), java.util.List.of(), java.util.List.of(), 5, "2:1", null, null, "ratio", null),
+                new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                        java.util.List.of(), java.util.List.of(), java.util.List.of(), 5, "16:9", 1.0, null, "resolution", null),
+                new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                        images, java.util.List.of(), java.util.List.of(), 5, "16:9", null, null, "images", null),
+                new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                        java.util.List.of(), java.util.List.of("video"), java.util.List.of(), 5, "16:9", null, null, "video", null),
+                new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                        java.util.List.of(), java.util.List.of(), java.util.List.of("audio"), 5, "16:9", null, null, "audio", null));
+        for (var input : invalid)
+            assertThatThrownBy(() -> service.submit(input)).isInstanceOf(BusinessException.class)
+                    .extracting("code").isEqualTo(400);
+        var textOnly = new org.example.seedancegenarate.engine.ModelSpec("seedance", base.model(), "Text only",
+                false, 0, 0, java.util.List.of("16:9"), 5, 15, java.util.List.of(5, 8, 10, 15));
+        when(engine.models()).thenReturn(java.util.List.of(textOnly));
+        var resolver = mock(StoredImageReferences.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "storedReferences", resolver);
+        var stored = new VideoSubmitService.SubmitRequest(8L, base.provider(), base.model(), base.prompt(),
+                java.util.List.of(), java.util.List.of(), java.util.List.of(), 5, "16:9", null, null, "stored", null,
+                java.util.List.of(new StoredImageReferences.Reference("source", "image.png")));
+        assertThatThrownBy(() -> service.submit(stored)).isInstanceOf(BusinessException.class).extracting("code").isEqualTo(400);
+        org.mockito.Mockito.verifyNoInteractions(resolver, pricingService, walletService, admissionControl,
+                attemptService, asyncJobService);
+        verify(videoTaskService, never()).save(any(VideoTask.class));
+    }
+
+    // 【测什么】API提交把预算与钱包协调放在attempt/job之前，重放仍不重复授权。
+    // 【怎么算红】把API分支改回直接wallet.freeze会漏调billingAuthorization并使本测试失败。
+    @Test void apiSubmissionUsesBudgetCoordinatorBeforeJob() throws Exception {
+        var billing = mock(org.example.seedancegenarate.service.BillingAuthorizationService.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "billingAuthorization", billing);
+        doAnswer(inv -> { ((VideoTask) inv.getArgument(0)).setId(91L); return true; })
+                .when(videoTaskService).save(any(VideoTask.class));
+        var attempt = new GenerationAttempt(); attempt.setId(701L);
+        when(attemptService.stageCurrentAttempt(any(), eq(1), eq(null))).thenReturn(attempt);
+        var old = request("budget-request");
+        var input = new VideoSubmitService.SubmitRequest(old.userId(), old.provider(), old.model(), old.prompt(),
+                old.imageUrls(), old.videoUrls(), old.audioUrls(), old.duration(), old.ratio(), old.megapixels(),
+                31L, old.requestId(), old.nodeId());
+        var result = service.submit(input);
+        var ordered = org.mockito.Mockito.inOrder(billing, attemptService, asyncJobService);
+        ordered.verify(billing).freeze(result, BigDecimal.valueOf(100));
+        ordered.verify(attemptService).stageCurrentAttempt(result, 1, null);
+        ordered.verify(asyncJobService).enqueue(anyString(), anyString(), anyString());
+        verify(walletService, never()).freeze(any(), any(), any());
+    }
+
     private VideoSubmitService.SubmitRequest request(String requestId) {
         return new VideoSubmitService.SubmitRequest(8L, "seedance", "seedance-1-0-pro-250528",
                 "ocean sunrise", java.util.List.of(), java.util.List.of(), java.util.List.of(),
-                5, "16:9", 1.0, null, requestId, null);
+                5, "16:9", null, null, requestId, null);
     }
 }

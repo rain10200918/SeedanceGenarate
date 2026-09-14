@@ -14,6 +14,12 @@ public class VideoTask {
     @TableId(type = IdType.AUTO)
     private Long id;
     private Long userId;
+    /** Current account display name, enriched only after task-detail authorization. */
+    @TableField(exist = false)
+    private String callerName;
+    /** API key purpose label, not a credential; null for UI or missing key. */
+    @TableField(exist = false)
+    private String apiKeyName;
     /**
      * 兼容字段：新任务与 bizTaskId 保持相同，保证既有 UI/API/SSE 的 taskId 契约不变；
      * 历史任务保留原提供方 ID，直到完成后续全量接口迁移。

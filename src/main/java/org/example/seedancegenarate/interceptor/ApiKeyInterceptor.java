@@ -73,6 +73,8 @@ public class ApiKeyInterceptor implements HandlerInterceptor {
     }
 
     private void writeError(HttpServletResponse response, HttpServletRequest request, ApiException exception) throws Exception {
+        if (response.isCommitted()) return;
+        exception = org.example.seedancegenarate.exception.ApiFailureClassifier.classify(exception);
         response.setStatus(exception.getHttpStatus().value());
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.setContentType("application/json;charset=UTF-8");

@@ -12,6 +12,7 @@ import org.springframework.util.StringUtils;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -108,33 +109,49 @@ public class VideoDownloadServiceImpl extends ServiceImpl<VideoTaskMapper, Video
 
     /** 优先取 ComfyUI filename 参数，再按路径 / 响应 Content-Type 推断真实扩展名。 */
     private String resolveExtension(String url, String contentType) {
-        String candidate = extractFilenameParam(url);
-        if (candidate == null) {
-            int q = url.indexOf('?');
-            candidate = q >= 0 ? url.substring(0, q) : url;
+        String path;
+        try {
+            path = URI.create(url).getPath();
+        } catch (IllegalArgumentException e) {
+            path = null;
         }
-        int dot = candidate.lastIndexOf('.');
-        int slash = Math.max(candidate.lastIndexOf('/'), candidate.lastIndexOf('\\'));
-        if (dot > slash) {
-            String ext = candidate.substring(dot).toLowerCase(Locale.ROOT);
-            if (ext.matches("\\.(mp4|webm|mov|mkv|gif|png|jpg|jpeg|webp|bmp)")) {
-                return ext;
+        for (String candidate : new String[]{extractFilenameParam(url), path}) {
+            if (candidate == null) continue;
+            int dot = candidate.lastIndexOf('.');
+            int slash = Math.max(candidate.lastIndexOf('/'), candidate.lastIndexOf('\\'));
+            if (dot > slash) {
+                String ext = candidate.substring(dot).toLowerCase(Locale.ROOT);
+                if (ext.matches("\\.(mp4|webm|mov|mkv|gif|png|jpg|jpeg|webp|bmp|mp3|m4a|aac|wav|ogg|flac)")) {
+                    return ext;
+                }
             }
         }
-        String lowerContentType = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
-        if (lowerContentType.startsWith("image/png")) return ".png";
-        if (lowerContentType.startsWith("image/jpeg")) return ".jpg";
-        if (lowerContentType.startsWith("image/webp")) return ".webp";
-        if (lowerContentType.startsWith("image/gif")) return ".gif";
-        if (lowerContentType.startsWith("video/webm")) return ".webm";
-        if (lowerContentType.startsWith("video/quicktime")) return ".mov";
-        return ".mp4";
+        String normalized = contentType == null ? "" : contentType.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "image/png" -> ".png";
+            case "image/jpeg" -> ".jpg";
+            case "image/webp" -> ".webp";
+            case "image/gif" -> ".gif";
+            case "image/bmp" -> ".bmp";
+            case "video/mp4" -> ".mp4";
+            case "video/webm" -> ".webm";
+            case "video/quicktime" -> ".mov";
+            case "video/x-matroska" -> ".mkv";
+            case "audio/mpeg", "audio/mp3" -> ".mp3";
+            case "audio/mp4", "audio/x-m4a" -> ".m4a";
+            case "audio/aac", "audio/x-aac" -> ".aac";
+            case "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave" -> ".wav";
+            case "audio/ogg", "application/ogg" -> ".ogg";
+            case "audio/flac", "audio/x-flac" -> ".flac";
+            default -> ".bin";
+        };
     }
 
     private String normalizeContentType(String contentType, String extension) {
         if (contentType != null && !contentType.isBlank()) {
             String normalized = contentType.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
-            if (normalized.startsWith("video/") || normalized.startsWith("image/")) {
+            if (normalized.startsWith("video/") || normalized.startsWith("image/")
+                    || normalized.startsWith("audio/")) {
                 return normalized;
             }
         }
@@ -147,18 +164,29 @@ public class VideoDownloadServiceImpl extends ServiceImpl<VideoTaskMapper, Video
             case ".webm" -> "video/webm";
             case ".mov" -> "video/quicktime";
             case ".mkv" -> "video/x-matroska";
-            default -> "video/mp4";
+            case ".mp4" -> "video/mp4";
+            case ".mp3" -> "audio/mpeg";
+            case ".m4a" -> "audio/mp4";
+            case ".aac" -> "audio/aac";
+            case ".wav" -> "audio/wav";
+            case ".ogg" -> "audio/ogg";
+            case ".flac" -> "audio/flac";
+            default -> "application/octet-stream";
         };
     }
 
     private String extractFilenameParam(String url) {
-        int idx = url.indexOf("filename=");
-        if (idx < 0) {
-            return null;
+        try {
+            String query = URI.create(url).getRawQuery();
+            if (query == null) return null;
+            for (String parameter : query.split("&")) {
+                if (parameter.startsWith("filename=")) {
+                    return URLDecoder.decode(parameter.substring("filename=".length()), StandardCharsets.UTF_8);
+                }
+            }
+        } catch (IllegalArgumentException ignored) {
+            // 无法解析的文件名不参与推断，继续使用路径或响应 MIME。
         }
-        int start = idx + "filename=".length();
-        int end = url.indexOf('&', start);
-        String raw = end >= 0 ? url.substring(start, end) : url.substring(start);
-        return URLDecoder.decode(raw, StandardCharsets.UTF_8);
+        return null;
     }
 }

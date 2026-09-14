@@ -193,14 +193,17 @@ public class WalletServiceImpl implements WalletService {
     /**
      * 该任务是否真的成功冻结过（FREEZE 流水存在）。
      * <p>
-     * FREEZE 流水与钱包更新同事务，所以「读得到」等价于「钱真的进了 frozen」。
+     * FREEZE 流水与钱包更新同事务。必须当前读：外层RR事务的旧快照可能早于冻结提交，
+     * 不能把已冻结任务误判成历史未冻结，造成再次扣余额或漏退冻结。
      */
     private boolean everFrozen(Long taskId) {
-        Long count = balanceTransactionMapper.selectCount(
+        List<BalanceTransaction> rows = balanceTransactionMapper.selectList(
                 Wrappers.<BalanceTransaction>lambdaQuery()
+                        .select(BalanceTransaction::getId)
                         .eq(BalanceTransaction::getBizKey, "task:" + taskId)
-                        .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE));
-        return count != null && count > 0;
+                        .eq(BalanceTransaction::getType, BalanceTransaction.TYPE_FREEZE)
+                        .last("FOR UPDATE"));
+        return !rows.isEmpty();
     }
 
     @Override

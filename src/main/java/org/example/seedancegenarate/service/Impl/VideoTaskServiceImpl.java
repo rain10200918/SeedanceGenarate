@@ -34,6 +34,11 @@ import java.util.Objects;
 @Service
 @RequiredArgsConstructor
 public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask> implements VideoTaskService {
+    @Override
+    public org.example.seedancegenarate.dto.TaskCallerView getCaller(Long id) {
+        return id == null ? null : baseMapper.selectCaller(id);
+    }
+
     private static final int MAX_REMOTE_VIDEO_URL_LENGTH = 16_384;
     /** 终态收尾作业类型；payload: {"videoTaskId":..,"remoteVideoUrl":".."} */
     public static final String JOB_TYPE_TASK_FINALIZE = "TASK_FINALIZE";
@@ -51,6 +56,8 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
     private final ObjectMapper objectMapper;
     /** 显式事务：不用 @Transactional 抽方法——同类内自调用会绕过代理，事务会静默消失 */
     private final TransactionTemplate transactionTemplate;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.BillingAuthorizationService billingAuthorization;
 
     /** 每一轮 attempt 有独立终态作业，旧轮次完成不得吞掉新轮次的 SUCCESS。 */
     public static String finalizeJobKey(Long videoTaskId, Long attemptId) {
@@ -237,7 +244,11 @@ public class VideoTaskServiceImpl extends ServiceImpl<VideoTaskMapper, VideoTask
         // 金额用提交时快照（freeze_amount），不用实时价——价格可变、冻结是历史事实
         BigDecimal settleAmount = task.getFreezeAmount() != null ? task.getFreezeAmount()
                 : pricingService.price(task).amount();
-        walletService.settle(task.getUserId(), settleAmount, task.getId());
+        if (task.getApiKeyId() == null) {
+            walletService.settle(task.getUserId(), settleAmount, task.getId());
+        } else {
+            billingAuthorization.settle(task, settleAmount);
+        }
         // 留在事务内：CanvasEventListener / PipelineEventListener 是裸 @EventListener（同步立即执行），
         // 它们的节点回填写入现在就在这个事务里，挪出去会改变画布回填与终态的原子性。
         publishStatusChanged(task);

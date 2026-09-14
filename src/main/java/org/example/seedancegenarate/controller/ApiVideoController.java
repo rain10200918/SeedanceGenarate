@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.example.seedancegenarate.dto.ApiTaskView;
+import org.example.seedancegenarate.dto.ApiTaskPageView;
 import org.example.seedancegenarate.dto.ApiVideoCreateRequest;
 import org.example.seedancegenarate.dto.ApiVideoCreateResponse;
 import org.example.seedancegenarate.config.OssConfig;
@@ -22,11 +24,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.List;
 
 /**
  * 对外 API（/api/v1/**，ApiKeyInterceptor 鉴权）。
@@ -43,6 +48,7 @@ public class ApiVideoController {
     private final OssConfig ossConfig;
     private final org.example.seedancegenarate.service.ArtifactExpiryPolicy artifactExpiryPolicy;
     private final ContentModerationPolicy contentModerationPolicy;
+    private Path localArtifactRoot = Paths.get("data/videos");
 
     /** 当前请求的 API Key（ApiKeyInterceptor 注入） */
     private static ApiKey currentKey(HttpServletRequest request) {
@@ -70,13 +76,22 @@ public class ApiVideoController {
         if (request == null || request.prompt() == null || request.prompt().isBlank()) {
             throw ApiException.validation("prompt 不能为空");
         }
-        String requestId = (idempotencyKey != null && !idempotencyKey.isBlank())
-                ? idempotencyKey.trim()
-                : ApiVideoServiceImpl.generateRequestId();
+        String requestId;
+        if (idempotencyKey == null) {
+            requestId = ApiVideoServiceImpl.generateRequestId();
+        } else {
+            requestId = idempotencyKey.trim();
+            // 原始头先查控制字符，不能让 trim 吞掉非法输入后变成另一个合法键。
+            if (requestId.isBlank() || requestId.length() > 64
+                    || idempotencyKey.codePoints().anyMatch(c -> Character.isISOControl(c)
+                    || Character.getType(c) == Character.FORMAT || c == 0x2028 || c == 0x2029)) {
+                throw ApiException.validation("Idempotency-Key 必须为1至64个字符，且不能包含控制字符");
+            }
+        }
         VideoTask task = apiVideoService.create(new ApiVideoService.CreateContext(
                 key, requestId, IpUtils.getClientIp(servletRequest),
                 servletRequest.getHeader("User-Agent"),
-                request.prompt().trim(), request.model(), request.images(),
+                request.prompt().trim(), request.model(), request.images(), request.videos(), request.audios(),
                 request.duration(), request.ratio(), request.megapixels()));
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(new ApiVideoCreateResponse(task.businessTaskId(), task.getStatus(), requestId));
@@ -84,14 +99,14 @@ public class ApiVideoController {
 
     /** 查状态：PROCESSING / SUCCESS（含结果）/ FAILED（含错误） */
     @GetMapping("/{taskId}")
-    public VideoTask get(@PathVariable String taskId, HttpServletRequest servletRequest) {
-        return contentModerationPolicy.redact(
-                artifactExpiryPolicy.stamp(findTask(currentKey(servletRequest).getId(), taskId)));
+    public ApiTaskView get(@PathVariable String taskId, HttpServletRequest servletRequest) {
+        return ApiTaskView.from(contentModerationPolicy.redact(
+                artifactExpiryPolicy.stamp(findTask(currentKey(servletRequest).getId(), taskId))));
     }
 
     /** 任务列表（该钥匙的，分页） */
     @GetMapping
-    public Page<VideoTask> list(
+    public ApiTaskPageView list(
             @RequestParam(defaultValue = "1") long current,
             @RequestParam(defaultValue = "10") long size,
             HttpServletRequest servletRequest
@@ -103,7 +118,9 @@ public class ApiVideoController {
                 Wrappers.<VideoTask>lambdaQuery()
                         .eq(VideoTask::getApiKeyId, currentKey(servletRequest).getId())
                         .orderByDesc(VideoTask::getId)));
-        return contentModerationPolicy.redactAll(page);
+        contentModerationPolicy.redactAll(page);
+        return new ApiTaskPageView(page.getRecords().stream().map(ApiTaskView::from).toList(),
+                page.getTotal(), page.getSize(), page.getCurrent(), page.getPages());
     }
 
     /** 下载产物（内联，按扩展名定 Content-Type） */
@@ -127,16 +144,35 @@ public class ApiVideoController {
                     task.getArtifactKey(), Duration.ofSeconds(ossConfig.getSignedUrlTtlSeconds())));
             return;
         }
-        String stored = task.getVideoUrl();
+        Path path = localArtifactPath(task.getVideoUrl());
+        // 打开文件时也不跟随链接，避免校验后替换最终文件为符号链接。
+        try (InputStream input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+            response.setContentType(contentTypeOf(path.getFileName().toString()));
+            input.transferTo(response.getOutputStream());
+        }
+    }
+
+    private Path localArtifactPath(String stored) throws IOException {
         String fileName = stored.startsWith("data/videos/")
                 ? stored.substring("data/videos/".length())
                 : stored;
-        Path path = Paths.get("data/videos/", fileName);
-        if (!Files.exists(path)) {
+        if (fileName.length() > 255 || !fileName.matches("[A-Za-z0-9][A-Za-z0-9._-]*")) {
+            throw ApiException.validation("产物文件标识无效");
+        }
+        try {
+            Path root = localArtifactRoot.toRealPath();
+            Path candidate = root.resolve(fileName).normalize();
+            if (!candidate.startsWith(root) || !Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS)) {
+                throw ApiException.validation("产物文件不可用");
+            }
+            Path real = candidate.toRealPath();
+            if (!real.startsWith(root)) {
+                throw ApiException.validation("产物文件不可用");
+            }
+            return candidate;
+        } catch (NoSuchFileException e) {
             throw ApiException.validation("产物文件不存在");
         }
-        response.setContentType(contentTypeOf(fileName));
-        Files.copy(path, response.getOutputStream());
     }
 
     private boolean hasOssArtifact(VideoTask task) {
@@ -156,7 +192,7 @@ public class ApiVideoController {
         return task;
     }
 
-    /** 按扩展名推断 Content-Type（视频/图片通用），未知回退 video/mp4 */
+    /** 按产物扩展名推断 MIME，未知类型不冒充可播放视频。 */
     private String contentTypeOf(String fileName) {
         String lower = fileName.toLowerCase(java.util.Locale.ROOT);
         if (lower.endsWith(".png")) return "image/png";
@@ -166,6 +202,13 @@ public class ApiVideoController {
         if (lower.endsWith(".webm")) return "video/webm";
         if (lower.endsWith(".mov")) return "video/quicktime";
         if (lower.endsWith(".mkv")) return "video/x-matroska";
-        return "video/mp4";
+        if (lower.endsWith(".mp4")) return "video/mp4";
+        if (lower.endsWith(".mp3")) return "audio/mpeg";
+        if (lower.endsWith(".m4a")) return "audio/mp4";
+        if (lower.endsWith(".aac")) return "audio/aac";
+        if (lower.endsWith(".wav")) return "audio/wav";
+        if (lower.endsWith(".ogg")) return "audio/ogg";
+        if (lower.endsWith(".flac")) return "audio/flac";
+        return "application/octet-stream";
     }
 }

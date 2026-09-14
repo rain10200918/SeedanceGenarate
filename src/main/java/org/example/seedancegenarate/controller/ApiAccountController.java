@@ -17,6 +17,17 @@ import java.math.BigDecimal;
 public class ApiAccountController {
 
     private final WalletService walletService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.ApiKeyBudgetService budgets;
+
+    @GetMapping("/key-budget")
+    public org.example.seedancegenarate.dto.ApiKeyBudgetView keyBudget(jakarta.servlet.http.HttpServletRequest request) {
+        if (!(request.getAttribute("api_key") instanceof org.example.seedancegenarate.entity.ApiKey key)
+                || !java.util.Objects.equals(key.getUserId(), UserContext.requireUserId())) {
+            throw org.example.seedancegenarate.exception.ApiException.invalidApiKey();
+        }
+        return budgets.query(key.getUserId(), key.getId());
+    }
 
     @GetMapping("/balance")
     public ApiBalanceResponse balance() {

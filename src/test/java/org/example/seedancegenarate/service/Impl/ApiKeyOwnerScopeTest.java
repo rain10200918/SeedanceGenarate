@@ -40,6 +40,10 @@ class ApiKeyOwnerScopeTest {
                 new org.apache.ibatis.builder.MapperBuilderAssistant(
                         new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""),
                 ApiKey.class);
+        com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(
+                new org.apache.ibatis.builder.MapperBuilderAssistant(
+                        new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""),
+                org.example.seedancegenarate.entity.WebhookDelivery.class);
     }
 
     private ApiKeyMapper mapper;
@@ -50,6 +54,8 @@ class ApiKeyOwnerScopeTest {
         mapper = mock(ApiKeyMapper.class);
         service = new ApiKeyServiceImpl();
         ReflectionTestUtils.setField(service, "baseMapper", mapper);
+        ReflectionTestUtils.setField(service, "webhookDeliveryMapper",
+                mock(org.example.seedancegenarate.mapper.WebhookDeliveryMapper.class));
     }
 
     /** 把 Wrapper 渲染成「SQL 片段 + 参数值」，便于对条件做断言 */

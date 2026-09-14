@@ -51,7 +51,7 @@
   - **ComfyUI**：自建多实例 GPU 集群（同主机多端口、共享一套模型），按成功计费。
 - **前端**（配对仓库）：Vue3 + Pinia + Element Plus，由 `/api/video/options` 接口驱动「提供方 / 模型 / 比例 / 时长」选择器，**加新模型前端无需改代码**。
 
-配套能力包括：注册 / 登录（token 鉴权）、邀请码、按次 / 按秒计费、令牌桶限流、阿里云 OSS 参考图存储、提示词优化（后端代理大模型，密钥不下发前端）、SSE 实时状态推送，以及一套面向外部开发者的 **API 售卖层**（`sk-` 钥匙、HMAC 签名 webhook、幂等提交、两阶段调用日志）。
+配套能力包括：注册 / 登录（token 鉴权）、邀请码、按次 / 按秒计费、令牌桶限流、阿里云 OSS 参考媒体存储、提示词优化（后端代理大模型，密钥不下发前端）、SSE 实时状态推送，以及一套面向外部开发者的 **API 售卖层**（`sk-` 钥匙、HMAC 签名 webhook、幂等提交、两阶段调用日志）。
 
 ---
 
@@ -75,8 +75,9 @@
    - SSE 尽力而为、非权威，**DB 仍是唯一真相**；断线由前端 `EventSource` 自动重连 + refetch 兜底。
 
 5. **对外 API 的工程化细节**
-   - API Key 只存 SHA-256 哈希 + 明文仅创建时返回一次；webhook 带 HMAC-SHA256 签名防伪造，`(task_id, status)` 唯一索引保证幂等，退避重试 3 次。
-   - 提交幂等（`Idempotency-Key` / `request_id`）、两阶段调用日志（RECEIVED → 终态）、按 key 令牌桶限流（429 带 `Retry-After`）、统一 `{error:{code,message,request_id}}` 错误契约。
+   - [Key月度消费预算](docs/api-key-budget.md)：管理员设置、属主收紧；MySQL任务级预占/结算/释放与账号钱包同事务，多实例共享额度。上线需V58及全部实例切换。
+   - API Key 只存 SHA-256 哈希 + 明文仅创建时返回一次；webhook 带 HMAC-SHA256 签名防伪造，`(task_id, status)` 唯一索引防重复建投递记录；最多投递 3 次（含首发，失败后约 30 秒/2 分钟重试）。
+   - 提交幂等（`Idempotency-Key` / `request_id`）、两阶段调用日志（RECEIVED → 终态）、按Key属主账号令牌桶限流（429 带 `Retry-After`）、统一 `{error:{code,message,request_id}}` 错误契约。
 
 6. **面向多实例的分布式能力（Redis + 持久化作业）**
    - **Redis Lua 分布式限流**：`feature.redis-rate-limit` 开启后全局限流额度一致，多实例不会放大配额。
@@ -170,7 +171,7 @@ flowchart TB
     SE --> SD
     CE --> NG
     NG --> CF
-    CE -->|"下载/上传参考图"| OSS
+    CE -->|"下载/上传参考媒体"| OSS
     POLL --> REG
     POLL --> DB
     CON1 --> DB
@@ -381,6 +382,8 @@ sequenceDiagram
 - `POST /api/v1/videos` 提交（`Bearer sk-`，可选 `Idempotency-Key`，202 返回 taskId）
 - `GET /api/v1/videos` / `/{taskId}` / `/{taskId}/content` 列表 / 查询 / 下载
 - `GET /api/v1/models` 模型清单（受模型开关过滤）
+- P1：任务查询/列表使用公开白名单；`AUDIO` 保持原任务/下载路径；v1错误返回真实HTTP状态；新请求指纹防同幂等键改参（1–64字符，V57迁移）；自助Webhook支持一次性secret、轮换及callback更新/清除。限流按账号共享，不因多建Key增加额度。
+- 生成支持 `images` / `videos` / `audios` URL 列表，能力字段由模型清单公开；参数在下载/冻结前严格校验，报价与提交时长同源。素材单件 30MiB、合计 100MiB/16 项，请求体 64KiB；失败仅补偿本次独立上传，已受理或结果不确定不删除。
 - webhook 终态回调（`X-Signature` HMAC 签名、`(task_id,status)` 幂等、退避重试）
 
 设计要点：key 只存 SHA-256 哈希、`api_call_log` 两阶段日志为统计唯一真相（聚合现算不建计数器表）、四个幂等点（提交 / 计费 / webhook / 限流）。详见 [`API_SERVICE_DESIGN.md`](API_SERVICE_DESIGN.md)。

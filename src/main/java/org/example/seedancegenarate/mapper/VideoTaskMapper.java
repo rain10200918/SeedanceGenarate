@@ -14,6 +14,13 @@ import java.util.Map;
 @Mapper
 public interface VideoTaskMapper extends BaseMapper<VideoTask> {
 
+    /** One primary-key lookup with nullable relations; caller must authorize the task first. */
+    @Select("SELECT u.username AS callerName, k.name AS apiKeyName FROM video_task v "
+            + "LEFT JOIN app_user u ON u.id = v.user_id "
+            + "LEFT JOIN api_key k ON k.id = v.api_key_id AND k.user_id = v.user_id "
+            + "WHERE v.id = #{id}")
+    org.example.seedancegenarate.dto.TaskCallerView selectCaller(@Param("id") Long id);
+
     @Select("SELECT * FROM video_task WHERE biz_task_id = #{taskId} OR task_id = #{taskId} LIMIT 1")
     VideoTask findByBusinessTaskId(@Param("taskId") String taskId);
 

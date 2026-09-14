@@ -19,6 +19,8 @@ public class ApiCallLog {
     private Long id;
     /** 幂等键 / 追踪号（客户端 Idempotency-Key），唯一 */
     private String requestId;
+    /** SHA-256 of the normalized original API request; null only for legacy rows. */
+    private String requestFingerprint;
     private Long apiKeyId;
     /** 冗余，按人查 */
     private Long userId;

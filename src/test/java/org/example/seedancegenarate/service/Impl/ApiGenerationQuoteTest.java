@@ -59,7 +59,7 @@ class ApiGenerationQuoteTest {
         });
         ApiVideoServiceImpl service = new ApiVideoServiceImpl(
                 failOnCall(ApiCallLogMapper.class), submit, new VideoEngineRegistry(List.of(engine)),
-                failOnCall(OssService.class), failOnCall(VideoTaskService.class));
+                null, failOnCall(VideoTaskService.class));
 
         VideoSubmitService.PriceEstimate actual = service.quote(" test-model ", 5);
 

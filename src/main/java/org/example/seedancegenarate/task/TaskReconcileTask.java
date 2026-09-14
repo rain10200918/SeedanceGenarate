@@ -68,6 +68,8 @@ public class TaskReconcileTask {
     private final WalletService walletService;
     private final DistributedLock distributedLock;
     private final DistributedLockProperties lockProperties;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.BillingAuthorizationService billingAuthorization;
 
     @Value("${video.poll.max-age-hours:24}")
     private long maxAgeHours;
@@ -207,9 +209,11 @@ public class TaskReconcileTask {
                     continue;
                 }
                 if ("SUCCESS".equals(task.getStatus())) {
-                    walletService.settle(task.getUserId(), amount, task.getId());
+                    if (task.getApiKeyId() == null) walletService.settle(task.getUserId(), amount, task.getId());
+                    else billingAuthorization.settle(task, amount);
                 } else {
-                    walletService.release(task.getUserId(), amount, task.getId());
+                    if (task.getApiKeyId() == null) walletService.release(task.getUserId(), amount, task.getId());
+                    else billingAuthorization.release(task, amount);
                 }
                 walletCompensationFailures.remove(task.getId()); // 修好了就清计数（也就解除了隔离）
             } catch (Exception e) {

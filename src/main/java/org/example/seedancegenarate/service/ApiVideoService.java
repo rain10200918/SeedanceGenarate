@@ -6,7 +6,7 @@ import org.example.seedancegenarate.entity.VideoTask;
 import java.util.List;
 
 /**
- * 对外 API 的提交编排门面：幂等（Idempotency-Key）→ 模型定位/闸门 → 图片 URL 转存 →
+ * 对外 API 的提交编排门面：幂等（Idempotency-Key）→ 模型定位/闸门 → 参考媒体 URL 转存 →
  * 两阶段调用日志 → 共享提交（VideoSubmitService）。生成/计费逻辑零复制。
  */
 public interface ApiVideoService {
@@ -23,10 +23,19 @@ public interface ApiVideoService {
             String prompt,
             String model,
             List<String> imageUrls,
+            List<String> videoUrls,
+            List<String> audioUrls,
             Integer duration,
             String ratio,
             Double megapixels
     ) {
+        /** 兼容旧的 Java 调用方；视频/音频默认为空。 */
+        public CreateContext(ApiKey apiKey, String requestId, String clientIp, String userAgent,
+                             String prompt, String model, List<String> imageUrls,
+                             Integer duration, String ratio, Double megapixels) {
+            this(apiKey, requestId, clientIp, userAgent, prompt, model, imageUrls,
+                    List.of(), List.of(), duration, ratio, megapixels);
+        }
     }
 
     /**

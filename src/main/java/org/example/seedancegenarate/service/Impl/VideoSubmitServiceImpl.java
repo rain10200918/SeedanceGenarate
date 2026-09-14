@@ -11,6 +11,7 @@ import org.example.seedancegenarate.engine.CompletionMechanism;
 import org.example.seedancegenarate.engine.GenerateCommand;
 import org.example.seedancegenarate.engine.GenerationMode;
 import org.example.seedancegenarate.engine.OutputType;
+import org.example.seedancegenarate.engine.ModelSpec;
 import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.entity.ApiKey;
@@ -28,6 +29,7 @@ import org.example.seedancegenarate.event.TaskSubmittedEvent;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.example.seedancegenarate.service.AsyncJobService;
 import org.example.seedancegenarate.service.GenerationAttemptService;
+import org.example.seedancegenarate.service.GenerationParameters;
 import org.example.seedancegenarate.service.PricingService;
 import org.example.seedancegenarate.service.TaskStatusTransitioner;
 import org.example.seedancegenarate.service.VideoSubmitService;
@@ -75,6 +77,8 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     private final TransactionTemplate transactionTemplate;
     @org.springframework.beans.factory.annotation.Autowired
     private org.example.seedancegenarate.service.StoredImageReferences storedReferences;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.example.seedancegenarate.service.BillingAuthorizationService billingAuthorization;
 
     /** 默认提供方；请求未显式指定 provider 时使用 */
     @Value("${video.default-provider:seedance}")
@@ -147,41 +151,43 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
     }
 
     private VideoTask submitInternal(SubmitRequest request, PriceEstimate approved) throws Exception {
+        String requestId = StringUtils.hasText(request.requestId())
+                ? request.requestId().trim()
+                : "req_" + UUID.randomUUID().toString().replace("-", "");
+        if (requestId.length() > 128) {
+            throw BusinessException.badRequest("生成请求幂等键过长");
+        }
+        // 已受理身份优先：模型下架、能力变化或旧引用失效都不能阻断原请求重放。
+        VideoTask existing = findAcceptedByRequestId(request.userId(), requestId);
+        if (existing != null) return existing;
+
         validatePinnedNode(request.provider(), request.nodeId());
         ResolvedSpec spec = resolveSpec(request.provider(), request.model(), request.duration());
         String provider = spec.provider();
         String effectiveModel = spec.effectiveModel();
         Integer duration = spec.duration();
-        String ratio = (request.ratio() == null || request.ratio().isBlank()) ? "16:9" : request.ratio();
 
         // 任务类型 = (有无参考图) × (模型输出类型)
         List<String> imageUrls = request.imageUrls() == null ? Collections.emptyList() : request.imageUrls();
         List<String> videoUrls = request.videoUrls() == null ? Collections.emptyList() : request.videoUrls();
         List<String> audioUrls = request.audioUrls() == null ? Collections.emptyList() : request.audioUrls();
         var stored=request.storedImageReferences()==null?List.<org.example.seedancegenarate.service.StoredImageReferences.Reference>of():request.storedImageReferences();
+        String requestedRatio = request.ratio();
+        // 旧UI/Agent为音频补16:9；仅无API key的音频空能力模型兼容这一占位。
+        if (request.apiKeyId() == null && spec.outputType() == OutputType.AUDIO
+                && spec.modelSpec().ratios() != null && spec.modelSpec().ratios().isEmpty()
+                && "16:9".equals(requestedRatio)) {
+            requestedRatio = null;
+        }
+        GenerationParameters parameters = GenerationParameters.validate(spec.modelSpec(), request.duration(),
+                requestedRatio, request.megapixels(), imageUrls.size() + stored.size(),
+                videoUrls.size(), audioUrls.size());
+        String ratio = parameters.ratio();
         if(!stored.isEmpty()) {
             if(storedReferences==null || stored.size()!=1 || !imageUrls.isEmpty()) throw new IllegalArgumentException("内部参考图片无效");
             for(var reference:stored) storedReferences.validate(request.userId(),reference);
         }
         OutputType outputType = spec.outputType();
-
-        // 幂等键由调用方在重试时复用；未提供时生成一次性键（UI 单次点击仍安全）。
-        String requestId = StringUtils.hasText(request.requestId())
-                ? request.requestId().trim()
-                : "req_" + UUID.randomUUID().toString().replace("-", "");
-        if (requestId.length() > 128) {
-            throw new IllegalArgumentException("生成请求幂等键过长");
-        }
-        if (request.userId() != null) {
-            VideoTask existing = videoTaskService.getOne(
-                    com.baomidou.mybatisplus.core.toolkit.Wrappers.<VideoTask>lambdaQuery()
-                            .eq(VideoTask::getUserId, request.userId())
-                            .eq(VideoTask::getRequestId, requestId)
-                            .last("limit 1"), false);
-            if (existing != null) {
-                return requireDurableRequestWinner(existing);
-            }
-        }
 
         // 业务 ID 在调用外部提供方之前生成：后续异步 Worker 即使尚未拿到 providerTaskId，
         // 也能立即对外返回稳定的任务标识。taskId 暂作为兼容别名，保持现有 UI/API 契约。
@@ -201,7 +207,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         task.setProvider(provider);
         task.setModel(effectiveModel);
         task.setOutputType(outputType.name());
-        task.setMegapixels(request.megapixels());
+        task.setMegapixels(parameters.megapixels());
         task.setApiKeyId(request.apiKeyId());
         task.setRequestId(requestId);
         // 超时判定基准：本轮尝试起点（首次 = 创建时间）
@@ -241,7 +247,11 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         try {
             admit(task);
             GenerationAttempt attempt = transactionTemplate.execute(status -> {
-                walletService.freeze(request.userId(), freezeAmount, task.getId());
+                if (task.getApiKeyId() == null) {
+                    walletService.freeze(request.userId(), freezeAmount, task.getId());
+                } else {
+                    billingAuthorization.freeze(task, freezeAmount);
+                }
                 GenerationAttempt staged = generationAttemptService.stageCurrentAttempt(
                         task, 1, request.nodeId());
                 asyncJobService.enqueue(GenerationAttemptService.JOB_TYPE,
@@ -428,14 +438,15 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
         // 闸门基于「实际生效的模型」而非请求原始值（防不传/乱传 model 绕过）
         String effectiveModel = engine.effectiveModel(requestModel);
         assertModelOpen(effectiveModel);
-        // 统一默认值（与 UI 控制器一致）：API 可能不传 duration
-        Integer duration = requestDuration == null ? 8 : requestDuration;
-        OutputType outputType = engine.outputType(effectiveModel);
-        return new ResolvedSpec(provider, engine, effectiveModel, duration, outputType);
+        ModelSpec modelSpec = engine.models().stream()
+                .filter(candidate -> effectiveModel.equals(candidate.model()))
+                .findFirst().orElseThrow(() -> BusinessException.badRequest("模型能力不可用"));
+        Integer duration = GenerationParameters.resolveDuration(modelSpec, requestDuration);
+        return new ResolvedSpec(provider, engine, effectiveModel, duration, modelSpec.outputType(), modelSpec);
     }
 
     private record ResolvedSpec(String provider, VideoEngine engine, String effectiveModel,
-                                Integer duration, OutputType outputType) {
+                                Integer duration, OutputType outputType, ModelSpec modelSpec) {
     }
 
     private String resolveProvider(String provider) {

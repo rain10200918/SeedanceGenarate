@@ -1,6 +1,7 @@
 package org.example.seedancegenarate.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -22,10 +23,18 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 public class ApiExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
+    public ResponseEntity<ApiErrorResponse> handle(ApiException exception, HttpServletRequest request,
+                                                  HttpServletResponse response) {
+        if (response.isCommitted()) return null;
+        return handle(exception, request);
+    }
+
+    /** 保留直接调用及standalone MVC场景使用的原签名。 */
     public ResponseEntity<ApiErrorResponse> handle(ApiException exception, HttpServletRequest request) {
-        log.warn("API 请求失败: code={} status={} requestId={} msg={}",
+        exception = ApiFailureClassifier.classify(exception);
+        log.warn("API 请求失败: code={} status={} requestId={}",
                 exception.getCode(), exception.getHttpStatus().value(),
-                requestId(request), exception.getMessage());
+                requestId(request));
         HttpStatus status = exception.getHttpStatus();
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(status);
         if (status == HttpStatus.TOO_MANY_REQUESTS) {
@@ -37,10 +46,19 @@ public class ApiExceptionHandler {
 
     /** 请求追踪号：优先取客户端幂等键，否则现场生成 */
     public static String requestId(HttpServletRequest request) {
+        String attribute = ApiExceptionHandler.class.getName() + ".requestId";
+        Object existing = request.getAttribute(attribute);
+        if (existing instanceof String id) return id;
         String idempotency = request.getHeader("Idempotency-Key");
-        if (idempotency != null && !idempotency.isBlank()) {
-            return idempotency.trim();
+        String id;
+        if (idempotency != null && idempotency.trim().length() <= 64 && !idempotency.isBlank()
+                && idempotency.codePoints().noneMatch(c -> Character.isISOControl(c)
+                || Character.getType(c) == Character.FORMAT || c == 0x2028 || c == 0x2029)) {
+            id = idempotency.trim();
+        } else {
+            id = "req_" + java.util.UUID.randomUUID().toString().replace("-", "");
         }
-        return "req_" + Long.toHexString(System.nanoTime());
+        request.setAttribute(attribute, id);
+        return id;
     }
 }

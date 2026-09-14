@@ -87,6 +87,13 @@ class VideoSubmitServiceEstimateTest {
         when(registry.get("seedance")).thenReturn(engine);
         when(engine.effectiveModel(any())).thenReturn("seedance-v1-pro");
         when(engine.outputType("seedance-v1-pro")).thenReturn(OutputType.VIDEO);
+        var config = new org.example.seedancegenarate.config.SeedanceConfig();
+        var model = new org.example.seedancegenarate.config.SeedanceConfig.SeedanceModel();
+        model.setId("seedance-v1-pro");
+        model.setName("fixture-provider-model");
+        config.setModels(java.util.List.of(model));
+        when(engine.models()).thenReturn(new org.example.seedancegenarate.engine.Impl.SeedanceEngine(
+                mock(org.example.seedancegenarate.service.SeedanceService.class), config, new ObjectMapper()).models());
         when(modelAccessService.isOpen("seedance-v1-pro")).thenReturn(true);
         when(pricingService.price(any())).thenReturn(
                 new PricingService.Price(new BigDecimal("0.20"), new BigDecimal("1.60"), "CNY"));
@@ -127,6 +134,132 @@ class VideoSubmitServiceEstimateTest {
         ArgumentCaptor<VideoTask> probe = ArgumentCaptor.forClass(VideoTask.class);
         verify(pricingService).price(probe.capture());
         assertEquals(5, probe.getValue().getDuration());
+    }
+
+    // 【测什么】非法离散时长在估价和提交都被拒绝，没有报价或任务副作用。
+    // 【怎么算红】任何一个入口漏接共享时长校验，本测试不再收到400。
+    @Test void quoteAndSubmitRejectTheSameDurationHole() {
+        for (int duration : new int[]{0, 1, 6, 16}) {
+            assertEquals(400, assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                    () -> service.estimate("seedance", "seedance-v1-pro", duration)).getCode());
+            assertEquals(400, assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                    () -> service.submit(new VideoSubmitService.SubmitRequest(null, "seedance", "seedance-v1-pro",
+                            "prompt", java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                            duration, "16:9", null, null, "invalid-duration", null))).getCode());
+        }
+        verify(pricingService, never()).price(any());
+        verify(videoTaskService, never()).save(any(VideoTask.class));
+    }
+
+    // 【测什么】真实IMAGE模型接收UI的1占位，报价探针和提交落库均为8，金额同源。
+    // 【怎么算红】拒绝IMAGE的1或仅报价归一而任务仍存1，异常或字段断言使本测试失败。
+    @Test void imageOneSecondPlaceholderQuotesAndPersistsAsEight() throws Exception {
+        var spec = new org.example.seedancegenarate.engine.comfyui.Impl.ZImageTurboWorkflowBuilder(new ObjectMapper()).spec();
+        when(registry.get("comfyui")).thenReturn(engine);
+        when(engine.effectiveModel(spec.model())).thenReturn(spec.model());
+        when(engine.models()).thenReturn(java.util.List.of(spec));
+        when(modelAccessService.isOpen(spec.model())).thenReturn(true);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            VideoTask task = invocation.getArgument(0); task.setId(72L); return true;
+        }).when(videoTaskService).save(any(VideoTask.class));
+        var attempt = new GenerationAttempt(); attempt.setId(82L);
+        when(attemptService.stageCurrentAttempt(any(), org.mockito.ArgumentMatchers.eq(1),
+                org.mockito.ArgumentMatchers.isNull())).thenReturn(attempt);
+
+        var estimate = service.estimate("comfyui", spec.model(), 1);
+        var task = service.submit(new VideoSubmitService.SubmitRequest(null, "comfyui", spec.model(),
+                "image prompt", java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                1, "16:9", null, null, "image-one-placeholder", null));
+
+        assertEquals(8, estimate.duration());
+        assertEquals("IMAGE", estimate.outputType());
+        assertEquals(8, task.getDuration());
+        assertEquals("IMAGE", task.getOutputType());
+        assertEquals(estimate.amount(), task.getFreezeAmount());
+        ArgumentCaptor<VideoTask> priced = ArgumentCaptor.forClass(VideoTask.class);
+        verify(pricingService, org.mockito.Mockito.times(2)).price(priced.capture());
+        for (VideoTask value : priced.getAllValues()) {
+            assertEquals(8, value.getDuration());
+            assertEquals("IMAGE", value.getOutputType());
+        }
+        verify(videoTaskService).save(task);
+        verify(engine, never()).submit(any());
+    }
+
+    // 【测什么】音频缺省与非API旧16:9占位均落null比例，报价同源且内部长提示词保留。
+    // 【怎么算红】删除历史占位兼容、落库补比例或内部增加5000限制，本测试失败。
+    @Test void audioDefaultMatchesPersistedTask() throws Exception {
+        var spec = new org.example.seedancegenarate.engine.comfyui.Impl.MiniMaxMusic3WorkflowBuilder(new ObjectMapper()).spec();
+        when(registry.get("comfyui")).thenReturn(engine);
+        when(engine.effectiveModel(spec.model())).thenReturn(spec.model());
+        when(engine.models()).thenReturn(java.util.List.of(spec));
+        when(modelAccessService.isOpen(spec.model())).thenReturn(true);
+        var estimate = service.estimate("comfyui", spec.model(), null);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            VideoTask task = invocation.getArgument(0); task.setId(71L); return true;
+        }).when(videoTaskService).save(any(VideoTask.class));
+        var attempt = new GenerationAttempt(); attempt.setId(81L);
+        when(attemptService.stageCurrentAttempt(any(), org.mockito.ArgumentMatchers.eq(1),
+                org.mockito.ArgumentMatchers.isNull())).thenReturn(attempt);
+        String prompt = "音".repeat(6000);
+        for (String ratio : new String[]{null, "16:9"}) {
+            var task = service.submit(new VideoSubmitService.SubmitRequest(null, "comfyui", spec.model(),
+                    prompt, java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                    null, ratio, null, null, "audio-default-" + ratio, null));
+            assertEquals(spec.durationMin(), estimate.duration());
+            assertEquals(estimate.duration(), task.getDuration());
+            assertEquals("AUDIO", task.getOutputType());
+            assertEquals(prompt, task.getPrompt());
+            org.junit.jupiter.api.Assertions.assertNull(task.getRatio());
+            assertEquals(estimate.amount(), task.getFreezeAmount());
+        }
+    }
+
+    // 【测什么】API音频的16:9和非API的其他显式比例仍在定价/落库前400。
+    // 【怎么算红】删除apiKeyId条件或放宽16:9精确匹配，对应请求不再400。
+    @Test void audioPlaceholderCompatibilityNeverAppliesToApiOrOtherRatios() {
+        var spec = new org.example.seedancegenarate.engine.comfyui.Impl.MiniMaxMusic3WorkflowBuilder(new ObjectMapper()).spec();
+        when(registry.get("comfyui")).thenReturn(engine);
+        when(engine.effectiveModel(spec.model())).thenReturn(spec.model());
+        when(engine.models()).thenReturn(java.util.List.of(spec));
+        when(modelAccessService.isOpen(spec.model())).thenReturn(true);
+        for (String ratio : java.util.List.of("16:9", "9:16", "16:9 ")) {
+            Long apiKeyId = "16:9".equals(ratio) ? 12L : null;
+            assertEquals(400, assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                    () -> service.submit(new VideoSubmitService.SubmitRequest(null, "comfyui", spec.model(),
+                            "prompt", java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                            30, ratio, null, apiKeyId, "audio-ratio", null))).getCode());
+        }
+        verify(pricingService, never()).price(any());
+        verify(videoTaskService, never()).save(any(VideoTask.class));
+        verify(attemptService, never()).stageCurrentAttempt(any(), org.mockito.ArgumentMatchers.anyInt(), any());
+    }
+
+    // 【测什么】兼容不覆盖非音频空比例能力，也不吞掉有比例能力音频的非法16:9。
+    // 【怎么算红】删除AUDIO或ratios空条件，对应模型的16:9会被静默归一并越过400。
+    @Test void audioPlaceholderCompatibilityRequiresAudioAndEmptyRatios() {
+        for (var spec : java.util.List.of(
+                new org.example.seedancegenarate.engine.ModelSpec("seedance", "seedance-v1-pro", "Video",
+                        false, 0, 0, java.util.List.of(), 5, 15, java.util.List.of(5, 8), OutputType.VIDEO),
+                new org.example.seedancegenarate.engine.ModelSpec("seedance", "seedance-v1-pro", "Audio",
+                        false, 0, 0, java.util.List.of("1:1"), 30, 300, java.util.List.of(30), OutputType.AUDIO))) {
+            when(engine.models()).thenReturn(java.util.List.of(spec));
+            assertEquals(400, assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                    () -> service.submit(new VideoSubmitService.SubmitRequest(null, "seedance", spec.model(),
+                            "prompt", java.util.List.of(), java.util.List.of(), java.util.List.of(),
+                            null, "16:9", null, null, "ratio-capability", null))).getCode());
+        }
+        verify(pricingService, never()).price(any());
+        verify(videoTaskService, never()).save(any(VideoTask.class));
+    }
+
+    // 【测什么】开放闸门通过但没有ModelSpec时拒绝，不以mock或历史默认绕过能力校验。
+    // 【怎么算红】找不到能力时回退默认VIDEO/8，本测试将进入定价而不是400。
+    @Test void missingCapabilitiesDoNotFallBackToDefaults() {
+        when(engine.models()).thenReturn(java.util.List.of());
+        assertEquals(400, assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                () -> service.estimate("seedance", "seedance-v1-pro", 8)).getCode());
+        verify(pricingService, never()).price(any());
     }
 
     @Test
@@ -171,9 +304,10 @@ class VideoSubmitServiceEstimateTest {
         admin.setRole("ADMIN");
         UserContext.setUser(admin);
         when(registry.get("comfyui")).thenReturn(engine);
-        when(engine.effectiveModel("t2v")).thenReturn("t2v");
-        when(engine.outputType("t2v")).thenReturn(OutputType.VIDEO);
-        when(modelAccessService.isOpen("t2v")).thenReturn(true);
+        var spec = new org.example.seedancegenarate.engine.comfyui.Impl.MiniMaxH3TextToVideoWorkflowBuilder(new ObjectMapper()).spec();
+        when(engine.effectiveModel("t2v")).thenReturn(spec.model());
+        when(engine.models()).thenReturn(java.util.List.of(spec));
+        when(modelAccessService.isOpen(spec.model())).thenReturn(true);
         org.mockito.Mockito.doAnswer(invocation -> {
             VideoTask task = invocation.getArgument(0);
             task.setId(71L);

@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import org.example.seedancegenarate.context.UserContext;
 import org.example.seedancegenarate.dto.ApiModelView;
 import org.example.seedancegenarate.engine.ModelSpec;
-import org.example.seedancegenarate.engine.VideoEngine;
 import org.example.seedancegenarate.engine.VideoEngineRegistry;
 import org.example.seedancegenarate.service.ModelAccessService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -53,7 +52,9 @@ public class ApiModelController {
                 spec.outputType().name(),
                 spec.needImages(), spec.imageMin(), spec.imageMax(),
                 spec.ratios(), durations, spec.megapixels(),
-                modelAccessService.isOpen(spec.model())
+                modelAccessService.isOpen(spec.model()),
+                spec.videoMax(), spec.audioMax(), spec.needImageOrVideo(),
+                spec.imageInputMode().name()
         );
     }
 }

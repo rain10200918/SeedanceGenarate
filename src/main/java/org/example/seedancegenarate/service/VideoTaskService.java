@@ -7,6 +7,9 @@ import org.example.seedancegenarate.entity.AsyncJob;
 
 public interface VideoTaskService extends IService<VideoTask> {
 
+    /** Display names for an already authorized detail; never used to grant access. */
+    org.example.seedancegenarate.dto.TaskCallerView getCaller(Long id);
+
     /** 按提供方远端任务 ID 反查任务（回调路由用）。 */
     VideoTask getByProviderTaskId(String provider, String providerTaskId);
 

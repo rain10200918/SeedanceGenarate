@@ -125,6 +125,19 @@ class FinalizeTransactionScopeTest {
         }).when(walletService).settle(any(), any(), anyLong());
     }
 
+    // 【测什么】API成功在原SUCCESS事务内调用预算/钱包协调，下载仍在事务外。
+    // 【怎么算红】删除API预算结算分支或移到事务外会漏调/触发inTransaction断言。
+    @Test void apiSuccessCoordinatesBudgetInsideTerminalTransaction() throws Exception {
+        var billing = mock(org.example.seedancegenarate.service.BillingAuthorizationService.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "billingAuthorization", billing);
+        task.setApiKeyId(31L);
+        org.mockito.Mockito.doAnswer(inv -> { assertTrue(inTransaction.get()); return null; })
+                .when(billing).settle(any(), any());
+        service.finalizeTask(task, "http://node/view?filename=a.mp4");
+        verify(billing).settle(task, new BigDecimal("4.50"));
+        verify(walletService, never()).settle(any(), any(), anyLong());
+    }
+
     private VideoDownloadService.DownloadedArtifact artifact() {
         return new VideoDownloadService.DownloadedArtifact("tsk_910e6f83.mp4",
                 new org.example.seedancegenarate.service.ArtifactStorage.StoredArtifact(

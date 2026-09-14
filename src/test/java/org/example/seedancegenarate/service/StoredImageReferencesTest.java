@@ -9,6 +9,22 @@ import static org.mockito.Mockito.*;
 import static org.mockito.ArgumentMatchers.*;
 
 class StoredImageReferencesTest {
+    // 【测什么】存储网络故障不冒充参考已失效，503可原请求重试；确实不存在仍拒绝为400。
+    // 【怎么算红】把validateAvailable网络异常转回400，503断言必红；放过exists=false则拒绝断言必红。
+    @Test void availabilitySeparatesTransientFailureFromMissingObject() throws Exception {
+        var tasks=mock(VideoTaskService.class);var storage=mock(ArtifactStorage.class);
+        var source=new VideoTask();source.setUserId(1L);source.setBizTaskId("source");source.setOutputType("IMAGE");source.setStatus("SUCCESS");
+        source.setArtifactStorageType("OSS");source.setArtifactKey("outputs/cat.png");source.setCreateTime(LocalDateTime.now());
+        when(tasks.getOne(any(),eq(false))).thenReturn(source);
+        var service=new StoredImageReferences(tasks,new ContentModerationPolicy(),new ArtifactExpiryPolicy(30),storage);
+        var reference=new StoredImageReferences.Reference("source","outputs/cat.png");
+        when(storage.exists(anyString())).thenThrow(new java.io.IOException("private network endpoint"));
+        var error=assertThrows(org.example.seedancegenarate.exception.BusinessException.class,()->service.validateAvailable(1L,reference));
+        assertEquals(503,error.getCode());assertFalse(error.getMessage().contains("private"));
+        doReturn(false).when(storage).exists(anyString());
+        assertEquals(400,assertThrows(org.example.seedancegenarate.exception.BusinessException.class,()->service.validateAvailable(1L,reference)).getCode());
+        doReturn(true).when(storage).exists(anyString());assertDoesNotThrow(()->service.validateAvailable(1L,reference));
+    }
     // 【测什么】签名只发生于使用阶段，且跨用户、换key、审核和过期均阻断。
     // 【怎么算红】去掉validate里的owner/key/审核/过期任一检查，相应assertThrows失败。
     @Test void signingRevalidatesStoredIdentity() throws Exception {
