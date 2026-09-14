@@ -40,7 +40,7 @@ public class MiniMaxH3HdFastWorkflowBuilder implements WorkflowBuilder {
     private static final String NODE_UNIFIED = "212";    // MiniMaxH3Unified
     private static final String NODE_PROMPT = "217";     // PrimitiveStringMultiline
 
-    private static final double FIXED_MEGAPIXELS = 0.9;
+    private static final double FIXED_MEGAPIXELS = 0.5;
     private static final int IMAGE_MIN = 0;
     private static final int IMAGE_MAX = 9;
     private static final int VIDEO_MAX = 3;
@@ -94,7 +94,7 @@ public class MiniMaxH3HdFastWorkflowBuilder implements WorkflowBuilder {
         requireInputs(root, NODE_SEED).put("noise_seed",
                 ThreadLocalRandom.current().nextLong(1L, 1_000_000_000_000_000L));
 
-        // 3. 注入比例与固定分辨率 (0.9 Mpx)
+        // 3. 注入比例与固定分辨率 (0.5 Mpx)
         ObjectNode res = requireInputs(root, NODE_RES);
         res.put("aspect_ratio", ratioLabel(command.getRatio()));
         res.put("megapixels", FIXED_MEGAPIXELS);
@@ -104,6 +104,7 @@ public class MiniMaxH3HdFastWorkflowBuilder implements WorkflowBuilder {
         ObjectNode unified = requireInputs(root, NODE_UNIFIED);
         unified.put("duration", clampDuration(command.getDuration()));
         unified.put("media_state", buildMediaState(files));
+
 
         // 5. 产物设置
         ObjectNode output = requireInputs(root, NODE_OUTPUT);

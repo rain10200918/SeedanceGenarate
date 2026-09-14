@@ -26,6 +26,6 @@
   "164": {"inputs": {"video_latent": ["163", 0], "audio_latent": ["165", 1]}, "class_type": "LTXVConcatAVLatent", "_meta": {"title": "LTXVConcatAVLatent"}},
   "165": {"inputs": {"av_latent": ["125", 0]}, "class_type": "LTXVSeparateAVLatent", "_meta": {"title": "LTXV分离音视频潜空间"}},
   "167": {"inputs": {"frame_rate": 24, "loop_count": 0, "filename_prefix": "video/minimax-h3-hd", "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19, "save_metadata": false, "trim_to_audio": false, "pingpong": false, "save_output": true, "images": ["158", 0], "audio": ["157", 0]}, "class_type": "VHS_VideoCombine", "_meta": {"title": "合并为视频"}},
-  "171": {"inputs": {"sage_attention": "auto", "allow_compile": false, "model": ["152", 0]}, "class_type": "PathchSageAttentionKJ", "_meta": {"title": "SAGE注意力补丁KJ"}},
-  "172": {"inputs": {"sage_attention": "auto", "allow_compile": false, "model": ["152", 0]}, "class_type": "PathchSageAttentionKJ", "_meta": {"title": "SAGE注意力补丁KJ"}}
+  "171": {"inputs": {"sage_attention": "sageattn_qk_int8_pv_fp16_cuda", "allow_compile": false, "model": ["152", 0]}, "class_type": "PathchSageAttentionKJ", "_meta": {"title": "SAGE注意力补丁KJ"}},
+  "172": {"inputs": {"sage_attention": "sageattn_qk_int8_pv_fp16_cuda", "allow_compile": false, "model": ["152", 0]}, "class_type": "PathchSageAttentionKJ", "_meta": {"title": "SAGE注意力补丁KJ"}}
 }

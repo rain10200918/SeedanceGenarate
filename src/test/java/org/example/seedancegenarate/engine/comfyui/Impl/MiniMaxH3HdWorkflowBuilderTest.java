@@ -111,6 +111,10 @@ class MiniMaxH3HdWorkflowBuilderTest {
                 wf.path("152").path("inputs").path("lora_name").asText());
         assertEquals("152", wf.path("172").path("inputs").path("model").get(0).asText());
         assertEquals("152", wf.path("171").path("inputs").path("model").get(0).asText());
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("171").path("inputs").path("sage_attention").asText());
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("172").path("inputs").path("sage_attention").asText());
         assertEquals("172", wf.path("126").path("inputs").path("model").get(0).asText());
         assertEquals("171", wf.path("160").path("inputs").path("model").get(0).asText());
     }

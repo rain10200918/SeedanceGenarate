@@ -57,6 +57,7 @@ class MiniMaxH3T2vHdWorkflowBuilderTest {
         // 2. 分辨率比例与 megapixels
         assertEquals("9:16 (Portrait Widescreen)", wf.path("159").path("inputs").path("aspect_ratio").asText());
         assertEquals(0.5, wf.path("159").path("inputs").path("megapixels").asDouble(), 1e-9);
+        assertEquals("fp16", wf.path("209").path("inputs").path("precision").asText());
 
         // 3. 时长注入
         assertEquals(12, wf.path("134").path("inputs").path("value").asInt());
@@ -64,6 +65,10 @@ class MiniMaxH3T2vHdWorkflowBuilderTest {
         // 4. 两段独立随机种子
         assertNotEquals(42L, wf.path("130").path("inputs").path("noise_seed").asLong());
         assertNotEquals(42L, wf.path("218").path("inputs").path("noise_seed").asLong());
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("238").path("inputs").path("sage_attention").asText());
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("239").path("inputs").path("sage_attention").asText());
     }
 
     @Test

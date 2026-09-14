@@ -14,8 +14,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 纯单元测试：验证 MiniMax-H3 高清快速版 (minimaxh3-hd-fast) 的注入：
- * 1. 提示词 (217) / 随机种子 (129) / 比例与固定分辨率 0.9 (115) / 时长与 media_state (212)；
- * 2. 分辨率在 spec 中不暴露可选档位，且 build 时恒定写死 0.9；
+ * 1. 提示词 (217) / 随机种子 (129) / 比例与固定分辨率 0.5 (115) / 时长与 media_state (212)；
+ * 2. 分辨率在 spec 中不暴露可选档位，且 build 时恒定写死 0.5；
  * 3. 多模态素材正确组装进 media_state JSON。
  */
 class MiniMaxH3HdFastWorkflowBuilderTest {
@@ -31,7 +31,7 @@ class MiniMaxH3HdFastWorkflowBuilderTest {
                 .prompt("夕阳下的海滩漫步")
                 .duration(20)          // 超范围 → 夹取到 15
                 .ratio("9:16")
-                .megapixels(1.5)       // 即使命令传入其他值，也必须写死 0.9
+                .megapixels(1.5)       // 即使命令传入其他值，也必须写死 0.5
                 .model("minimaxh3-hd-fast")
                 .build();
 
@@ -47,10 +47,10 @@ class MiniMaxH3HdFastWorkflowBuilderTest {
         // 2. 随机种子
         assertNotEquals(102364714705667L, wf.path("129").path("inputs").path("noise_seed").asLong());
 
-        // 3. 比例与写死 0.9 分辨率
+        // 3. 比例与稳定二采显存基线 0.5 分辨率
         JsonNode res = wf.path("115").path("inputs");
         assertEquals("9:16 (Portrait Widescreen)", res.path("aspect_ratio").asText());
-        assertEquals(0.9, res.path("megapixels").asDouble(), 1e-9);
+        assertEquals(0.5, res.path("megapixels").asDouble(), 1e-9);
         assertEquals(32, res.path("multiple").asInt());
 
         // 4. 时长与 media_state

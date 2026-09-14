@@ -68,6 +68,7 @@ class MiniMaxH3Fl2vaHdWorkflowBuilderTest {
         assertEquals("16:9 (Widescreen)", wf.path("159").path("inputs").path("aspect_ratio").asText());
         assertEquals(0.6, wf.path("159").path("inputs").path("megapixels").asDouble(), 1e-9);
         assertEquals(0.6, wf.path("119").path("inputs").path("megapixels").asDouble(), 1e-9);
+        assertEquals("fp16", wf.path("209").path("inputs").path("precision").asText());
 
         // 4. 时长注入 (10秒)
         assertEquals(10, wf.path("134").path("inputs").path("value").asInt());
@@ -75,6 +76,12 @@ class MiniMaxH3Fl2vaHdWorkflowBuilderTest {
         // 5. 两段独立随机噪波种子
         assertNotEquals(42L, wf.path("130").path("inputs").path("noise_seed").asLong());
         assertNotEquals(42L, wf.path("218").path("inputs").path("noise_seed").asLong());
+
+        // 两段采样都必须使用明确的 SageAttention CUDA 后端
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("238").path("inputs").path("sage_attention").asText());
+        assertEquals("sageattn_qk_int8_pv_fp16_cuda",
+                wf.path("239").path("inputs").path("sage_attention").asText());
 
         // 6. 二采最终落盘设置
         assertTrue(wf.path("221").path("inputs").path("save_output").asBoolean());
