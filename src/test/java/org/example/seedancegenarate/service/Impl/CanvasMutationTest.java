@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.seedancegenarate.canvas.CanvasNodeTypeRegistry;
 import org.example.seedancegenarate.canvas.type.AssetNodeType;
 import org.example.seedancegenarate.canvas.type.GenerateNodeType;
+import org.example.seedancegenarate.canvas.type.GroupNodeType;
 import org.example.seedancegenarate.canvas.type.TextNodeType;
 import org.example.seedancegenarate.canvas.validator.AcyclicValidator;
+import org.example.seedancegenarate.canvas.validator.GroupMembershipValidator;
 import org.example.seedancegenarate.canvas.validator.NodeConfigValidator;
 import org.example.seedancegenarate.canvas.validator.PortCapacityValidator;
 import org.example.seedancegenarate.canvas.validator.PortCompatibilityValidator;
@@ -74,10 +76,10 @@ class CanvasMutationTest {
         GenerateNodeType generate = new GenerateNodeType(engineRegistry);
         ReflectionTestUtils.setField(generate, "defaultProvider", "seedance");
         CanvasNodeTypeRegistry typeRegistry = new CanvasNodeTypeRegistry(
-                List.of(new AssetNodeType(), new TextNodeType(), generate));
+                List.of(new AssetNodeType(), new TextNodeType(), generate, new GroupNodeType()));
 
         service = new CanvasServiceImpl(canvasMapper, nodeMapper, edgeMapper, typeRegistry,
-                List.of(new NodeConfigValidator(typeRegistry),
+                List.of(new GroupMembershipValidator(typeRegistry), new NodeConfigValidator(typeRegistry),
                         new PortCompatibilityValidator(typeRegistry),
                         new PortCapacityValidator(typeRegistry),
                         new AcyclicValidator(),
