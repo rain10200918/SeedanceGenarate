@@ -49,8 +49,13 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ApiKeyController {
 
+    /** 密钥业务服务：负责用户密钥的创建、查询、改名、撤销等核心操作 */
     private final ApiKeyService apiKeyService;
+
+    /** 用户表 Mapper：用于查询用户实体的并发策略配置 */
     private final AppUserMapper appUserMapper;
+
+    /** 并发策略器：根据用户角色计算该账号允许同时并发执行的最大生成任务数 */
     private final ConcurrencyPolicy concurrencyPolicy;
 
     /** 每账号 key 数量上限：挡住脚本无限建（每把都是一个泄漏面） */
@@ -58,8 +63,15 @@ public class ApiKeyController {
     private int maxPerUser;
 
     /**
-     * 我的钥匙列表（只列在用的；明文不在其中，库里只有哈希，物理上返回不了）。
-     * 已删除的不出现在这里，但行仍在库中——见 {@link #revoke} 的说明。
+     * 【我的钥匙列表】
+     * 查询当前登录用户创建的所有 API Key 列表
+     * <p>
+     * 接口路径：GET /api/api-keys
+     * 注意：
+     * 1. 库里只存储哈希值，因此返回结果中只有 keyPrefix（如 sk-abc...）用于界面辨识，绝无明文；
+     * 2. 已软删除（撤销）的 Key 会被自动过滤，不出现在列表中。
+     *
+     * @return Result<List<ApiKeyView>>
      */
     @GetMapping
     public Result<List<ApiKeyView>> list() {
@@ -69,11 +81,25 @@ public class ApiKeyController {
                 .toList());
     }
 
-    /** 自助创建：明文只在这个响应里出现一次 */
+    /**
+     * 【自助创建 API Key】
+     * 用户在控制台自己创建一把用于调用开放 API 的密钥
+     * <p>
+     * 接口路径：POST /api/api-keys
+     * 重要安全细节：
+     * 1. 数量限制：每账号最多创建 maxPerUser 把 Key（默认 50），防止滥用；
+     * 2. 明文只展示一次：plainKey 仅在本次 HTTP 返回，绝不落库，用户必须自行妥善保存；
+     * 3. 自动生成 Webhook Secret：用于外部接收回调通知时的 HMAC-SHA256 验签。
+     *
+     * @param request 包含可选的 key 备注名称和 Webhook 回调地址
+     * @param servletRequest 用于获取用户当前的客户端真实 IP
+     * @return Result<CreateApiKeyResponse>
+     */
     @PostMapping
     public Result<CreateApiKeyResponse> create(@RequestBody(required = false) SelfApiKeyRequest request,
                                                HttpServletRequest servletRequest) {
         Long userId = UserContext.requireUserId();
+        // 1. 检查该用户现存 key 数量，超过阈值直接拦截
         long existing = apiKeyService.countByOwner(userId);
         if (existing >= maxPerUser) {
             throw BusinessException.badRequest(
@@ -81,31 +107,59 @@ public class ApiKeyController {
         }
         String name = request == null ? null : request.getName();
         String callbackUrl = request == null ? null : request.getCallbackUrl();
+        // 2. 调用创建服务，传入属主 ID、默认名称、回调地址与 IP
         ApiKeyService.CreatedApiKey created = apiKeyService.createOwned(
                 userId, defaultName(name, existing), callbackUrl,
                 userId, IpUtils.getClientIp(servletRequest));
         log.info("用户自助创建 API Key: userId={}, keyId={}, prefix={}",
                 userId, created.record().getId(), created.record().getKeyPrefix());
+        // 3. 返回包含明文 Key 与 WebhookSecret 的响应
         return Result.success(new CreateApiKeyResponse(
                 ApiKeyView.of(created.record(), null), created.plainKey(), created.record().getWebhookSecret()));
     }
 
+    /**
+     * 【更新 Webhook 回调地址】
+     * 修改任务完成后的 HTTP 通知回调 URL
+     * <p>
+     * 接口路径：PATCH /api/api-keys/{id}/callback
+     *
+     * @param id 目标 API Key ID
+     * @param request 包含新的 callbackUrl
+     */
     @PatchMapping("/{id}/callback")
     public Result<Void> updateCallback(@PathVariable Long id,
                                       @RequestBody UpdateApiKeyCallbackRequest request) {
         Long owner = UserContext.requireUserId();
         if (request == null) throw BusinessException.badRequest("请提供回调配置");
+        // updateCallbackOwned 内部会自动带上 owner 条件，若 key 不属于当前用户则返回 false
         if (!apiKeyService.updateCallbackOwned(id, owner, request.callbackUrl())) throw notFound();
         return Result.success(null);
     }
 
+    /**
+     * 【轮转 / 重置 Webhook 签名秘钥】
+     * 当开发者怀疑自己的回调密钥泄露时，重新生成一个全新的 Webhook Secret
+     * <p>
+     * 接口路径：POST /api/api-keys/{id}/webhook-secret/rotate
+     *
+     * @param id 目标 API Key ID
+     * @return Result<RotateWebhookSecretResponse> 包含新生成的 webhook secret
+     */
     @PostMapping("/{id}/webhook-secret/rotate")
     public Result<RotateWebhookSecretResponse> rotateWebhookSecret(@PathVariable Long id) {
         return Result.success(new RotateWebhookSecretResponse(
                 apiKeyService.rotateWebhookSecretOwned(id, UserContext.requireUserId())));
     }
 
-    /** 改备注 */
+    /**
+     * 【修改密钥备注名称】
+     * <p>
+     * 接口路径：PATCH /api/api-keys/{id}
+     *
+     * @param id 目标 API Key ID
+     * @param request 包含新的名称
+     */
     @PatchMapping("/{id}")
     public Result<Void> rename(@PathVariable Long id, @RequestBody SelfApiKeyRequest request) {
         Long userId = UserContext.requireUserId();
@@ -116,11 +170,15 @@ public class ApiKeyController {
     }
 
     /**
-     * 删除自己的钥匙。用户视角就是「删掉了」：立刻失效、从列表消失、不再占名额。
+     * 【撤销 / 删除自己的 API Key】
+     * 用户视角就是「删掉了」：立刻失效、从列表消失、不再占名额。
      * <p>
-     * <b>库里的行保留</b>：{@code api_call_log.api_key_id} 与 {@code video_task.api_key_id}
-     * 还指着它，真删行就再也答不出「这笔消费是哪把 key 花的」——企业按部门归因、
-     * 账单争议时要的正是这个。幂等：重复删除照样成功。
+     * <b>架构设计亮点：库里的行保留（软删除语义）</b>
+     * 数据库表 api_call_log 和 video_task 都以外键记录了 api_key_id。
+     * 如果真把这行物理删除，历史消费账单将无法统计“这笔钱具体是哪把 Key 消耗的”。
+     * 因此底层将状态标记为 REVOKED，同时具有幂等性（多次调用均返回成功）。
+     * <p>
+     * 接口路径：DELETE /api/api-keys/{id}
      */
     @DeleteMapping("/{id}")
     public Result<Void> revoke(@PathVariable Long id) {
@@ -133,7 +191,10 @@ public class ApiKeyController {
     }
 
     /**
-     * 我的账号能同时跑几个、已经分出去多少 —— 用户要分配份额，得先看得到这两个数。
+     * 【查询账号并发配额】
+     * 查询我的主账号支持同时并发跑几个任务、已为各把 Key 分配了多少份额。
+     * <p>
+     * 接口路径：GET /api/api-keys/quota
      */
     @GetMapping("/quota")
     public Result<ApiKeyQuotaView> quota() {
@@ -144,14 +205,14 @@ public class ApiKeyController {
     }
 
     /**
+     * 【为某把 Key 分配并发任务数上限】
      * 给自己的某把 key 分配「同时可跑任务数」。
      * <p>
-     * <b>这个字段能放给用户自己设，唯一的理由是它只能收紧</b>（D-032）——
-     * 生效值恒为 {@code min(账号总量, 本值)}，改它改不出更多容量。
+     * <b>安全设计考量（为什么允许用户自己配）：</b>
+     * 这个字段允许用户自己设，是因为它<b>只能收紧、不能放大</b>：生效值恒为 min(账号总量, 本值)。
+     * 超过账号总量时直接报错拒绝，不静默按总量保存，避免给用户造成错觉。
      * <p>
-     * 超过账号总量时<b>直接拒绝，不静默按总量保存</b>：静默截断的话页面显示 999、
-     * 实际按 50 跑，用户会一直以为自己分配了 999 —— 和管理端那个「档位拼错静默失效」
-     * 是同一类陷阱。
+     * 接口路径：PATCH /api/api-keys/{id}/share
      */
     @PatchMapping("/{id}/share")
     public Result<Void> setShare(@PathVariable Long id, @RequestBody ApiKeyShareRequest request) {
@@ -179,15 +240,16 @@ public class ApiKeyController {
     }
 
     /**
-     * 不属于自己的 id 一律报「不存在」，而不是「无权限」。
-     * 403 会告诉攻击者「这个 id 是存在的」，等于送一个可枚举的存在性预言机。
+     * 安全辅助方法：不属于自己的 id 一律报「不存在（404）」，而不是「无权限（403）」。
+     * 返回 403 会直接告诉攻击者该 ID 在全库中真实存在，相当于提供了一个可枚举的扫描探测漏洞。
      */
     private BusinessException notFound() {
         return BusinessException.notFound("API Key 不存在");
     }
 
-    /** 备注不强制填；不填给个能认出来的默认名，而不是留空让列表里一排「未命名」 */
+    /** 备注名称默认值：用户未填写时自动命名为 "API Key N"，防止前端展示一片空白 */
     private String defaultName(String name, long existing) {
         return name == null || name.isBlank() ? "API Key " + (existing + 1) : name;
     }
 }
+
