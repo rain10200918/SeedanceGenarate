@@ -27,8 +27,14 @@ public interface ApiVideoService {
             List<String> audioUrls,
             Integer duration,
             String ratio,
-            Double megapixels
+            Double megapixels,
+            String resolution
     ) {
+        public CreateContext(ApiKey apiKey,String requestId,String clientIp,String userAgent,String prompt,
+                             String model,List<String> imageUrls,List<String> videoUrls,List<String> audioUrls,
+                             Integer duration,String ratio,Double megapixels) {
+            this(apiKey,requestId,clientIp,userAgent,prompt,model,imageUrls,videoUrls,audioUrls,duration,ratio,megapixels,null);
+        }
         /** 兼容旧的 Java 调用方；视频/音频默认为空。 */
         public CreateContext(ApiKey apiKey, String requestId, String clientIp, String userAgent,
                              String prompt, String model, List<String> imageUrls,
@@ -46,6 +52,7 @@ public interface ApiVideoService {
 
     /** 全局模型解析后按真实提交口径计价；纯读，不创建任务也不冻结余额。 */
     VideoSubmitService.PriceEstimate quote(String model, Integer duration);
+    VideoSubmitService.PriceEstimate quote(String model, Integer duration, String resolution, Double megapixels);
 
     /** 校验全局模型存在且已开放，返回规范化后的模型定位。 */
     ModelTarget validateModel(String model);

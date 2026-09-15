@@ -61,7 +61,7 @@ class ApiModelControllerTest {
                 [{"model":"model","label":"模型","provider":"provider","outputType":"VIDEO",
                   "needImages":true,"imageMin":1,"imageMax":3,"ratios":["16:9","1:1"],
                   "durations":[5,8,10],"megapixels":[1.0,2.0],"open":true,
-                  "videoMax":2,"audioMax":4,"needImageOrVideo":true,"imageInputMode":"%s"}]
+                  "videoMax":2,"audioMax":4,"needImageOrVideo":true,"imageInputMode":"%s","resolutions":[],"defaultResolution":null}]
                 """.formatted(mode.name()));
         assertEquals(expected, actual);
     }
@@ -78,7 +78,7 @@ class ApiModelControllerTest {
                 [{"model":"zero","label":"零能力","provider":"provider","outputType":"%s",
                   "needImages":false,"imageMin":0,"imageMax":0,"ratios":[],"durations":[],
                   "megapixels":[],"open":true,"videoMax":0,"audioMax":0,
-                  "needImageOrVideo":false,"imageInputMode":"NONE"}]
+                  "needImageOrVideo":false,"imageInputMode":"NONE","resolutions":[],"defaultResolution":null}]
                 """.formatted(outputType.name())), read(mvc(engine("provider", spec))));
     }
 
@@ -105,7 +105,7 @@ class ApiModelControllerTest {
                 {"model":"legacy","label":"旧模型","provider":"provider","outputType":"IMAGE",
                  "needImages":false,"imageMin":0,"imageMax":%d,"ratios":["1:1"],"durations":[],
                  "megapixels":[1.0],"open":false,"videoMax":0,"audioMax":0,
-                 "needImageOrVideo":false,"imageInputMode":"%s"}
+                 "needImageOrVideo":false,"imageInputMode":"%s","resolutions":[],"defaultResolution":null}
                 """.formatted(imageMax, imageMax == 0 ? "NONE" : "UNSPECIFIED")),
                 mapper.readTree(mapper.writeValueAsString(view)));
     }

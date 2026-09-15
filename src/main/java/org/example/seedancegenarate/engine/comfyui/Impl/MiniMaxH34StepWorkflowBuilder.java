@@ -96,7 +96,10 @@ public class MiniMaxH34StepWorkflowBuilder implements WorkflowBuilder {
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3 4-step 多参考生视频",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),
-                OutputType.VIDEO, MEGAPIXELS, VIDEO_MAX, AUDIO_MAX, true);
+                OutputType.VIDEO, MEGAPIXELS, VIDEO_MAX, AUDIO_MAX, true).withResolutions(List.of(
+                        new ModelSpec.ResolutionOption("480p", 0.4, false),
+                        new ModelSpec.ResolutionOption("720p", 0.9, false),
+                        new ModelSpec.ResolutionOption("1080p", 2.0, false)), DEFAULT_MEGAPIXELS);
     }
 
     @Override

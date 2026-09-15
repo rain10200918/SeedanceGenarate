@@ -33,6 +33,15 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ApiVideoControllerTest {
+    // 【测什么】公开请求resolution完整透传到原始指纹上下文。
+    // 【怎么算红】Controller丢弃resolution时captured断言失败。
+    @Test void resolutionReachesCreateContext() {
+        stubCreatedTask();
+        controller().create(new ApiVideoCreateRequest("p","minimax-h3-t2v-hd",List.of(),List.of(),List.of(),
+                8,"16:9",null,"2k"),"resolution-key",authenticatedRequest());
+        var capture=ArgumentCaptor.forClass(ApiVideoService.CreateContext.class);
+        verify(apiVideoService).create(capture.capture());assertEquals("2k",capture.getValue().resolution());
+    }
     @Mock
     private ApiVideoService apiVideoService;
     @Mock

@@ -25,7 +25,7 @@ public class AgentDirectGenerationGateway {
     private final UserAssetMapper assets;
     private final OssConfig oss;
     private final ObjectMapper json;
-    private static final Set<String> INPUT=Set.of("provider","model","prompt","ratio","duration","megapixels");
+    private static final Set<String> INPUT=Set.of("provider","model","prompt","ratio","duration","megapixels","resolution");
     public List<ModelSpec> models() {
         return engines.all().stream().flatMap(e->e.models().stream())
                 .filter(m->m.outputType()!=null && Set.of("IMAGE","VIDEO","AUDIO").contains(m.outputType().name()) && access.isOpen(m.model()))
@@ -60,6 +60,18 @@ public class AgentDirectGenerationGateway {
         input.fieldNames().forEachRemaining(k->{if(!INPUT.contains(k))throw BusinessException.badRequest("生成参数包含不支持的字段");});
         var out=json.createObjectNode().put("provider",text(input,"provider",64)).put("model",text(input,"model",128)).put("prompt",text(input,"prompt",4000));
         ModelSpec m=model(type,out);
+        if(input.hasNonNull("resolution")) {
+            var tier=input.get("resolution");
+            if(!tier.isTextual()) throw BusinessException.badRequest("清晰度档位必须是字符串");
+            var mp=input.get("megapixels");
+            if(mp!=null && !mp.isNull() && !mp.isNumber()) throw BusinessException.badRequest("megapixels必须是数字");
+            Double resolved=GenerationParameters.resolveMegapixels(m,tier.textValue(),
+                    mp==null || mp.isNull()?null:mp.doubleValue());
+            ObjectNode clean=((ObjectNode)input).deepCopy();
+            clean.remove(List.of("resolution","megapixels"));
+            if(resolved!=null)clean.put("megapixels",resolved);
+            return normalize(type,clean);
+        }
         if("AUDIO".equals(type)) {
             if(input.has("ratio") || input.has("megapixels"))throw BusinessException.badRequest("音频不支持画幅或分辨率");
         } else {

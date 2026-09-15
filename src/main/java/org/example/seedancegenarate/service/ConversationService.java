@@ -151,9 +151,22 @@ public class ConversationService {
         if (gen == null || !StringUtils.hasText(gen.model())) {
             throw BusinessException.badRequest("请选择生成模型");
         }
+        String clientMsgId = trimToNull(req.clientMsgId(), 64);
+        // 已有身份先返回；仍保留下面事务内的竞争复验。
+        if (clientMsgId != null) {
+            ConversationMessage existing = messageMapper.selectOne(new LambdaQueryWrapper<ConversationMessage>()
+                    .eq(ConversationMessage::getConversationId, conversationId)
+                    .eq(ConversationMessage::getClientMsgId, clientMsgId).last("LIMIT 1"));
+            if (existing != null) {
+                if (Boolean.TRUE.equals(requireOwned(userId,conversationId).getArchived()))
+                    throw BusinessException.conflict("对话已归档，先恢复再发");
+                return turnView(userId,conversationId,existing.getSeq());
+            }
+        }
+        Double resolvedMp = gen.resolution()==null ? gen.megapixels()
+                : videoSubmitService.validateResolution(gen.provider(),gen.model(),gen.resolution(),gen.megapixels());
         boolean agent = !MODE_DIRECT.equalsIgnoreCase(req.mode());
         List<SendMessageRequest.Attachment> attachments = mediaResolver.resolve(normalizeAttachments(req.attachments()), files);
-        String clientMsgId = trimToNull(req.clientMsgId(), 64);
 
         // ① 锁对话、幂等重放、预留整轮 seq、落用户气泡
         Turn turn = transactionTemplate.execute(status -> {
@@ -230,7 +243,7 @@ public class ConversationService {
         params.put("prompt", prompt);
         params.put("ratio", gen.ratio());
         params.put("duration", gen.duration());
-        params.put("megapixels", gen.megapixels());
+        params.put("megapixels", resolvedMp);
         params.put("imageUrls", imageUrls);
         params.put("videoUrls", videoUrls);
         params.put("audioUrls", audioUrls);
@@ -249,7 +262,7 @@ public class ConversationService {
                     task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                             userId, gen.provider(), gen.model(), finalPrompt,
                             imageUrls, videoUrls, audioUrls,
-                            gen.duration(), gen.ratio(), gen.megapixels(),
+                            gen.duration(), gen.ratio(), resolvedMp,
                             null, "conv-msg:" + g.getId(), null));
                 } catch (RuntimeException e) {
                     throw e;

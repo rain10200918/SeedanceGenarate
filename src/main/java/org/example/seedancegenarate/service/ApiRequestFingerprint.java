@@ -15,7 +15,7 @@ public final class ApiRequestFingerprint {
         try {
             var bytes = new ByteArrayOutputStream();
             var out = new DataOutputStream(bytes);
-            field(out, "api-generation:v1");
+            field(out, request.resolution()==null ? "api-generation:v1" : "api-generation:v2");
             field(out, trim(request.prompt()));
             field(out, trim(request.model()));
             urls(out, request.imageUrls());
@@ -24,6 +24,7 @@ public final class ApiRequestFingerprint {
             field(out, request.duration() == null ? null : request.duration().toString());
             field(out, request.ratio());
             field(out, request.megapixels() == null ? null : request.megapixels().toString());
+            if (request.resolution()!=null) field(out,request.resolution());
             out.flush();
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray()));
         } catch (java.io.IOException | java.security.NoSuchAlgorithmException failure) {

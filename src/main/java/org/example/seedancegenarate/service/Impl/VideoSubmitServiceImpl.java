@@ -126,16 +126,35 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
 
     @Override
     public PriceEstimate estimate(String provider, String model, Integer duration) {
+        return estimate(provider,model,duration,null,null);
+    }
+
+    @Override
+    public Double validateResolution(String provider, String model, String resolution, Double megapixels) {
+        // Model lookup only: duration is not part of this pre-upload check.
+        String resolvedProvider = resolveProvider(provider);
+        VideoEngine engine = videoEngineRegistry.get(resolvedProvider);
+        String effectiveModel = engine.effectiveModel(model);
+        validate(provider, model);
+        var spec = engine.models().stream().filter(s -> s.model().equals(effectiveModel)).findFirst()
+                .orElseThrow(() -> BusinessException.badRequest("模型能力不可用"));
+        return GenerationParameters.resolveMegapixels(spec,resolution,megapixels);
+    }
+
+    @Override
+    public PriceEstimate estimate(String provider, String model, Integer duration, String resolution, Double megapixels) {
         ResolvedSpec spec = resolveSpec(provider, model, duration);
+        Double mp = GenerationParameters.resolveMegapixels(spec.modelSpec(),resolution,megapixels);
         // 探针任务只为复用 price() 的字段口径，不落库、无任何副作用
         VideoTask probe = new VideoTask();
         probe.setProvider(spec.provider());
         probe.setModel(spec.effectiveModel());
         probe.setDuration(spec.duration());
         probe.setOutputType(spec.outputType().name());
+        probe.setMegapixels(mp);
         PricingService.Price price = pricingService.price(probe);
         return new PriceEstimate(spec.provider(), spec.effectiveModel(), spec.duration(),
-                spec.outputType().name(), price.unitPrice(), price.amount(), price.currency());
+                spec.outputType().name(), price.unitPrice(), price.amount(), price.currency(),resolution,mp);
     }
 
     @Override
@@ -180,7 +199,7 @@ public class VideoSubmitServiceImpl implements VideoSubmitService {
             requestedRatio = null;
         }
         GenerationParameters parameters = GenerationParameters.validate(spec.modelSpec(), request.duration(),
-                requestedRatio, request.megapixels(), imageUrls.size() + stored.size(),
+                requestedRatio, request.resolution(), request.megapixels(), imageUrls.size() + stored.size(),
                 videoUrls.size(), audioUrls.size());
         String ratio = parameters.ratio();
         if(!stored.isEmpty()) {

@@ -114,7 +114,8 @@ public class VideoController {
             @RequestParam(value = "nodeId", required = false)
             String nodeId,
             @RequestHeader(value = "Idempotency-Key", required = false)
-            String idempotencyKey
+            String idempotencyKey,
+            @RequestParam(value = "resolution", required = false) String resolution
     ) throws Exception {
         Long userId = UserContext.requireUserId();
         videoSubmitService.validatePinnedNode(provider, nodeId);
@@ -129,6 +130,7 @@ public class VideoController {
         }
         // 闸门在传图副作用之前（提交编排内会再校验一次）
         videoSubmitService.validate(provider, model);
+        Double resolvedMp = videoSubmitService.validateResolution(provider,model,resolution,megapixels);
         // 本地文件上传；历史 URL 白名单校验后按顺序归并（顺序 = <Picture N>）
         List<String> imagePaths = new ArrayList<>();
         if (images != null) {
@@ -144,7 +146,7 @@ public class VideoController {
         List<String> audioPaths = uploadRefFiles(audios, audioUrls, "音频");
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, provider, model, prompt, imagePaths, videoPaths, audioPaths,
-                duration, ratio, megapixels, null, requestId, nodeId));
+                duration, ratio, resolvedMp, null, requestId, nodeId, List.of(), resolution));
         return Result.success(task);
     }
 
@@ -257,8 +259,8 @@ public class VideoController {
                 : request.getRatio();
         VideoTask task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                 userId, request.getProvider(), request.getModel(), prompt,
-                List.of(), List.of(), List.of(), duration, ratio, null, null,
-                requestId, request.getNodeId()));
+                List.of(), List.of(), List.of(), duration, ratio, request.getMegapixels(), null,
+                requestId, request.getNodeId(), List.of(), request.getResolution()));
         return Result.success(task);
     }
 
@@ -362,7 +364,7 @@ public class VideoController {
                 spec.imageMin(), spec.imageMax(), spec.ratios(), durations,
                 spec.outputType().name(), spec.megapixels(),
                 overrides.getOrDefault(spec.model(), defaultOpen),
-                spec.videoMax(), spec.audioMax(), spec.needImageOrVideo()
+                spec.videoMax(), spec.audioMax(), spec.needImageOrVideo(),spec.resolutions(),spec.defaultResolution()
         );
     }
 
@@ -437,12 +439,16 @@ public class VideoController {
     public Result<VideoSubmitService.PriceEstimate> estimate(
             @RequestParam(required = false) String provider,
             @RequestParam(required = false) String model,
-            @RequestParam(required = false) Integer duration) {
+            @RequestParam(required = false) Integer duration,
+            @RequestParam(required = false) String resolution,
+            @RequestParam(required = false) Double megapixels) {
         UserContext.requireUserId();
         if (duration != null && (duration < 1 || duration > 600)) {
             throw new RuntimeException("时长参数不合法");
         }
-        return Result.success(videoSubmitService.estimate(provider, model, duration));
+        return Result.success(resolution==null && megapixels==null
+                ? videoSubmitService.estimate(provider,model,duration)
+                : videoSubmitService.estimate(provider,model,duration,resolution,megapixels));
     }
 
     @GetMapping("/task/{taskId}/eta")

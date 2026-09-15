@@ -40,6 +40,8 @@ public class ModelPricingView {
     private List<Integer> durations;
     /** 支持的分辨率档位（百万像素） */
     private List<Double> megapixels;
+    private List<org.example.seedancegenarate.engine.ModelSpec.ResolutionOption> resolutions;
+    private String defaultResolution;
     /** 最小输入图片数 */
     private Integer imageMin;
     /** 最大输入图片数 */

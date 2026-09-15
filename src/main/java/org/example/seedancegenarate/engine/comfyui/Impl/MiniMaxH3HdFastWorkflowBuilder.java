@@ -22,7 +22,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * MiniMax-H3「高清快速版」全能参考生视频工作流构建器（model = minimaxh3-hd-fast）。
  * 架构特点：
  * 1. 采用 Yusu MiniMax H3 Unified (omni_reference 全模态参考) + fl2v turbo 8-step LoRA 方案；
- * 2. 分辨率固定为 0.9 百万像素 (写死 0.9，前端不暴露选择器)；
+ * 2. 输出固定为 0.5 百万像素，无输出超分；仅声明只读480p近似档位；
  * 3. 运行时注入提示词、随机种子、宽高比、时长（5~15s）以及 media_state 多模态素材映射；
  * 4. 支持参考图 (≤9)、参考视频 (≤3)、参考音频 (≤3)。
  */
@@ -34,7 +34,7 @@ public class MiniMaxH3HdFastWorkflowBuilder implements WorkflowBuilder {
     private static final String TEMPLATE_PATH = "comfyui/workflows/minimaxh3-hd-fast.json";
 
     // —— 模板里的固定节点 id ——
-    private static final String NODE_RES = "115";        // ResolutionSelector（aspect_ratio + megapixels 写死 0.9）
+    private static final String NODE_RES = "115";        // ResolutionSelector（固定 0.5 MP）
     private static final String NODE_SEED = "129";       // RandomNoise
     private static final String NODE_OUTPUT = "189";     // VHS_VideoCombine
     private static final String NODE_UNIFIED = "212";    // MiniMaxH3Unified
@@ -77,10 +77,11 @@ public class MiniMaxH3HdFastWorkflowBuilder implements WorkflowBuilder {
 
     @Override
     public ModelSpec spec() {
-        // megapixels 传 List.of()，前端 /options 下发时不带分辨率档位，不让用户选择
+        // 旧可调MP为空；新能力仅下发一个固定显示档位，不注入MP。
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3 高清快速版",
                 false, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),
-                OutputType.VIDEO, List.of(), VIDEO_MAX, AUDIO_MAX, false);
+                OutputType.VIDEO, List.of(), VIDEO_MAX, AUDIO_MAX, false).withResolutions(List.of(
+                        new ModelSpec.ResolutionOption("480p", null, false)), null);
     }
 
     @Override

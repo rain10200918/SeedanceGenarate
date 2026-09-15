@@ -54,7 +54,7 @@ public class ApiModelController {
                 spec.ratios(), durations, spec.megapixels(),
                 modelAccessService.isOpen(spec.model()),
                 spec.videoMax(), spec.audioMax(), spec.needImageOrVideo(),
-                spec.imageInputMode().name()
+                spec.imageInputMode().name(),spec.resolutions(),spec.defaultResolution()
         );
     }
 }

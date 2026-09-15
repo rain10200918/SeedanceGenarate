@@ -8,6 +8,27 @@ import java.util.List;
 
 /** 新请求的纯能力校验；不读取存储、不修改输入，也不用于重新解释历史任务。 */
 public record GenerationParameters(int duration, String ratio, Double megapixels) {
+    public static Double resolveMegapixels(ModelSpec model, String resolution, Double megapixels) {
+        if (model == null) throw BusinessException.badRequest("模型能力不可用");
+        if (resolution != null) {
+            var option = (model.resolutions()==null ? List.<ModelSpec.ResolutionOption>of() : model.resolutions())
+                    .stream().filter(o -> o.id().equals(resolution)).findFirst()
+                    .orElseThrow(() -> BusinessException.badRequest("清晰度档位不在模型支持范围内"));
+            if (megapixels != null && !java.util.Objects.equals(megapixels, option.megapixels()))
+                throw BusinessException.badRequest("清晰度档位与megapixels冲突");
+            megapixels = option.megapixels();
+        }
+        if (megapixels != null && (!Double.isFinite(megapixels)
+                || model.megapixels()==null || !model.megapixels().contains(megapixels)))
+            throw BusinessException.badRequest("分辨率不在模型支持范围内");
+        return megapixels;
+    }
+
+    public static GenerationParameters validate(ModelSpec model, Integer duration, String ratio,
+                                                 String resolution, Double megapixels,
+                                                 int imageCount, int videoCount, int audioCount) {
+        return validate(model,duration,ratio,resolveMegapixels(model,resolution,megapixels),imageCount,videoCount,audioCount);
+    }
     public static int resolveDuration(ModelSpec model, Integer duration) {
         if (model == null) throw BusinessException.badRequest("模型能力不可用");
         if (model.outputType() == OutputType.IMAGE) {
@@ -39,9 +60,7 @@ public record GenerationParameters(int duration, String ratio, Double megapixels
         } else if (!ratios.contains(ratio)) {
             throw BusinessException.badRequest("画幅不在模型支持范围内");
         }
-        if (megapixels != null && (!Double.isFinite(megapixels)
-                || model.megapixels() == null || !model.megapixels().contains(megapixels)))
-            throw BusinessException.badRequest("分辨率不在模型支持范围内");
+        megapixels = resolveMegapixels(model,null,megapixels);
         int imageMin = Math.max(model.imageMin(), model.needImages() ? 1 : 0);
         if (imageCount < 0 || imageCount < imageMin || imageCount > model.imageMax())
             throw BusinessException.badRequest("参考图片数量不在模型支持范围内");

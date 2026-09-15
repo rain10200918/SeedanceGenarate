@@ -44,6 +44,35 @@ class ApiVideoP0Test {
                 images, List.of(), List.of(), duration, ratio, mp);
     }
 
+    // 【测什么】公开API档位解析在下载/落库前，成功请求把解析MP传给共享提交且原resolution保留复验。
+    // 【怎么算红】漏resolution校验或落回context.megapixels会使400/零副作用/0.9断言变红。
+    @Test void resolutionValidationAndSubmissionUseDeclaredMapping() throws Exception {
+        var spec=new ModelSpec("test","model","HD",false,0,16,List.of("16:9"),5,10,List.of(5,8,10),
+                OutputType.VIDEO,List.of(0.2,0.5,0.9),2,2,false)
+                .withResolutions(List.of(new ModelSpec.ResolutionOption("2k",0.9,true)),0.2);
+        when(engine.models()).thenReturn(List.of(spec));
+        for (String tier:List.of("4k"," ","2K")) {
+            var input=new ApiVideoService.CreateContext(key,"resolution-bad","ip","ua","p","model",
+                    List.of(URL),List.of(),List.of(),8,"16:9",null,tier);
+            assertEquals(400,assertThrows(ApiException.class,()->api.create(input)).getHttpStatus().value());
+        }
+        var conflict=new ApiVideoService.CreateContext(key,"resolution-conflict","ip","ua","p","model",
+                List.of(URL),List.of(),List.of(),8,"16:9",0.5,"2k");
+        assertEquals(400,assertThrows(ApiException.class,()->api.create(conflict)).getHttpStatus().value());
+        verify(api,never()).openReferenceConnection(any());verifyNoInteractions(storage);
+        verify(logs,never()).insert(any(ApiCallLog.class));verify(submit,never()).submit(any());
+        var task=new VideoTask();task.setId(22L);task.setBizTaskId("tier-task");task.setStatus("PROCESSING");
+        when(submit.submit(any())).thenReturn(task);
+        when(logs.linkTaskByRequestId(any(),any(),anyString(),anyString(),any())).thenReturn(1);
+        api.create(new ApiVideoService.CreateContext(key,"resolution-ok","ip","ua","p","model",
+                List.of(),List.of(),List.of(),8,"16:9",null,"2k"));
+        var captured=org.mockito.ArgumentCaptor.forClass(VideoSubmitService.SubmitRequest.class);
+        verify(submit).submit(captured.capture());assertEquals(0.9,captured.getValue().megapixels());
+        assertEquals("2k",captured.getValue().resolution());
+        var logged=org.mockito.ArgumentCaptor.forClass(ApiCallLog.class);verify(logs).insert(logged.capture());
+        assertEquals(0.9,logged.getValue().getMegapixels());
+    }
+
     private HttpURLConnection connection(long length, InputStream stream) throws Exception {
         var connection = mock(HttpURLConnection.class);
         when(connection.getResponseCode()).thenReturn(200);

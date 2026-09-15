@@ -92,7 +92,7 @@ public class ApiVideoController {
                 key, requestId, IpUtils.getClientIp(servletRequest),
                 servletRequest.getHeader("User-Agent"),
                 request.prompt().trim(), request.model(), request.images(), request.videos(), request.audios(),
-                request.duration(), request.ratio(), request.megapixels()));
+                request.duration(), request.ratio(), request.megapixels(), request.resolution()));
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(new ApiVideoCreateResponse(task.businessTaskId(), task.getStatus(), requestId));
     }

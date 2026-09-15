@@ -53,7 +53,7 @@ public class PublicModelPricingServiceImpl implements PublicModelPricingService 
                 if (StringUtils.hasText(cached)) {
                     List<ModelPricingView> cachedList = objectMapper.readValue(cached, new TypeReference<List<ModelPricingView>>() {});
                     log.info("命中 Redis 模型定价缓存: key={}, 模型数量={}", CACHE_KEY, cachedList != null ? cachedList.size() : 0);
-                    return cachedList;
+                    return attachResolutions(cachedList);
                 }
                 log.info("未命中 Redis 模型定价缓存 (Cache Miss)，将执行实时计算并回填: key={}", CACHE_KEY);
             } catch (Exception e) {
@@ -67,7 +67,10 @@ public class PublicModelPricingServiceImpl implements PublicModelPricingService 
         // 普通用户查询结果回填 Redis（TTL 24 小时，等待下一次管理员修改或过期）
         if (!includeClosed) {
             try {
-                String json = objectMapper.writeValueAsString(list);
+                var payload = objectMapper.valueToTree(list);
+                payload.forEach(row -> ((com.fasterxml.jackson.databind.node.ObjectNode) row)
+                        .remove(List.of("resolutions","defaultResolution")));
+                String json = objectMapper.writeValueAsString(payload);
                 redisTemplate.opsForValue().set(CACHE_KEY, json, 24, TimeUnit.HOURS);
                 log.info("已生成并写入 Redis 模型定价缓存: key={}, count={}", CACHE_KEY, list.size());
             } catch (Exception e) {
@@ -75,7 +78,20 @@ public class PublicModelPricingServiceImpl implements PublicModelPricingService 
             }
         }
 
-        return list;
+        return attachResolutions(list);
+    }
+
+    /** 缓存保持旧 payload 形状，能力每次由本实例声明装配，兼容旧缓存和滚动发布。 */
+    private List<ModelPricingView> attachResolutions(List<ModelPricingView> views) {
+        if (views == null) return List.of();
+        var specs = videoEngineRegistry.all().stream().flatMap(e -> e.models().stream())
+                .collect(java.util.stream.Collectors.toMap(s -> s.provider()+":"+s.model(),s -> s));
+        for (var view : views) {
+            var spec = specs.get(view.getProvider()+":"+view.getModel());
+            view.setResolutions(spec==null ? List.of() : spec.resolutions());
+            view.setDefaultResolution(spec==null ? null : spec.defaultResolution());
+        }
+        return views;
     }
 
     @Override
@@ -183,7 +199,7 @@ public class PublicModelPricingServiceImpl implements PublicModelPricingService 
             return "超极速图像生成引擎，毫秒级即时出图。";
         }
         if ("minimax-h3-hd".equals(spec.model()) || "minimax-h3-fl2va-hd".equals(spec.model())) {
-            return "MiniMax 4K 影视级超清视频生成，具备极高动态一致性与逼真光影质感。";
+            return "MiniMax 高清视频生成，清晰度档位以模型能力为准。";
         }
         if (spec.model().contains("minimax")) {
             return "MiniMax 领先级视频大模型，运动幅度自然饱满，语义遵循度优异。";

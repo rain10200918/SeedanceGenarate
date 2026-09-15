@@ -25,6 +25,10 @@ public interface VideoSubmitService {
      */
     PriceEstimate estimate(String provider, String model, Integer duration);
 
+    PriceEstimate estimate(String provider, String model, Integer duration, String resolution, Double megapixels);
+
+    Double validateResolution(String provider, String model, String resolution, Double megapixels);
+
     /** 估价结果：{@code amount} 即提交后将冻结的金额（与 VideoTask.freezeAmount 同一计价入口） */
     record PriceEstimate(
             String provider,
@@ -33,7 +37,11 @@ public interface VideoSubmitService {
             String outputType,
             BigDecimal unitPrice,
             BigDecimal amount,
-            String currency) {
+            String currency, String resolution, Double megapixels) {
+        public PriceEstimate(String provider,String model,Integer duration,String outputType,
+                             BigDecimal unitPrice,BigDecimal amount,String currency) {
+            this(provider,model,duration,outputType,unitPrice,amount,currency,null,null);
+        }
     }
 
     /** 查询当前用户指定幂等键对应的任务；用于在上传参考素材前短路重复 UI 请求。 */
@@ -67,8 +75,16 @@ public interface VideoSubmitService {
             Long apiKeyId,
             String requestId,
             String nodeId,
-            List<StoredImageReferences.Reference> storedImageReferences
+            List<StoredImageReferences.Reference> storedImageReferences,
+            String resolution
     ) {
+        public SubmitRequest(Long userId,String provider,String model,String prompt,List<String> imageUrls,
+                             List<String> videoUrls,List<String> audioUrls,Integer duration,String ratio,
+                             Double megapixels,Long apiKeyId,String requestId,String nodeId,
+                             List<StoredImageReferences.Reference> storedImageReferences) {
+            this(userId,provider,model,prompt,imageUrls,videoUrls,audioUrls,duration,ratio,megapixels,
+                    apiKeyId,requestId,nodeId,storedImageReferences,null);
+        }
         public SubmitRequest(Long userId,String provider,String model,String prompt,List<String> imageUrls,
                              List<String> videoUrls,List<String> audioUrls,Integer duration,String ratio,
                              Double megapixels,Long apiKeyId,String requestId,String nodeId) {

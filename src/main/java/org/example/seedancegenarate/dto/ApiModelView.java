@@ -21,8 +21,16 @@ public record ApiModelView(
         int videoMax,
         int audioMax,
         boolean needImageOrVideo,
-        String imageInputMode
+        String imageInputMode,
+        List<org.example.seedancegenarate.engine.ModelSpec.ResolutionOption> resolutions,
+        String defaultResolution
 ) {
+    public ApiModelView(String model,String label,String provider,String outputType,boolean needImages,
+                        int imageMin,int imageMax,List<String> ratios,List<Integer> durations,List<Double> megapixels,
+                        boolean open,int videoMax,int audioMax,boolean needImageOrVideo,String imageInputMode) {
+        this(model,label,provider,outputType,needImages,imageMin,imageMax,ratios,durations,megapixels,open,
+                videoMax,audioMax,needImageOrVideo,imageInputMode,List.of(),null);
+    }
     /** 保留原 Java 调用方；未声明的图片角色与 ModelSpec 兼容构造器一致。 */
     public ApiModelView(String model, String label, String provider, String outputType,
                         boolean needImages, int imageMin, int imageMax, List<String> ratios,

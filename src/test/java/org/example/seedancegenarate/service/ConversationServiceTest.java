@@ -131,6 +131,22 @@ class ConversationServiceTest {
         verify(conversations).setAutoTitle(CONV, "一只橘猫");
     }
 
+    // 【测什么】Chat档位错误上传、LLM、消息写入前返回400；成功解析仅MP进入生成快照。
+    // 【怎么算红】把校验挪到media.resolve之后或提交仍用gen.megapixels，零调用/MP断言变红。
+    @Test void resolutionIsCheckedBeforeMediaAndOnlyMpIsPersisted() throws Exception {
+        var generation=new SendMessageRequest.Generation("comfyui","hd","16:9",8,null,"2k");
+        var request=new SendMessageRequest("tier-chat","prompt",List.of(),"DIRECT",generation);
+        when(submitService.validateResolution("comfyui","hd","2k",null)).thenThrow(BusinessException.badRequest("bad tier"));
+        assertEquals(400,assertThrows(BusinessException.class,()->service.send(USER,CONV,request)).getCode());
+        org.mockito.Mockito.verifyNoInteractions(media,optimizer);
+        verify(messages,never()).insert(any(ConversationMessage.class));
+        org.mockito.Mockito.doReturn(0.9).when(submitService).validateResolution("comfyui","hd","2k",null);
+        service.send(USER,CONV,request);
+        var capture=ArgumentCaptor.forClass(VideoSubmitService.SubmitRequest.class);
+        verify(submitService).submit(capture.capture()); assertEquals(0.9,capture.getValue().megapixels());
+        assertFalse(inserted.stream().filter(m -> m.getGenParams()!=null).findFirst().orElseThrow().getGenParams().contains("resolution"));
+    }
+
     @Test
     void directTurnSkipsTheAgentAndReservesTwoSlots() throws Exception {
         // 【测什么】直出模式不调 LLM、不占 Agent 限流桶，只有两条气泡，提交原话

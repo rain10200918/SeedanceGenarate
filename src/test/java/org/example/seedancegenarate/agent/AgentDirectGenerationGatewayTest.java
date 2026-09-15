@@ -42,6 +42,26 @@ class AgentDirectGenerationGatewayTest {
     com.fasterxml.jackson.databind.JsonNode input(String model,int duration) { return json.createObjectNode().put("provider","comfyui").put("model",model).put("prompt","创作内容").put("duration",duration); }
     UserAsset asset(long owner,String url,String type) { var a=new UserAsset();a.setId(8L);a.setUserId(owner);a.setUrl(url);a.setType(type);a.setStatus("ACTIVE");return a; }
 
+    // 【测什么】DIRECT新档位在上传前校验，批准快照只含MP，重新报价不改变旧快照形状。
+    // 【怎么算红】保留resolution进snapshot、丢MP或在上传后校验时字段/零调用断言失败。
+    @Test void resolutionIsCleanedBeforeApprovalAndNeverLeaksIntoSnapshot() {
+        var spec=new ModelSpec("comfyui","video","Video",false,0,2,List.of("16:9"),5,10,List.of(5,10),
+                OutputType.VIDEO,List.of(0.2,0.5,0.9)).withResolutions(List.of(new ModelSpec.ResolutionOption("2k",0.9,true)),0.2);
+        when(engine.models()).thenReturn(List.of(spec));
+        var input=(com.fasterxml.jackson.databind.node.ObjectNode)input("video",5);
+        input.put("resolution","4k");
+        assertEquals(400,assertThrows(BusinessException.class,()->gateway.prepareDirect(7,"VIDEO",input,List.of(),null)).getCode());
+        verifyNoInteractions(media);
+        input.put("resolution","2k");
+        var quote=gateway.prepareDirect(7,"VIDEO",input,List.of(),null);
+        assertFalse(quote.inputSnapshot().has("resolution"));
+        assertEquals(0.9,quote.inputSnapshot().path("megapixels").doubleValue());
+        assertEquals(quote,gateway.requote(7,"VIDEO",quote.inputSnapshot()));
+        assertEquals("2k",input.path("resolution").asText());
+        input.put("megapixels",0.5);
+        assertEquals(400,assertThrows(BusinessException.class,()->gateway.prepareDirect(7,"VIDEO",input,List.of(),null)).getCode());
+    }
+
     // 【测什么】DIRECT允许开放音乐模型300秒，不把Agent纯文本120秒上限或画幅强加到音频。
     // 【怎么算红】音乐被过滤或硬限120秒时quote抛错，origin/规范参数断言失败。
     @Test void musicUsesActualCapabilitiesAndSamePricing() throws Exception {

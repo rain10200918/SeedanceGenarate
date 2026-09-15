@@ -31,8 +31,30 @@ public record ModelSpec(
         int videoMax,
         int audioMax,
         boolean needImageOrVideo,
-        ImageInputMode imageInputMode
+        ImageInputMode imageInputMode,
+        List<ResolutionOption> resolutions,
+        String defaultResolution
 ) {
+    /** 近似总像素档位；null MP 表示工作流固定尺寸，不注入可调参数。 */
+    public record ResolutionOption(String id, Double megapixels, boolean upscaled) {}
+
+    public ModelSpec(String provider,String model,String label,boolean needImages,int imageMin,int imageMax,
+                     List<String> ratios,int durationMin,int durationMax,List<Integer> durations,OutputType outputType,
+                     List<Double> megapixels,int videoMax,int audioMax,boolean needImageOrVideo,ImageInputMode mode) {
+        this(provider,model,label,needImages,imageMin,imageMax,ratios,durationMin,durationMax,durations,outputType,
+                megapixels,videoMax,audioMax,needImageOrVideo,mode,List.of(),null);
+    }
+
+    /** 仅由核对过输出路径的 builder 显式声明；与已有合法 MP 取交集。 */
+    public ModelSpec withResolutions(List<ResolutionOption> options, Double previousDefaultMp) {
+        var supported = options.stream().filter(o -> o.megapixels()==null
+                || megapixels!=null && megapixels.contains(o.megapixels())).toList();
+        String preferred = supported.stream().min(java.util.Comparator.comparingDouble(o ->
+                o.megapixels()==null || previousDefaultMp==null ? 0 : Math.abs(o.megapixels()-previousDefaultMp)))
+                .map(ResolutionOption::id).orElse(null);
+        return new ModelSpec(provider,model,label,needImages,imageMin,imageMax,ratios,durationMin,durationMax,
+                durations,outputType,megapixels,videoMax,audioMax,needImageOrVideo,imageInputMode,supported,preferred);
+    }
     public enum ImageInputMode { NONE, UNSPECIFIED, REFERENCE_IMAGE, FIRST_FRAME, FIRST_LAST_FRAME }
     public ModelSpec(String provider,String model,String label,boolean needImages,int imageMin,int imageMax,
                      List<String> ratios,int durationMin,int durationMax,List<Integer> durations,OutputType outputType,
@@ -42,7 +64,7 @@ public record ModelSpec(
     }
     public ModelSpec withImageInputMode(ImageInputMode mode) {
         return new ModelSpec(provider,model,label,needImages,imageMin,imageMax,ratios,durationMin,durationMax,
-                durations,outputType,megapixels,videoMax,audioMax,needImageOrVideo,mode);
+                durations,outputType,megapixels,videoMax,audioMax,needImageOrVideo,mode,resolutions,defaultResolution);
     }
     /** 兼容：不指定 outputType（默认视频）、不支持分辨率选择（megapixels 空）、不支持视频/音频参考。 */
     public ModelSpec(String provider, String model, String label, boolean needImages,

@@ -88,7 +88,10 @@ public class MiniMaxH3Fl2vaHdWorkflowBuilder implements WorkflowBuilder {
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3 首尾帧生视频 高清版",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),
-                OutputType.VIDEO, MEGAPIXELS).withImageInputMode(ModelSpec.ImageInputMode.FIRST_LAST_FRAME);
+                OutputType.VIDEO, MEGAPIXELS).withImageInputMode(ModelSpec.ImageInputMode.FIRST_LAST_FRAME).withResolutions(List.of(
+                        new ModelSpec.ResolutionOption("720p", 0.2, true),
+                        new ModelSpec.ResolutionOption("1080p", 0.5, true),
+                        new ModelSpec.ResolutionOption("2k", 0.9, true)), DEFAULT_MEGAPIXELS);
     }
 
     @Override

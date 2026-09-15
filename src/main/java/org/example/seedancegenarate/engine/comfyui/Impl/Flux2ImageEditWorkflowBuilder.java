@@ -98,7 +98,10 @@ public class Flux2ImageEditWorkflowBuilder implements WorkflowBuilder {
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "Flux 2.0 图像编辑",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, 0, 0, List.of(),
-                OutputType.IMAGE, MEGAPIXELS);
+                OutputType.IMAGE, MEGAPIXELS).withResolutions(List.of(
+                        new ModelSpec.ResolutionOption("480p", 0.5, false),
+                        new ModelSpec.ResolutionOption("720p", 1.0, false),
+                        new ModelSpec.ResolutionOption("1080p", 2.0, false)), DEFAULT_MEGAPIXELS);
     }
 
     @Override

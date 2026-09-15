@@ -58,7 +58,8 @@ class PublicModelPricingServiceTest {
         assertThat(result).hasSize(1);
         assertThat(result.get(0).getModel()).isEqualTo("test-model");
         assertThat(result.get(0).getPointsPerUnit()).isEqualTo(20L);
-        verify(registry, never()).all();
+        verify(registry).all(); // 能力按本实例声明装配；价格仍走缓存。
+        verifyNoInteractions(pricingService);
     }
 
     @Test
@@ -96,5 +97,28 @@ class PublicModelPricingServiceTest {
     void clearCacheDeletesRedisKey() {
         service.clearCache();
         verify(redisTemplate).delete(PublicModelPricingServiceImpl.CACHE_KEY);
+    }
+
+    // 【测什么】24小时旧缓存也带当前档位；新实例写回仍为旧形状，旧实例可反序列化。
+    // 【怎么算红】直接返回旧缓存或把新能力写入共享payload时断言失败。
+    @Test void enrichesOldCacheAndKeepsWrittenPayloadCompatible() throws Exception {
+        var spec=new org.example.seedancegenarate.engine.comfyui.Impl.Flux2ImageEditWorkflowBuilder(objectMapper).spec();
+        var engine=mock(VideoEngine.class);
+        when(engine.models()).thenReturn(List.of(spec)); when(engine.provider()).thenReturn("comfyui");
+        when(registry.all()).thenReturn(List.of(engine));
+        when(valueOperations.get(PublicModelPricingServiceImpl.CACHE_KEY))
+                .thenReturn("[{\"provider\":\"comfyui\",\"model\":\"flux2-image-edit\",\"pointsPerUnit\":20}]");
+        var cached=service.getPublicModels(false).get(0);
+        assertThat(cached.getResolutions()).hasSize(3); assertThat(cached.getDefaultResolution()).isEqualTo("720p");
+        assertThat(cached.getPointsPerUnit()).isEqualTo(20L); verifyNoInteractions(pricingService);
+        when(valueOperations.get(PublicModelPricingServiceImpl.CACHE_KEY)).thenReturn(null);
+        when(modelAccessService.defaultOpen()).thenReturn(true); when(modelAccessService.currentOverrides()).thenReturn(Map.of());
+        when(pricingService.getModelPriceInfo(any(),any(),any())).thenReturn(
+                new PricingService.ModelPriceInfo(BigDecimal.ONE,"FLAT",100L,"CNY","100"));
+        assertThat(service.getPublicModels(false).get(0).getResolutions()).hasSize(3);
+        var capture=org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(valueOperations).set(eq(PublicModelPricingServiceImpl.CACHE_KEY),capture.capture(),eq(24L),eq(TimeUnit.HOURS));
+        var row=objectMapper.readTree(capture.getValue()).get(0);
+        assertThat(row.has("resolutions")).isFalse(); assertThat(row.has("defaultResolution")).isFalse();
     }
 }

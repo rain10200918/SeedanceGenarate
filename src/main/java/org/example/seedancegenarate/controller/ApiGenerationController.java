@@ -23,9 +23,11 @@ public class ApiGenerationController {
         if (request == null) {
             throw ApiException.validation("请求体不能为空");
         }
-        VideoSubmitService.PriceEstimate quote = apiVideoService.quote(request.model(), request.duration());
+        VideoSubmitService.PriceEstimate quote = request.resolution()==null && request.megapixels()==null
+                ? apiVideoService.quote(request.model(), request.duration())
+                : apiVideoService.quote(request.model(), request.duration(),request.resolution(),request.megapixels());
         return new ApiGenerationQuoteResponse(
                 quote.provider(), quote.model(), quote.duration(), quote.outputType(),
-                quote.unitPrice(), quote.amount(), quote.currency());
+                quote.unitPrice(), quote.amount(), quote.currency(),quote.resolution(),quote.megapixels());
     }
 }

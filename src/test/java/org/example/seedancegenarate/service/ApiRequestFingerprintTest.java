@@ -6,6 +6,17 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ApiRequestFingerprintTest {
+    // 【测什么】旧无resolution请求指纹逐字节兼容，新档位参与原始请求身份。
+    // 【怎么算红】无条件改v1版本/加null字段或漏新resolution字段，固定hash/不等断言失败。
+    @Test void legacyGoldenHashStaysUnchangedAndNewTierIsBound() {
+        var old=request("p","model",List.of(),List.of(),List.of(),8,"16:9",0.3);
+        assertEquals("e0195cd8cca615582acdb7ea9b134b52160fbb78b84244392012939fcf5f8e0d",hash(old));
+        var tier=new ApiVideoService.CreateContext(new ApiKey(),"key","ip","ua","p","model",
+                List.of(),List.of(),List.of(),8,"16:9",0.3,"720p");
+        var other=new ApiVideoService.CreateContext(new ApiKey(),"key","ip","ua","p","model",
+                List.of(),List.of(),List.of(),8,"16:9",0.3,"1080p");
+        assertNotEquals(hash(old),hash(tier));assertNotEquals(hash(tier),hash(other));
+    }
     private ApiVideoService.CreateContext request(String prompt, String model, List<String> images,
             List<String> videos, List<String> audios, Integer duration, String ratio, Double megapixels) {
         return new ApiVideoService.CreateContext(new ApiKey(), "key", "ip", "ua", prompt, model,

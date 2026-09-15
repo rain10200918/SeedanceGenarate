@@ -56,13 +56,20 @@ public class ApiVideoServiceImpl implements ApiVideoService {
 
     @Override
     public VideoSubmitService.PriceEstimate quote(String model, Integer duration) {
+        return quote(model,duration,null,null);
+    }
+
+    @Override
+    public VideoSubmitService.PriceEstimate quote(String model, Integer duration, String resolution, Double megapixels) {
         if (duration != null && (duration < 1 || duration > 600)) {
             throw ApiException.validation("duration 必须在 1 到 600 之间");
         }
         String normalizedModel = normalizeModel(model);
         VideoEngine engine = resolveEngineForModel(normalizedModel);
         try {
-            return videoSubmitService.estimate(engine.provider(), normalizedModel, duration);
+            return resolution==null && megapixels==null
+                    ? videoSubmitService.estimate(engine.provider(), normalizedModel, duration)
+                    : videoSubmitService.estimate(engine.provider(), normalizedModel, duration, resolution, megapixels);
         } catch (Exception e) {
             throw toApiException(e, normalizedModel);
         }
@@ -113,7 +120,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             var modelSpec = engine.models().stream().filter(s -> s.model().equals(model)).findFirst()
                     .orElseThrow(() -> ApiException.modelNotFound(model));
             parameters = GenerationParameters.validate(modelSpec, context.duration(), context.ratio(),
-                    context.megapixels(), size(context.imageUrls()), size(context.videoUrls()), size(context.audioUrls()));
+                    context.resolution(), context.megapixels(), size(context.imageUrls()), size(context.videoUrls()), size(context.audioUrls()));
         } catch (Exception e) {
             throw toApiException(e, context.model());
         }
@@ -135,6 +142,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
             callLog.setRequestFingerprint(fingerprint);
             callLog.setDuration(parameters.duration());
             callLog.setRatio(parameters.ratio());
+            callLog.setMegapixels(parameters.megapixels());
             try {
                 apiCallLogMapper.insert(callLog);
             } catch (DuplicateKeyException e) {
@@ -159,7 +167,7 @@ public class ApiVideoServiceImpl implements ApiVideoService {
                 task = videoSubmitService.submit(new VideoSubmitService.SubmitRequest(
                         context.apiKey().getUserId(), engine.provider(), model, context.prompt().trim(),
                         imageUrls, videoUrls, audioUrls, parameters.duration(), parameters.ratio(), parameters.megapixels(),
-                        context.apiKey().getId(), "api:" + context.requestId(), null));
+                        context.apiKey().getId(), "api:" + context.requestId(), null, List.of(), context.resolution()));
                 accepted = true;
             } catch (Exception e) {
                 // 记录原始堆栈（错误码映射会丢失它）

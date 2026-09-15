@@ -18,6 +18,10 @@ public record SendMessageRequest(
     public record Attachment(String type, String url) {
     }
 
-    public record Generation(String provider, String model, String ratio, Integer duration, Double megapixels) {
+    public record Generation(String provider, String model, String ratio, Integer duration, Double megapixels,
+                             String resolution) {
+        public Generation(String provider,String model,String ratio,Integer duration,Double megapixels) {
+            this(provider,model,ratio,duration,megapixels,null);
+        }
     }
 }

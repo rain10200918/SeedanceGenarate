@@ -68,7 +68,8 @@ public class MiniMaxH3TextToVideoWorkflowBuilder implements WorkflowBuilder {
 @Override
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3 文生视频",
-                false, 0, 0, RATIOS, DURATION_MIN, DURATION_MAX, List.of());
+                false, 0, 0, RATIOS, DURATION_MIN, DURATION_MAX, List.of())
+                .withResolutions(List.of(new ModelSpec.ResolutionOption("480p",null,false)),null);
     }
 
     @Override

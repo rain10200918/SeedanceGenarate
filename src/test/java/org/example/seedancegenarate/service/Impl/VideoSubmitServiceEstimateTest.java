@@ -105,6 +105,44 @@ class VideoSubmitServiceEstimateTest {
         UserContext.clear();
     }
 
+    // 【测什么】2K报价与提交落库、计价探针同为0.9MP，金额仍透传旧费率。
+    // 【怎么算红】仅报价解析、提交丢resolution，或用MP乘金额时本测试失败。
+    @Test void resolutionQuoteAndTaskUseSameMpAndExistingPrice() throws Exception {
+        var spec = new org.example.seedancegenarate.engine.comfyui.Impl.MiniMaxH3T2vHdWorkflowBuilder(new ObjectMapper()).spec();
+        when(registry.get("comfyui")).thenReturn(engine);
+        when(engine.effectiveModel(spec.model())).thenReturn(spec.model());
+        when(engine.models()).thenReturn(java.util.List.of(spec));
+        when(modelAccessService.isOpen(spec.model())).thenReturn(true);
+        org.mockito.Mockito.doAnswer(i -> { ((VideoTask)i.getArgument(0)).setId(73L); return true; })
+                .when(videoTaskService).save(any(VideoTask.class));
+        var attempt = new GenerationAttempt(); attempt.setId(83L);
+        when(attemptService.stageCurrentAttempt(any(),org.mockito.ArgumentMatchers.eq(1),any())).thenReturn(attempt);
+        var quote = service.estimate("comfyui",spec.model(),8,"2k",null);
+        var task = service.submit(new VideoSubmitService.SubmitRequest(null,"comfyui",spec.model(),"prompt",
+                java.util.List.of(),java.util.List.of(),java.util.List.of(),8,"16:9",null,null,"tier-new",null,
+                java.util.List.of(),"2k"));
+        assertEquals("2k",quote.resolution()); assertEquals(0.9,quote.megapixels());
+        assertEquals(quote.megapixels(),task.getMegapixels());
+        assertEquals(new BigDecimal("1.60"),quote.amount()); assertEquals(quote.amount(),task.getFreezeAmount());
+        var capture=ArgumentCaptor.forClass(VideoTask.class);
+        verify(pricingService,org.mockito.Mockito.times(2)).price(capture.capture());
+        assertTrue(capture.getAllValues().stream().allMatch(t -> Double.valueOf(0.9).equals(t.getMegapixels())));
+        verify(engine,never()).submit(any());
+    }
+
+    // 【测什么】新请求非法档位在计价、任务落库和作业副作用之前400。
+    // 【怎么算红】移除estimate或submit的resolution校验会访问pricing或返回非400。
+    @Test void unsupportedTierFailsBeforePricingOrPersistence() {
+        assertEquals(400,assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                () -> service.estimate("seedance","seedance-v1-pro",8,"4k",null)).getCode());
+        assertEquals(400,assertThrows(org.example.seedancegenarate.exception.BusinessException.class,
+                () -> service.submit(new VideoSubmitService.SubmitRequest(null,"seedance","seedance-v1-pro","p",
+                        java.util.List.of(),java.util.List.of(),java.util.List.of(),8,"16:9",null,null,"invalid",null,
+                        java.util.List.of(),"4k"))).getCode());
+        verify(pricingService,never()).price(any()); verify(videoTaskService,never()).save(any(VideoTask.class));
+        org.mockito.Mockito.verifyNoInteractions(asyncJobService);
+    }
+
     @Test
     void defaultsMatchSubmitSemantics() {
         // 测什么：不传 provider/model/duration → 默认提供方 + effectiveModel + duration 默认 8，

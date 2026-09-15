@@ -84,7 +84,10 @@ public class MiniMaxH3AccelWorkflowBuilder implements WorkflowBuilder {
     public ModelSpec spec() {
         return new ModelSpec("comfyui", MODEL, "MiniMax-H3参考生视频 官方加速",
                 true, IMAGE_MIN, IMAGE_MAX, RATIOS, DURATION_MIN, DURATION_MAX, List.of(),
-                OutputType.VIDEO, MEGAPIXELS);
+                OutputType.VIDEO, MEGAPIXELS).withResolutions(List.of(
+                        new ModelSpec.ResolutionOption("480p", 0.4, false),
+                        new ModelSpec.ResolutionOption("720p", 0.9, false),
+                        new ModelSpec.ResolutionOption("1080p", 2.0, false)), DEFAULT_MEGAPIXELS);
     }
 
     @Override

@@ -65,7 +65,7 @@ Content-Type: application/json
 curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/generations/quote \
   -H "Authorization: Bearer sk-xxxxxxxx" \
   -H "Content-Type: application/json" \
-  -d '{"model":"minimax-h3-t2v-hd","duration":6}'
+  -d '{"model":"minimax-h3-t2v-hd","duration":6,"resolution":"2k"}'
 ```
 
 ```json
@@ -76,12 +76,17 @@ curl -X POST https://api-generate.creator.ascent-ai.cn/api/v1/generations/quote 
   "outputType": "VIDEO",
   "unitPrice": 0.30,
   "amount": 1.80,
-  "currency": "CNY"
+  "currency": "CNY",
+  "resolution": "2k",
+  "megapixels": 0.9
 }
 ```
 
 `amount` 与紧接着提交同样参数时的冻结金额使用同一计价链路。报价本身不创建任务、
 不写调用日志、不冻结余额。价格可能由管理员调整，应在提交前实时调用。
+
+报价可选字段 `resolution`、`megapixels` 与提交使用相同校验及映射；当前费用仍按模型/时长计算，
+不按 MP 加价。未传 `resolution` 时响应该字段为 null，未传两个字段时保持旧工作流默认，响应 MP 为 null。
 
 ### 4.2 上传本地参考图
 
@@ -177,6 +182,12 @@ POST /api/v1/videos
 | `duration` | int | 否 | 必须命中模型公布的时长；省略时优先合法的 8 秒，否则首个合法时长；图片无时长，仅兼容历史占位 1/8（内部统一为 8），建议省略 |
 | `ratio` | string | 否 | 必须命中模型比例；省略时优先 `16:9`，否则首项；无画幅能力的模型请省略 |
 | `megapixels` | number | 否 | 必须是模型公布的有限数值档位，不是连续区间；不提供档位的模型请省略 |
+| `resolution` | string | 否 | 精确小写 `480p` / `720p` / `1080p` / `2k` / `4k`，仅可使用模型 `resolutions` 中的 ID |
+
+新调用方选择档位后推荐只传 `resolution`；同时传 `megapixels` 时必须等于模型公布的映射值，否则返回400。
+固定档位的映射 MP 为 null，此时省略 `megapixels`，由原固定工作流执行。
+空白、未知或模型不支持的档位均在参考素材下载及任务创建前拒绝；省略新字段保持旧 MP/default 语义。
+同一 Idempotency-Key 的原请求重放不重新解释历史任务；改变请求内容仍按既有规则返回409。
 
 > **没有 `mode` 字段。** 生成模式由「所选模型的能力 + 是否传了 `images` / `videos` / `audios`」共同决定：
 > 文生类模型不传图，参考生成类模型按模型要求的张数传图（`minimax-h3-fl2va-hd` 传 2 张，
@@ -394,6 +405,14 @@ GET /api/v1/models
 `needImageOrVideo`（至少一张图或一段视频，只有音频不满足）及 `imageInputMode`：
 `NONE` / `UNSPECIFIED` / `REFERENCE_IMAGE` / `FIRST_FRAME` / `FIRST_LAST_FRAME`。
 首尾帧模式仍按 `images` 顺序传首帧、尾帧。
+
+清晰度能力新增 `resolutions: [{"id":"2k","megapixels":0.9,"upscaled":true}]` 与
+`defaultResolution: string|null`。前者仅列出该模型支持的档位，未知能力为空数组；单个固定档位的
+`megapixels` 为 null。`upscaled` 表示实际输出链经过超分，不能根据模型名字推断。
+`defaultResolution` 供新界面初始选择，不改变省略字段的旧请求默认。
+2K 指约2560×1440级别；档位按总像素量近似映射，其他画幅不保证精确短边尺寸。
+HD 模型720p/1080p/2k分别映射输入0.2/0.5/0.9 MP；缺少4K能力时不会下发4k。
+Flux2 的480p/720p/1080p分别映射0.5/1.0/2.0 MP。完整可选项以模型实时响应为准。
 
 ## 8. 错误响应码
 

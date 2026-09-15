@@ -10,6 +10,12 @@ public record ApiGenerationQuoteResponse(
         String outputType,
         BigDecimal unitPrice,
         BigDecimal amount,
-        String currency
+        String currency,
+        String resolution,
+        Double megapixels
 ) {
+    public ApiGenerationQuoteResponse(String provider,String model,Integer duration,String outputType,
+                                      BigDecimal unitPrice,BigDecimal amount,String currency) {
+        this(provider,model,duration,outputType,unitPrice,amount,currency,null,null);
+    }
 }

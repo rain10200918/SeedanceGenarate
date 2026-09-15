@@ -31,7 +31,15 @@ public record VideoOptionsResponse(
             boolean open,
             int videoMax,
             int audioMax,
-            boolean needImageOrVideo
+            boolean needImageOrVideo,
+            List<org.example.seedancegenarate.engine.ModelSpec.ResolutionOption> resolutions,
+            String defaultResolution
     ) {
+        public ModelOption(String model,String label,boolean needImages,int imageMin,int imageMax,
+                           List<String> ratios,List<Integer> durations,String outputType,List<Double> megapixels,
+                           boolean open,int videoMax,int audioMax,boolean needImageOrVideo) {
+            this(model,label,needImages,imageMin,imageMax,ratios,durations,outputType,megapixels,open,
+                    videoMax,audioMax,needImageOrVideo,List.of(),null);
+        }
     }
 }

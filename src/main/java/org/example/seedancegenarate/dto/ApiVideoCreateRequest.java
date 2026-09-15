@@ -17,8 +17,13 @@ public record ApiVideoCreateRequest(
         List<String> audios,
         Integer duration,
         String ratio,
-        Double megapixels
+        Double megapixels,
+        String resolution
 ) {
+    public ApiVideoCreateRequest(String prompt,String model,List<String> images,List<String> videos,
+                                 List<String> audios,Integer duration,String ratio,Double megapixels) {
+        this(prompt,model,images,videos,audios,duration,ratio,megapixels,null);
+    }
     /** 兼容 Java 调用方原有的图片生成构造器；JSON 请求使用完整字段。 */
     public ApiVideoCreateRequest(String prompt, String model, List<String> images,
                                  Integer duration, String ratio, Double megapixels) {
